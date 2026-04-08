@@ -28,6 +28,15 @@ enum Cmd {
         #[arg(long, default_value = "25000")]
         min_amount: u64,
     },
+    /// Benchmark a URL — render performance metrics via Chrome DevTools Protocol
+    #[cfg(feature = "browser")]
+    Perf {
+        /// URL to benchmark
+        url: String,
+        /// Wait seconds for page render
+        #[arg(short, long, default_value = "5")]
+        wait: u64,
+    },
     /// Browse a URL with headless Chrome — screenshot + extract text
     #[cfg(feature = "browser")]
     Browse {
@@ -117,6 +126,10 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Scout { naics, keyword, sam_key, max_amount, min_amount } => {
             let codes: Vec<&str> = naics.split(',').map(|s| s.trim()).collect();
             scout::run(&codes, keyword.as_deref(), sam_key.as_deref(), min_amount, max_amount).await?;
+        }
+        #[cfg(feature = "browser")]
+        Cmd::Perf { url, wait } => {
+            browse::perf(&url, wait).await?;
         }
         #[cfg(feature = "browser")]
         Cmd::Browse { url, out, wait, extract } => {
@@ -1226,7 +1239,7 @@ mod browse {
 
         eprintln!("[browse] launching headless chrome...");
         let config = browser_config().await.map_err(|e| anyhow::anyhow!(e))?;
-        let (browser, mut handler) = chromiumoxide::Browser::launch(config)
+        let (mut browser, mut handler) = chromiumoxide::Browser::launch(config)
             .await
             .map_err(|e| anyhow::anyhow!("launch: {}", e))?;
 
@@ -1267,6 +1280,104 @@ mod browse {
                 .unwrap_or_default();
             println!("{}", text);
         }
+
+        let _ = browser.close().await;
+        handle.abort();
+        Ok(())
+    }
+
+    /// Perf benchmark — measure render performance via Chrome Performance API
+    pub async fn perf(url: &str, wait: u64) -> anyhow::Result<()> {
+        eprintln!("[perf] launching headless chrome...");
+        let config = browser_config().await.map_err(|e| anyhow::anyhow!(e))?;
+        let (mut browser, mut handler) = chromiumoxide::Browser::launch(config)
+            .await
+            .map_err(|e| anyhow::anyhow!("launch: {}", e))?;
+
+        let handle = tokio::spawn(async move {
+            while futures::StreamExt::next(&mut handler).await.is_some() {}
+        });
+
+        let page = browser.new_page("about:blank").await
+            .map_err(|e| anyhow::anyhow!("new_page: {}", e))?;
+
+        eprintln!("[perf] navigating to {}...", url);
+        let _ = page.goto(url).await;
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+
+        // Performance timing
+        let timing = page.evaluate("JSON.stringify(performance.timing)").await
+            .map_err(|e| anyhow::anyhow!("timing: {}", e))?
+            .into_value::<String>().unwrap_or_default();
+
+        // Paint metrics
+        let paint = page.evaluate("JSON.stringify(performance.getEntriesByType('paint'))").await
+            .map_err(|e| anyhow::anyhow!("paint: {}", e))?
+            .into_value::<String>().unwrap_or_default();
+
+        // Layout shift
+        let cls = page.evaluate(
+            "new Promise(r => { let c=0; new PerformanceObserver(l => { l.getEntries().forEach(e => c += e.value); r(c); }).observe({type:'layout-shift',buffered:true}); setTimeout(() => r(c), 2000); })"
+        ).await.map_err(|e| anyhow::anyhow!("cls: {}", e))?
+            .into_value::<f64>().unwrap_or(0.0);
+
+        // GPU layer count via compositing reasons
+        let layers = page.evaluate(
+            "document.querySelectorAll('*').length"
+        ).await.map_err(|e| anyhow::anyhow!("layers: {}", e))?
+            .into_value::<f64>().unwrap_or(0.0);
+
+        // Resource count and sizes
+        let resources = page.evaluate(
+            "JSON.stringify({count: performance.getEntriesByType('resource').length, totalBytes: performance.getEntriesByType('resource').reduce((a,r) => a + (r.transferSize||0), 0)})"
+        ).await.map_err(|e| anyhow::anyhow!("resources: {}", e))?
+            .into_value::<String>().unwrap_or_default();
+
+        // Animation frame rate
+        let fps = page.evaluate(
+            "new Promise(r => { let frames=0; let start=performance.now(); function count(){frames++;if(performance.now()-start<2000){requestAnimationFrame(count)}else{r(Math.round(frames/((performance.now()-start)/1000)))}} requestAnimationFrame(count); })"
+        ).await.map_err(|e| anyhow::anyhow!("fps: {}", e))?
+            .into_value::<f64>().unwrap_or(0.0);
+
+        // Parse and display
+        println!("\n=== RENDER PERFORMANCE: {} ===\n", url);
+
+        if let Ok(t) = serde_json::from_str::<serde_json::Value>(&timing) {
+            let nav_start = t["navigationStart"].as_f64().unwrap_or(0.0);
+            let dom_complete = t["domComplete"].as_f64().unwrap_or(0.0) - nav_start;
+            let load_end = t["loadEventEnd"].as_f64().unwrap_or(0.0) - nav_start;
+            let dom_interactive = t["domInteractive"].as_f64().unwrap_or(0.0) - nav_start;
+            let response_end = t["responseEnd"].as_f64().unwrap_or(0.0) - nav_start;
+            println!("  TTFB (response end):     {:.0}ms", response_end);
+            println!("  DOM Interactive:         {:.0}ms", dom_interactive);
+            println!("  DOM Complete:            {:.0}ms", dom_complete);
+            println!("  Load Event End:          {:.0}ms", load_end);
+        }
+
+        if let Ok(paints) = serde_json::from_str::<Vec<serde_json::Value>>(&paint) {
+            for p in &paints {
+                let name = p["name"].as_str().unwrap_or("");
+                let time = p["startTime"].as_f64().unwrap_or(0.0);
+                println!("  {:<27}{:.0}ms", format!("{}:", name), time);
+            }
+        }
+
+        println!("  FPS (2s sample):         {:.0}", fps);
+        println!("  CLS (layout shift):      {:.4}", cls);
+        println!("  DOM elements:            {:.0}", layers);
+
+        if let Ok(res) = serde_json::from_str::<serde_json::Value>(&resources) {
+            let count = res["count"].as_u64().unwrap_or(0);
+            let bytes = res["totalBytes"].as_f64().unwrap_or(0.0);
+            println!("  Resources:               {} ({:.0} KB)", count, bytes / 1024.0);
+        }
+
+        // Verdict
+        println!("\n  --- VERDICT ---");
+        if fps >= 55.0 { println!("  FPS:  PASS ({:.0} fps)", fps); }
+        else { println!("  FPS:  FAIL ({:.0} fps — should be 60)", fps); }
+        if cls < 0.1 { println!("  CLS:  PASS ({:.4} — under 0.1 threshold)", cls); }
+        else { println!("  CLS:  FAIL ({:.4} — over 0.1 threshold)", cls); }
 
         let _ = browser.close().await;
         handle.abort();
