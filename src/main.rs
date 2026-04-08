@@ -196,6 +196,34 @@ mod scout {
             Err(e) => eprintln!("[sbir] error: {}", e),
         }
 
+        // --- Federal Register (no auth, no limit) ---
+        let fr_keyword = keyword.unwrap_or("cybersecurity+software");
+        eprintln!("[fedreg] querying...");
+        match fedreg::query(fr_keyword).await {
+            Ok(opps) => {
+                eprintln!("[fedreg] {} results", opps.len());
+                for o in opps {
+                    if cache_put(&db, &o) { new_count += 1; }
+                    all.push(o);
+                }
+            }
+            Err(e) => eprintln!("[fedreg] error: {}", e),
+        }
+
+        // --- Grants.gov (no auth, POST) ---
+        let gr_keyword = keyword.unwrap_or("cybersecurity");
+        eprintln!("[grants] querying...");
+        match grants::query(gr_keyword).await {
+            Ok(opps) => {
+                eprintln!("[grants] {} results", opps.len());
+                for o in opps {
+                    if cache_put(&db, &o) { new_count += 1; }
+                    all.push(o);
+                }
+            }
+            Err(e) => eprintln!("[grants] error: {}", e),
+        }
+
         // --- Report ---
         let kw = keyword.unwrap_or("");
         let filtered: Vec<&Opportunity> = if kw.is_empty() {
@@ -372,6 +400,91 @@ mod scout {
                     date: r["openDate"].as_str().unwrap_or("").into(),
                     naics: "SBIR".into(),
                     url: format!("https://www.sbir.gov/node/{}", r["solicitationId"].as_str().unwrap_or("")),
+                }).collect()
+            }).unwrap_or_default();
+
+            Ok(results)
+        }
+    }
+
+    mod fedreg {
+        use super::Opportunity;
+
+        /// Federal Register API v1 — no auth, no rate limit
+        /// Docs: federalregister.gov/developers/documentation/api/v1
+        /// Response: { count, results: [{ title, type, abstract, document_number, html_url, publication_date, agencies }] }
+        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Opportunity>> {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()?;
+            // conditions[term] = keyword, conditions[type][] = NOTICE, per_page max 1000, order = newest
+            let url = format!(
+                "https://www.federalregister.gov/api/v1/documents.json?conditions%5Bterm%5D={}&conditions%5Btype%5D%5B%5D=NOTICE&per_page=25&order=newest",
+                keyword
+            );
+
+            let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
+
+            let results = resp["results"].as_array().map(|arr| {
+                arr.iter().map(|r| {
+                    let agency = r["agencies"].as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|a| a["name"].as_str())
+                        .unwrap_or("");
+                    Opportunity {
+                        source: "fedreg".into(),
+                        id: r["document_number"].as_str().unwrap_or("").into(),
+                        title: r["title"].as_str().unwrap_or("").into(),
+                        description: r["abstract"].as_str().unwrap_or("").into(),
+                        amount: None,
+                        agency: agency.into(),
+                        date: r["publication_date"].as_str().unwrap_or("").into(),
+                        naics: "notice".into(),
+                        url: r["html_url"].as_str().unwrap_or("").into(),
+                    }
+                }).collect()
+            }).unwrap_or_default();
+
+            Ok(results)
+        }
+    }
+
+    mod grants {
+        use super::Opportunity;
+
+        /// Grants.gov API v1 — no auth, POST to /v1/api/search2
+        /// Request body: { keyword, oppStatuses: "posted", rows: 25 }
+        /// Response: { errorcode, data: { hitCount, oppHits: [{ id, number, title, agencyCode, agency, openDate, closeDate, oppStatus }] } }
+        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Opportunity>> {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()?;
+
+            let body = serde_json::json!({
+                "keyword": keyword,
+                "oppStatuses": "posted",
+                "rows": 25
+            });
+
+            let resp: serde_json::Value = client
+                .post("https://api.grants.gov/v1/api/search2")
+                .json(&body)
+                .send()
+                .await?
+                .json()
+                .await?;
+
+            let results = resp["data"]["oppHits"].as_array().map(|arr| {
+                arr.iter().map(|r| Opportunity {
+                    source: "grants".into(),
+                    id: r["number"].as_str().unwrap_or("").into(),
+                    title: r["title"].as_str().unwrap_or("").into(),
+                    description: r["docType"].as_str().unwrap_or("").into(),
+                    amount: None,
+                    agency: r["agency"].as_str().unwrap_or("").into(),
+                    date: r["openDate"].as_str().unwrap_or("").into(),
+                    naics: "grant".into(),
+                    url: format!("https://www.grants.gov/search-results-detail/{}", r["id"].as_str().unwrap_or("")),
                 }).collect()
             }).unwrap_or_default();
 
