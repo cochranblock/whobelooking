@@ -282,54 +282,70 @@ mod scout {
         Ok(())
     }
 
+    /// Max records per source before stopping pagination
+    const PAGE_CAP: usize = 200;
+
     mod usaspending {
-        use super::Opportunity;
+        use super::{Opportunity, PAGE_CAP};
 
+        /// USASpending API — no auth, no rate limit
+        /// Pagination: page param (1-indexed), limit per page, has_next_page in response
         pub async fn query(naics: &[&str], min_amount: u64, max_amount: u64) -> anyhow::Result<Vec<Opportunity>> {
-            let client = reqwest::Client::new();
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()?;
             let naics_arr: Vec<String> = naics.iter().map(|s| s.to_string()).collect();
-            let body = serde_json::json!({
-                "filters": {
-                    "naics_codes": naics_arr,
-                    "award_type_codes": ["A", "B", "C", "D"],
-                    "time_period": [{
-                        "start_date": "2025-10-01",
-                        "end_date": "2026-12-31"
-                    }],
-                    "award_amounts": [{
-                        "lower_bound": min_amount,
-                        "upper_bound": max_amount
-                    }]
-                },
-                "fields": ["Award ID", "Recipient Name", "Award Amount", "Description", "Start Date", "Awarding Agency"],
-                "limit": 25,
-                "sort": "Start Date",
-                "order": "desc"
-            });
+            let mut all = Vec::new();
+            let mut page = 1u32;
+            let page_size = 100;
 
-            let resp: serde_json::Value = client
-                .post("https://api.usaspending.gov/api/v2/search/spending_by_award/")
-                .json(&body)
-                .send()
-                .await?
-                .json()
-                .await?;
+            loop {
+                let body = serde_json::json!({
+                    "filters": {
+                        "naics_codes": naics_arr,
+                        "award_type_codes": ["A", "B", "C", "D"],
+                        "time_period": [{"start_date": "2025-10-01", "end_date": "2026-12-31"}],
+                        "award_amounts": [{"lower_bound": min_amount, "upper_bound": max_amount}]
+                    },
+                    "fields": ["Award ID", "Recipient Name", "Award Amount", "Description", "Start Date", "Awarding Agency"],
+                    "limit": page_size,
+                    "page": page,
+                    "sort": "Start Date",
+                    "order": "desc"
+                });
 
-            let results = resp["results"].as_array().map(|arr| {
-                arr.iter().map(|r| Opportunity {
-                    source: "usaspending".into(),
-                    id: r["Award ID"].as_str().unwrap_or("").into(),
-                    title: r["Recipient Name"].as_str().unwrap_or("").into(),
-                    description: r["Description"].as_str().unwrap_or("").into(),
-                    amount: r["Award Amount"].as_f64(),
-                    agency: r["Awarding Agency"].as_str().unwrap_or("").into(),
-                    date: r["Start Date"].as_str().unwrap_or("").into(),
-                    naics: "mixed".into(),
-                    url: format!("https://www.usaspending.gov/award/{}", r["generated_internal_id"].as_str().unwrap_or("")),
-                }).collect()
-            }).unwrap_or_default();
+                let resp: serde_json::Value = client
+                    .post("https://api.usaspending.gov/api/v2/search/spending_by_award/")
+                    .json(&body)
+                    .send()
+                    .await?
+                    .json()
+                    .await?;
 
-            Ok(results)
+                let results = resp["results"].as_array();
+                let count = results.map(|a| a.len()).unwrap_or(0);
+                let has_next = resp["page_metadata"]["hasNext"].as_bool().unwrap_or(false);
+
+                if let Some(arr) = results {
+                    for r in arr {
+                        all.push(Opportunity {
+                            source: "usaspending".into(),
+                            id: r["Award ID"].as_str().unwrap_or("").into(),
+                            title: r["Recipient Name"].as_str().unwrap_or("").into(),
+                            description: r["Description"].as_str().unwrap_or("").into(),
+                            amount: r["Award Amount"].as_f64(),
+                            agency: r["Awarding Agency"].as_str().unwrap_or("").into(),
+                            date: r["Start Date"].as_str().unwrap_or("").into(),
+                            naics: "mixed".into(),
+                            url: format!("https://www.usaspending.gov/award/{}", r["generated_internal_id"].as_str().unwrap_or("")),
+                        });
+                    }
+                }
+
+                page += 1;
+                if count == 0 || !has_next || all.len() >= PAGE_CAP { break; }
+            }
+            Ok(all)
         }
     }
 
@@ -445,41 +461,50 @@ mod scout {
         use super::Opportunity;
 
         /// Federal Register API v1 — no auth, no rate limit
-        /// Docs: federalregister.gov/developers/documentation/api/v1
-        /// Response: { count, results: [{ title, type, abstract, document_number, html_url, publication_date, agencies }] }
+        /// Pagination: per_page (max 1000), page param
         pub async fn query(keyword: &str) -> anyhow::Result<Vec<Opportunity>> {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
-            // conditions[term] = keyword, conditions[type][] = NOTICE, per_page max 1000, order = newest
-            let url = format!(
-                "https://www.federalregister.gov/api/v1/documents.json?conditions%5Bterm%5D={}&conditions%5Btype%5D%5B%5D=NOTICE&per_page=25&order=newest",
-                keyword
-            );
+            let mut all = Vec::new();
+            let mut page = 1u32;
+            let per_page = 100;
 
-            let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
+            loop {
+                let url = format!(
+                    "https://www.federalregister.gov/api/v1/documents.json?conditions%5Bterm%5D={}&conditions%5Btype%5D%5B%5D=NOTICE&per_page={}&page={}&order=newest",
+                    keyword, per_page, page
+                );
 
-            let results = resp["results"].as_array().map(|arr| {
-                arr.iter().map(|r| {
-                    let agency = r["agencies"].as_array()
-                        .and_then(|a| a.first())
-                        .and_then(|a| a["name"].as_str())
-                        .unwrap_or("");
-                    Opportunity {
-                        source: "fedreg".into(),
-                        id: r["document_number"].as_str().unwrap_or("").into(),
-                        title: r["title"].as_str().unwrap_or("").into(),
-                        description: r["abstract"].as_str().unwrap_or("").into(),
-                        amount: None,
-                        agency: agency.into(),
-                        date: r["publication_date"].as_str().unwrap_or("").into(),
-                        naics: "notice".into(),
-                        url: r["html_url"].as_str().unwrap_or("").into(),
+                let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
+                let total = resp["count"].as_u64().unwrap_or(0);
+                let results = resp["results"].as_array();
+                let count = results.map(|a| a.len()).unwrap_or(0);
+
+                if let Some(arr) = results {
+                    for r in arr {
+                        let agency = r["agencies"].as_array()
+                            .and_then(|a| a.first())
+                            .and_then(|a| a["name"].as_str())
+                            .unwrap_or("");
+                        all.push(Opportunity {
+                            source: "fedreg".into(),
+                            id: r["document_number"].as_str().unwrap_or("").into(),
+                            title: r["title"].as_str().unwrap_or("").into(),
+                            description: r["abstract"].as_str().unwrap_or("").into(),
+                            amount: None,
+                            agency: agency.into(),
+                            date: r["publication_date"].as_str().unwrap_or("").into(),
+                            naics: "notice".into(),
+                            url: r["html_url"].as_str().unwrap_or("").into(),
+                        });
                     }
-                }).collect()
-            }).unwrap_or_default();
+                }
 
-            Ok(results)
+                page += 1;
+                if count == 0 || all.len() >= super::PAGE_CAP || all.len() as u64 >= total { break; }
+            }
+            Ok(all)
         }
     }
 
@@ -487,42 +512,55 @@ mod scout {
         use super::Opportunity;
 
         /// Grants.gov API v1 — no auth, POST to /v1/api/search2
-        /// Request body: { keyword, oppStatuses: "posted", rows: 25 }
-        /// Response: { errorcode, data: { hitCount, oppHits: [{ id, number, title, agencyCode, agency, openDate, closeDate, oppStatus }] } }
+        /// Pagination: startRecordNum in body, hitCount in response
         pub async fn query(keyword: &str) -> anyhow::Result<Vec<Opportunity>> {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
+            let mut all = Vec::new();
+            let mut start = 0u32;
+            let rows = 100;
 
-            let body = serde_json::json!({
-                "keyword": keyword,
-                "oppStatuses": "posted",
-                "rows": 25
-            });
+            loop {
+                let body = serde_json::json!({
+                    "keyword": keyword,
+                    "oppStatuses": "posted",
+                    "rows": rows,
+                    "startRecordNum": start
+                });
 
-            let resp: serde_json::Value = client
-                .post("https://api.grants.gov/v1/api/search2")
-                .json(&body)
-                .send()
-                .await?
-                .json()
-                .await?;
+                let resp: serde_json::Value = client
+                    .post("https://api.grants.gov/v1/api/search2")
+                    .json(&body)
+                    .send()
+                    .await?
+                    .json()
+                    .await?;
 
-            let results = resp["data"]["oppHits"].as_array().map(|arr| {
-                arr.iter().map(|r| Opportunity {
-                    source: "grants".into(),
-                    id: r["number"].as_str().unwrap_or("").into(),
-                    title: r["title"].as_str().unwrap_or("").into(),
-                    description: r["docType"].as_str().unwrap_or("").into(),
-                    amount: None,
-                    agency: r["agency"].as_str().unwrap_or("").into(),
-                    date: r["openDate"].as_str().unwrap_or("").into(),
-                    naics: "grant".into(),
-                    url: format!("https://www.grants.gov/search-results-detail/{}", r["id"].as_str().unwrap_or("")),
-                }).collect()
-            }).unwrap_or_default();
+                let hit_count = resp["data"]["hitCount"].as_u64().unwrap_or(0);
+                let hits = resp["data"]["oppHits"].as_array();
+                let count = hits.map(|a| a.len()).unwrap_or(0);
 
-            Ok(results)
+                if let Some(arr) = hits {
+                    for r in arr {
+                        all.push(Opportunity {
+                            source: "grants".into(),
+                            id: r["number"].as_str().unwrap_or("").into(),
+                            title: r["title"].as_str().unwrap_or("").into(),
+                            description: r["docType"].as_str().unwrap_or("").into(),
+                            amount: None,
+                            agency: r["agency"].as_str().unwrap_or("").into(),
+                            date: r["openDate"].as_str().unwrap_or("").into(),
+                            naics: "grant".into(),
+                            url: format!("https://www.grants.gov/search-results-detail/{}", r["id"].as_str().unwrap_or("")),
+                        });
+                    }
+                }
+
+                start += count as u32;
+                if count == 0 || all.len() >= super::PAGE_CAP || start as u64 >= hit_count { break; }
+            }
+            Ok(all)
         }
     }
 
@@ -570,45 +608,55 @@ mod scout {
     mod regulations {
         use super::Opportunity;
 
-        /// Regulations.gov API v4 — free API key via api.data.gov
-        /// Endpoint: https://api.regulations.gov/v4/documents
-        /// Auth: X-Api-Key header, DEMO_KEY for testing
-        /// Params: filter[searchTerm], filter[postedDate][ge/le], page[size], page[number]
+        /// Regulations.gov API v4 — DEMO_KEY for testing, get real key from api.data.gov
+        /// Pagination: page[size] max 250, page[number]
         pub async fn query(keyword: &str) -> anyhow::Result<Vec<Opportunity>> {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
-            let url = format!(
-                "https://api.regulations.gov/v4/documents?filter[searchTerm]={}&page[size]=25&sort=-postedDate",
-                keyword
-            );
+            let mut all = Vec::new();
+            let mut page = 1u32;
+            let page_size = 100;
 
-            let resp: serde_json::Value = client
-                .get(&url)
-                .header("X-Api-Key", "DEMO_KEY")
-                .send()
-                .await?
-                .json()
-                .await?;
+            loop {
+                let url = format!(
+                    "https://api.regulations.gov/v4/documents?filter[searchTerm]={}&page[size]={}&page[number]={}&sort=-postedDate",
+                    keyword, page_size, page
+                );
 
-            let results = resp["data"].as_array().map(|arr| {
-                arr.iter().map(|r| {
-                    let attrs = &r["attributes"];
-                    Opportunity {
-                        source: "regs".into(),
-                        id: attrs["documentId"].as_str().unwrap_or("").into(),
-                        title: attrs["title"].as_str().unwrap_or("").into(),
-                        description: attrs["documentType"].as_str().unwrap_or("").into(),
-                        amount: None,
-                        agency: attrs["agencyId"].as_str().unwrap_or("").into(),
-                        date: attrs["postedDate"].as_str().unwrap_or("").into(),
-                        naics: "reg".into(),
-                        url: format!("https://www.regulations.gov/document/{}", attrs["documentId"].as_str().unwrap_or("")),
+                let resp: serde_json::Value = client
+                    .get(&url)
+                    .header("X-Api-Key", "DEMO_KEY")
+                    .send()
+                    .await?
+                    .json()
+                    .await?;
+
+                let data = resp["data"].as_array();
+                let count = data.map(|a| a.len()).unwrap_or(0);
+                let total = resp["meta"]["totalElements"].as_u64().unwrap_or(0);
+
+                if let Some(arr) = data {
+                    for r in arr {
+                        let attrs = &r["attributes"];
+                        all.push(Opportunity {
+                            source: "regs".into(),
+                            id: attrs["documentId"].as_str().unwrap_or("").into(),
+                            title: attrs["title"].as_str().unwrap_or("").into(),
+                            description: attrs["documentType"].as_str().unwrap_or("").into(),
+                            amount: None,
+                            agency: attrs["agencyId"].as_str().unwrap_or("").into(),
+                            date: attrs["postedDate"].as_str().unwrap_or("").into(),
+                            naics: "reg".into(),
+                            url: format!("https://www.regulations.gov/document/{}", attrs["documentId"].as_str().unwrap_or("")),
+                        });
                     }
-                }).collect()
-            }).unwrap_or_default();
+                }
 
-            Ok(results)
+                page += 1;
+                if count == 0 || all.len() >= super::PAGE_CAP || all.len() as u64 >= total { break; }
+            }
+            Ok(all)
         }
     }
 
