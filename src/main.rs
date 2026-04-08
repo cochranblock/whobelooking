@@ -224,6 +224,40 @@ mod scout {
             Err(e) => eprintln!("[grants] error: {}", e),
         }
 
+        // --- Contract Awards (SAM.gov, same API key, competitor intel) ---
+        if let Some(key) = sam_key {
+            eprintln!("[awards] querying...");
+            match contract_awards::query(key, naics).await {
+                Ok(opps) => {
+                    eprintln!("[awards] {} results", opps.len());
+                    for o in opps { if cache_put(&db, &o) { new_count += 1; } all.push(o); }
+                }
+                Err(e) => eprintln!("[awards] error: {}", e),
+            }
+        }
+
+        // --- Regulations.gov (DEMO_KEY, early pipeline intel) ---
+        let reg_kw = keyword.unwrap_or("cybersecurity");
+        eprintln!("[regs] querying...");
+        match regulations::query(reg_kw).await {
+            Ok(opps) => {
+                eprintln!("[regs] {} results", opps.len());
+                for o in opps { if cache_put(&db, &o) { new_count += 1; } all.push(o); }
+            }
+            Err(e) => eprintln!("[regs] error: {}", e),
+        }
+
+        // --- CALC+ Labor Rates (no auth, pricing intel) ---
+        let calc_kw = keyword.unwrap_or("software engineer");
+        eprintln!("[calc] querying...");
+        match calc::query(calc_kw).await {
+            Ok(opps) => {
+                eprintln!("[calc] {} results", opps.len());
+                for o in opps { if cache_put(&db, &o) { new_count += 1; } all.push(o); }
+            }
+            Err(e) => eprintln!("[calc] error: {}", e),
+        }
+
         // --- Report ---
         let kw = keyword.unwrap_or("");
         let filtered: Vec<&Opportunity> = if kw.is_empty() {
@@ -485,6 +519,132 @@ mod scout {
                     date: r["openDate"].as_str().unwrap_or("").into(),
                     naics: "grant".into(),
                     url: format!("https://www.grants.gov/search-results-detail/{}", r["id"].as_str().unwrap_or("")),
+                }).collect()
+            }).unwrap_or_default();
+
+            Ok(results)
+        }
+    }
+
+    mod contract_awards {
+        use super::Opportunity;
+
+        /// SAM.gov Contract Awards API v1 — same API key as opportunities
+        /// Endpoint: https://api.sam.gov/contract-awards/v1/search
+        /// Params: naicsCode (~ separated), dollarsObligated (range), dateSigned (range), limit, offset
+        /// Rate limit: shares daily budget with opportunities API
+        pub async fn query(api_key: &str, naics: &[&str]) -> anyhow::Result<Vec<Opportunity>> {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()?;
+            let naics_param = naics.join("~");
+            let url = format!(
+                "https://api.sam.gov/contract-awards/v1/search?api_key={}&naicsCode={}&dollarsObligated=[25000.0,500000.0]&dateSigned=[01/01/2025,04/08/2026]&limit=25",
+                api_key, naics_param
+            );
+
+            let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
+
+            let results = resp["awardSummary"].as_array().map(|arr| {
+                arr.iter().map(|r| {
+                    let core = &r["coreData"];
+                    let awardee = &r["awardeeData"];
+                    Opportunity {
+                        source: "awards".into(),
+                        id: core["contractId"].as_str().unwrap_or("").into(),
+                        title: awardee["awardeeLegalBusinessName"].as_str().unwrap_or("").into(),
+                        description: core["descriptionOfContractRequirement"].as_str().unwrap_or("").into(),
+                        amount: core["dollarsObligated"].as_f64(),
+                        agency: core["fundingAgencyName"].as_str().unwrap_or("").into(),
+                        date: core["dateSigned"].as_str().unwrap_or("").into(),
+                        naics: core["naicsCode"].as_str().unwrap_or("").into(),
+                        url: "https://sam.gov/search?keywords=contract+awards".into(),
+                    }
+                }).collect()
+            }).unwrap_or_default();
+
+            Ok(results)
+        }
+    }
+
+    mod regulations {
+        use super::Opportunity;
+
+        /// Regulations.gov API v4 — free API key via api.data.gov
+        /// Endpoint: https://api.regulations.gov/v4/documents
+        /// Auth: X-Api-Key header, DEMO_KEY for testing
+        /// Params: filter[searchTerm], filter[postedDate][ge/le], page[size], page[number]
+        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Opportunity>> {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()?;
+            let url = format!(
+                "https://api.regulations.gov/v4/documents?filter[searchTerm]={}&page[size]=25&sort=-postedDate",
+                keyword
+            );
+
+            let resp: serde_json::Value = client
+                .get(&url)
+                .header("X-Api-Key", "DEMO_KEY")
+                .send()
+                .await?
+                .json()
+                .await?;
+
+            let results = resp["data"].as_array().map(|arr| {
+                arr.iter().map(|r| {
+                    let attrs = &r["attributes"];
+                    Opportunity {
+                        source: "regs".into(),
+                        id: attrs["documentId"].as_str().unwrap_or("").into(),
+                        title: attrs["title"].as_str().unwrap_or("").into(),
+                        description: attrs["documentType"].as_str().unwrap_or("").into(),
+                        amount: None,
+                        agency: attrs["agencyId"].as_str().unwrap_or("").into(),
+                        date: attrs["postedDate"].as_str().unwrap_or("").into(),
+                        naics: "reg".into(),
+                        url: format!("https://www.regulations.gov/document/{}", attrs["documentId"].as_str().unwrap_or("")),
+                    }
+                }).collect()
+            }).unwrap_or_default();
+
+            Ok(results)
+        }
+    }
+
+    mod calc {
+        use super::Opportunity;
+
+        /// GSA CALC+ Labor Rates API v3 — no auth required
+        /// Endpoint: https://api.gsa.gov/acquisition/calc/v3/api/ceilingrates/
+        /// Params: keyword (min 2 chars), page, page_size
+        /// Returns labor categories with ceiling rates from GSA schedules
+        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Opportunity>> {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()?;
+            let url = format!(
+                "https://api.gsa.gov/acquisition/calc/v3/api/ceilingrates/?keyword={}&page=1&page_size=25",
+                keyword
+            );
+
+            let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
+
+            let results = resp["hits"]["hits"].as_array().map(|arr| {
+                arr.iter().map(|r| {
+                    let s = &r["_source"];
+                    let price = s["current_price"].as_f64();
+                    Opportunity {
+                        source: "calc".into(),
+                        id: r["_id"].as_str().unwrap_or("").into(),
+                        title: s["labor_category"].as_str().unwrap_or("").into(),
+                        description: format!("{} — {}", s["vendor_name"].as_str().unwrap_or(""), s["sin"].as_str().unwrap_or("")),
+                        amount: price,
+                        agency: "GSA Schedule".into(),
+                        date: "".into(),
+                        naics: "rate".into(),
+                        url: "https://buy.gsa.gov/pricing/".into(),
+                    }
                 }).collect()
             }).unwrap_or_default();
 
