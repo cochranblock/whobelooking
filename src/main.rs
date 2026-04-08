@@ -275,12 +275,25 @@ mod scout {
         use super::Opportunity;
 
         pub async fn query(api_key: &str, naics: &[&str], keyword: Option<&str>) -> anyhow::Result<Vec<Opportunity>> {
-            let client = reqwest::Client::new();
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()?;
             let _naics_set: std::collections::HashSet<&str> = naics.iter().copied().collect();
             // Query each NAICS code separately, paginate until exhausted or 200 per code
+            // Rate limit guard: skip codes fetched in last 24h (sled key: "sam_last:{code}")
             let mut all_opps = Vec::new();
             let page_size = 100;
+            let db = super::open_db();
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
             for code in naics {
+                let cache_key = format!("sam_last:{}", code);
+                if let Some(ts_bytes) = db.get(&cache_key).unwrap() {
+                    let ts = u64::from_le_bytes(ts_bytes.as_ref().try_into().unwrap_or([0;8]));
+                    if now - ts < 86400 {
+                        eprintln!("[sam.gov] {} cached (<24h), skipping API call", code);
+                        continue;
+                    }
+                }
                 let mut offset = 0u32;
                 loop {
                     let mut url = format!(
@@ -319,12 +332,16 @@ mod scout {
                     }
 
                     offset += page_count as u32;
-                    // Stop if: no more results, hit 200 cap per code, or exhausted total
-                    if page_count == 0 || offset >= 200 || offset as u64 >= total {
+                    // One page per code — conserve rate limit, enrich via OSINT instead
+                    if page_count == 0 || offset >= 100 || offset as u64 >= total {
                         break;
                     }
                 }
+                // Stamp this NAICS as fetched
+                let _ = db.insert(&cache_key, &now.to_le_bytes());
+                let _ = db.flush();
             }
+
             Ok(all_opps)
         }
     }
