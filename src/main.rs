@@ -19,7 +19,7 @@ enum Cmd {
         #[arg(short, long)]
         keyword: Option<String>,
         /// SAM.gov API key (optional — skips SAM.gov if absent)
-        #[arg(long, env = "SAM_API_KEY")]
+        #[arg(long, env = "SAM_GOV_API")]
         sam_key: Option<String>,
         /// Max award amount for USASpending filter
         #[arg(long, default_value = "500000")]
@@ -180,7 +180,7 @@ mod scout {
                 Err(e) => eprintln!("[sam.gov] error: {}", e),
             }
         } else {
-            eprintln!("[sam.gov] skipped (no SAM_API_KEY)");
+            eprintln!("[sam.gov] skipped (no SAM_GOV_API)");
         }
 
         // --- SBIR.gov (no auth) ---
@@ -276,12 +276,16 @@ mod scout {
 
         pub async fn query(api_key: &str, naics: &[&str], keyword: Option<&str>) -> anyhow::Result<Vec<Opportunity>> {
             let client = reqwest::Client::new();
-            let kw = keyword.unwrap_or("software");
-            let naics_param = naics.join(",");
-            let url = format!(
-                "https://api.sam.gov/opportunities/v2/search?api_key={}&naics={}&q={}&limit=25&postedFrom=01/01/2026&postedTo=12/31/2026",
-                api_key, naics_param, kw
+            let naics_set: std::collections::HashSet<&str> = naics.iter().copied().collect();
+            let mut url = format!(
+                "https://api.sam.gov/opportunities/v2/search?api_key={}&limit=100&postedFrom=01/01/2026&postedTo=12/31/2026&typeOfSetAside=SBA",
+                api_key
             );
+            if let Some(kw) = keyword {
+                url.push_str(&format!("&q={}", kw));
+            } else {
+                url.push_str("&q=software+OR+cyber+OR+IT+OR+programming");
+            }
 
             let resp: serde_json::Value = client
                 .get(&url)
@@ -291,16 +295,20 @@ mod scout {
                 .await?;
 
             let results = resp["opportunitiesData"].as_array().map(|arr| {
-                arr.iter().map(|r| Opportunity {
-                    source: "sam.gov".into(),
-                    id: r["noticeId"].as_str().unwrap_or("").into(),
-                    title: r["title"].as_str().unwrap_or("").into(),
-                    description: r["description"].as_str().unwrap_or("").into(),
-                    amount: None,
-                    agency: r["fullParentPathName"].as_str().unwrap_or("").into(),
-                    date: r["postedDate"].as_str().unwrap_or("").into(),
-                    naics: r["naicsCode"].as_str().unwrap_or("").into(),
-                    url: format!("https://sam.gov/opp/{}/view", r["noticeId"].as_str().unwrap_or("")),
+                arr.iter().filter_map(|r| {
+                    let nc = r["naicsCode"].as_str().unwrap_or("");
+                    if !naics_set.is_empty() && !naics_set.contains(nc) { return None; }
+                    Some(Opportunity {
+                        source: "sam.gov".into(),
+                        id: r["noticeId"].as_str().unwrap_or("").into(),
+                        title: r["title"].as_str().unwrap_or("").into(),
+                        description: r["description"].as_str().unwrap_or("").into(),
+                        amount: None,
+                        agency: r["fullParentPathName"].as_str().unwrap_or("").into(),
+                        date: r["postedDate"].as_str().unwrap_or("").into(),
+                        naics: nc.into(),
+                        url: format!("https://sam.gov/opp/{}/view", r["noticeId"].as_str().unwrap_or("")),
+                    })
                 }).collect()
             }).unwrap_or_default();
 
@@ -424,7 +432,7 @@ mod cf {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let days = secs / 86400;
+        let days = (secs / 86400) as i64;
         let y = (10000 * days + 14780) / 3652425;
         let doy = days - (365 * y + y / 4 - y / 100 + y / 400);
         let y = if doy < 0 { y - 1 } else { y };
