@@ -1226,7 +1226,7 @@ mod browse {
 
         eprintln!("[browse] launching headless chrome...");
         let config = browser_config().await.map_err(|e| anyhow::anyhow!(e))?;
-        let (mut browser, mut handler) = chromiumoxide::Browser::launch(config)
+        let (browser, mut handler) = chromiumoxide::Browser::launch(config)
             .await
             .map_err(|e| anyhow::anyhow!("launch: {}", e))?;
 
@@ -1301,7 +1301,7 @@ mod browse {
 
         eprintln!("[scrape] launching headless chrome...");
         let config = browser_config().await.map_err(|e| anyhow::anyhow!(e))?;
-        let (mut browser, mut handler) = chromiumoxide::Browser::launch(config)
+        let (browser, mut handler) = chromiumoxide::Browser::launch(config)
             .await
             .map_err(|e| anyhow::anyhow!("launch: {}", e))?;
 
