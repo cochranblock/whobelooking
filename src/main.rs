@@ -28,6 +28,21 @@ enum Cmd {
         #[arg(long, default_value = "25000")]
         min_amount: u64,
     },
+    /// Browse a URL with headless Chrome — screenshot + extract text
+    #[cfg(feature = "browser")]
+    Browse {
+        /// URL to browse
+        url: String,
+        /// Output directory for screenshots
+        #[arg(short, long, default_value = ".")]
+        out: String,
+        /// Wait seconds for page render (JS/WASM)
+        #[arg(short, long, default_value = "3")]
+        wait: u64,
+        /// Extract page text (strip HTML, print to stdout)
+        #[arg(long, default_value = "true")]
+        extract: bool,
+    },
     /// Pull US visitor IPs from Cloudflare GraphQL for a given date
     Pull {
         /// Date (YYYY-MM-DD), default today
@@ -89,6 +104,10 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Scout { naics, keyword, sam_key, max_amount, min_amount } => {
             let codes: Vec<&str> = naics.split(',').map(|s| s.trim()).collect();
             scout::run(&codes, keyword.as_deref(), sam_key.as_deref(), min_amount, max_amount).await?;
+        }
+        #[cfg(feature = "browser")]
+        Cmd::Browse { url, out, wait, extract } => {
+            browse::run(&url, &out, wait, extract).await?;
         }
         Cmd::Pull { date, zone, token, country, min_hits } => {
             let visitors = cf::pull(&zone, &token, date.as_deref(), &country, min_hits).await?;
@@ -1151,6 +1170,98 @@ mod report {
             println!("{:<6} {:<42} {:<55} {}", v.hits, v.ip, rdns_str, neighbor_str);
         }
 
+        Ok(())
+    }
+}
+
+#[cfg(feature = "browser")]
+mod browse {
+    use std::path::Path;
+    use std::time::Duration;
+
+    async fn browser_config() -> Result<chromiumoxide::BrowserConfig, String> {
+        let builder = chromiumoxide::BrowserConfig::builder();
+        match builder.build() {
+            Ok(c) => return Ok(c),
+            Err(e) if e.contains("Could not auto detect") => {}
+            Err(e) => return Err(format!("browser config: {}", e)),
+        }
+        let dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("chromiumoxide");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
+        let fetcher = chromiumoxide::fetcher::BrowserFetcher::new(
+            chromiumoxide::fetcher::BrowserFetcherOptions::builder()
+                .with_path(&dir)
+                .build()
+                .map_err(|e| format!("fetcher opts: {}", e))?,
+        );
+        let info = fetcher.fetch().await.map_err(|e| format!("fetcher: {}", e))?;
+        chromiumoxide::BrowserConfig::builder()
+            .chrome_executable(info.executable_path)
+            .build()
+            .map_err(|e| format!("browser config: {}", e))
+    }
+
+    pub async fn run(url: &str, out_dir: &str, wait: u64, extract: bool) -> anyhow::Result<()> {
+        let out = Path::new(out_dir);
+        std::fs::create_dir_all(out)?;
+
+        eprintln!("[browse] launching headless chrome...");
+        let config = browser_config().await.map_err(|e| anyhow::anyhow!(e))?;
+        let (mut browser, mut handler) = chromiumoxide::Browser::launch(config)
+            .await
+            .map_err(|e| anyhow::anyhow!("launch: {}", e))?;
+
+        let handle = tokio::spawn(async move {
+            while futures::StreamExt::next(&mut handler).await.is_some() {}
+        });
+
+        let page = browser.new_page("about:blank").await
+            .map_err(|e| anyhow::anyhow!("new_page: {}", e))?;
+
+        eprintln!("[browse] navigating to {}...", url);
+        let _ = page.goto(url).await.map_err(|e| anyhow::anyhow!("goto: {}", e))?;
+        tokio::time::sleep(Duration::from_secs(wait)).await;
+
+        // Screenshot
+        let slug: String = url.chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .take(60)
+            .collect();
+        let screenshot_path = out.join(format!("{}.png", slug));
+
+        use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+        use chromiumoxide::page::ScreenshotParams;
+        page.save_screenshot(
+            ScreenshotParams::builder()
+                .format(CaptureScreenshotFormat::Png)
+                .full_page(true)
+                .build(),
+            &screenshot_path,
+        ).await.map_err(|e| anyhow::anyhow!("screenshot: {}", e))?;
+        eprintln!("[browse] screenshot saved: {}", screenshot_path.display());
+
+        // Extract text
+        if extract {
+            let html = page.content().await
+                .map_err(|e| anyhow::anyhow!("content: {}", e))?;
+            // Strip HTML tags
+            let text: String = html.chars().fold((String::new(), false), |(mut s, in_tag), c| {
+                match c {
+                    '<' => (s, true),
+                    '>' => (s, false),
+                    _ if !in_tag => { s.push(c); (s, false) }
+                    _ => (s, true)
+                }
+            }).0;
+            // Collapse whitespace
+            let clean: String = text.split_whitespace().collect::<Vec<&str>>().join(" ");
+            println!("{}", clean);
+        }
+
+        let _ = browser.close().await;
+        handle.abort();
         Ok(())
     }
 }

@@ -22,6 +22,12 @@ hickory-resolver = "0.25"
 sled = "0.34"
 dirs = "5"
 zstd = "0.13"
+chromiumoxide = { version = "0.9", features = ["fetcher", "rustls", "zip8"], optional = true }
+futures = { version = "0.3", optional = true }
+
+[features]
+default = []
+browser = ["dep:chromiumoxide", "dep:futures"]
 
 [profile.release]
 opt-level = "z"
