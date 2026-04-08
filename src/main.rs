@@ -1259,22 +1259,13 @@ mod browse {
         ).await.map_err(|e| anyhow::anyhow!("screenshot: {}", e))?;
         eprintln!("[browse] screenshot saved: {}", screenshot_path.display());
 
-        // Extract text
+        // Extract text — use innerText for clean rendered content (no CSS/JS noise)
         if extract {
-            let html = page.content().await
-                .map_err(|e| anyhow::anyhow!("content: {}", e))?;
-            // Strip HTML tags
-            let text: String = html.chars().fold((String::new(), false), |(mut s, in_tag), c| {
-                match c {
-                    '<' => (s, true),
-                    '>' => (s, false),
-                    _ if !in_tag => { s.push(c); (s, false) }
-                    _ => (s, true)
-                }
-            }).0;
-            // Collapse whitespace
-            let clean: String = text.split_whitespace().collect::<Vec<&str>>().join(" ");
-            println!("{}", clean);
+            let text = page.evaluate("document.body.innerText").await
+                .map_err(|e| anyhow::anyhow!("evaluate: {}", e))?
+                .into_value::<String>()
+                .unwrap_or_default();
+            println!("{}", text);
         }
 
         let _ = browser.close().await;
@@ -1318,7 +1309,7 @@ mod browse {
             while futures::StreamExt::next(&mut handler).await.is_some() {}
         });
 
-        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(3)); // 3 concurrent tabs
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1)); // 1 tab — Chrome crashes with concurrent tabs
         let browser = std::sync::Arc::new(browser);
         let out = std::sync::Arc::new(out.to_path_buf());
         let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1391,18 +1382,10 @@ mod browse {
             png,
         ).await;
 
-        // Extract text
-        if let Ok(html) = page.content().await {
-            let text: String = html.chars().fold((String::new(), false), |(mut s, in_tag), c| {
-                match c {
-                    '<' => (s, true),
-                    '>' => (s, false),
-                    _ if !in_tag => { s.push(c); (s, false) }
-                    _ => (s, true)
-                }
-            }).0;
-            let clean: String = text.split_whitespace().collect::<Vec<&str>>().join(" ");
-            let _ = std::fs::write(txt, &clean);
+        // Extract text — innerText gives clean rendered content
+        if let Ok(val) = page.evaluate("document.body.innerText").await {
+            let text = val.into_value::<String>().unwrap_or_default();
+            let _ = std::fs::write(txt, &text);
         }
 
         let _ = page.close().await;
