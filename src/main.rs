@@ -43,6 +43,19 @@ enum Cmd {
         #[arg(long, default_value = "true")]
         extract: bool,
     },
+    /// Batch browse — read URLs from file, one Chrome instance, screenshot + text for each
+    #[cfg(feature = "browser")]
+    Scrape {
+        /// File with one URL per line
+        #[arg(short, long, default_value = "/tmp/sam_unique_urls.txt")]
+        file: String,
+        /// Output directory
+        #[arg(short, long, default_value = "sam_opps")]
+        out: String,
+        /// Wait seconds per page
+        #[arg(short, long, default_value = "6")]
+        wait: u64,
+    },
     /// Pull US visitor IPs from Cloudflare GraphQL for a given date
     Pull {
         /// Date (YYYY-MM-DD), default today
@@ -108,6 +121,10 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "browser")]
         Cmd::Browse { url, out, wait, extract } => {
             browse::run(&url, &out, wait, extract).await?;
+        }
+        #[cfg(feature = "browser")]
+        Cmd::Scrape { file, out, wait } => {
+            browse::scrape(&file, &out, wait).await?;
         }
         Cmd::Pull { date, zone, token, country, min_hits } => {
             let visitors = cf::pull(&zone, &token, date.as_deref(), &country, min_hits).await?;
@@ -1262,6 +1279,133 @@ mod browse {
 
         let _ = browser.close().await;
         handle.abort();
+        Ok(())
+    }
+
+    /// Batch scrape — one Chrome instance, 3 concurrent tabs, skip cached
+    pub async fn scrape(url_file: &str, out_dir: &str, wait: u64) -> anyhow::Result<()> {
+        let out = std::path::Path::new(out_dir);
+        std::fs::create_dir_all(out)?;
+
+        let urls: Vec<String> = std::fs::read_to_string(url_file)?
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect();
+
+        let total = urls.len();
+        eprintln!("[scrape] {} URLs to process", total);
+
+        // Skip already scraped
+        let mut todo: Vec<String> = Vec::new();
+        for url in &urls {
+            let slug = url_to_slug(url);
+            if out.join(format!("{}.txt", slug)).exists() {
+                continue;
+            }
+            todo.push(url.clone());
+        }
+        eprintln!("[scrape] {} cached, {} remaining", total - todo.len(), todo.len());
+        if todo.is_empty() { return Ok(()); }
+
+        eprintln!("[scrape] launching headless chrome...");
+        let config = browser_config().await.map_err(|e| anyhow::anyhow!(e))?;
+        let (mut browser, mut handler) = chromiumoxide::Browser::launch(config)
+            .await
+            .map_err(|e| anyhow::anyhow!("launch: {}", e))?;
+
+        let handle = tokio::spawn(async move {
+            while futures::StreamExt::next(&mut handler).await.is_some() {}
+        });
+
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(3)); // 3 concurrent tabs
+        let browser = std::sync::Arc::new(browser);
+        let out = std::sync::Arc::new(out.to_path_buf());
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let remaining = todo.len();
+
+        let mut handles = Vec::new();
+        for url in todo {
+            let sem = sem.clone();
+            let browser = browser.clone();
+            let out = out.clone();
+            let done = done.clone();
+            let h = tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let slug = url_to_slug(&url);
+                let txt_path = out.join(format!("{}.txt", slug));
+                let png_path = out.join(format!("{}.png", slug));
+
+                match scrape_one(&browser, &url, &png_path, &txt_path, wait).await {
+                    Ok(()) => {}
+                    Err(e) => eprintln!("[scrape] {}: {}", slug, e),
+                }
+                let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if n % 10 == 0 || n == remaining {
+                    eprintln!("[scrape] {}/{}", n, remaining);
+                }
+            });
+            handles.push(h);
+        }
+
+        for h in handles {
+            let _ = h.await;
+        }
+
+        // Can't close Arc<Browser> directly — just abort the handler
+        handle.abort();
+        eprintln!("[scrape] done — {} files in {}", remaining, out.display());
+        Ok(())
+    }
+
+    fn url_to_slug(url: &str) -> String {
+        url.replace("https://sam.gov/opp/", "")
+            .replace("/view", "")
+            .replace("https://", "")
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+            .take(60)
+            .collect()
+    }
+
+    async fn scrape_one(
+        browser: &chromiumoxide::Browser,
+        url: &str,
+        png: &std::path::Path,
+        txt: &std::path::Path,
+        wait: u64,
+    ) -> anyhow::Result<()> {
+        let page = browser.new_page("about:blank").await
+            .map_err(|e| anyhow::anyhow!("new_page: {}", e))?;
+        let _ = page.goto(url).await.map_err(|e| anyhow::anyhow!("goto: {}", e))?;
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+
+        // Screenshot
+        use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+        use chromiumoxide::page::ScreenshotParams;
+        let _ = page.save_screenshot(
+            ScreenshotParams::builder()
+                .format(CaptureScreenshotFormat::Png)
+                .full_page(true)
+                .build(),
+            png,
+        ).await;
+
+        // Extract text
+        if let Ok(html) = page.content().await {
+            let text: String = html.chars().fold((String::new(), false), |(mut s, in_tag), c| {
+                match c {
+                    '<' => (s, true),
+                    '>' => (s, false),
+                    _ if !in_tag => { s.push(c); (s, false) }
+                    _ => (s, true)
+                }
+            }).0;
+            let clean: String = text.split_whitespace().collect::<Vec<&str>>().join(" ");
+            let _ = std::fs::write(txt, &clean);
+        }
+
+        let _ = page.close().await;
         Ok(())
     }
 }
