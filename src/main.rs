@@ -276,43 +276,56 @@ mod scout {
 
         pub async fn query(api_key: &str, naics: &[&str], keyword: Option<&str>) -> anyhow::Result<Vec<Opportunity>> {
             let client = reqwest::Client::new();
-            let naics_set: std::collections::HashSet<&str> = naics.iter().copied().collect();
-            let mut url = format!(
-                "https://api.sam.gov/opportunities/v2/search?api_key={}&limit=100&postedFrom=01/01/2026&postedTo=12/31/2026&typeOfSetAside=SBA",
-                api_key
-            );
-            if let Some(kw) = keyword {
-                url.push_str(&format!("&q={}", kw));
-            } else {
-                url.push_str("&q=software+OR+cyber+OR+IT+OR+programming");
+            let _naics_set: std::collections::HashSet<&str> = naics.iter().copied().collect();
+            // Query each NAICS code separately, paginate until exhausted or 200 per code
+            let mut all_opps = Vec::new();
+            let page_size = 100;
+            for code in naics {
+                let mut offset = 0u32;
+                loop {
+                    let mut url = format!(
+                        "https://api.sam.gov/opportunities/v2/search?api_key={}&limit={}&offset={}&postedFrom=01/01/2026&postedTo=12/31/2026&ncode={}",
+                        api_key, page_size, offset, code
+                    );
+                    if let Some(kw) = keyword {
+                        url.push_str(&format!("&q={}", kw));
+                    }
+
+                    let resp: serde_json::Value = client
+                        .get(&url)
+                        .send()
+                        .await?
+                        .json()
+                        .await?;
+
+                    let total = resp["totalRecords"].as_u64().unwrap_or(0);
+                    let arr = resp["opportunitiesData"].as_array();
+                    let page_count = arr.map(|a| a.len()).unwrap_or(0);
+
+                    if let Some(arr) = arr {
+                        for r in arr {
+                            all_opps.push(Opportunity {
+                                source: "sam.gov".into(),
+                                id: r["noticeId"].as_str().unwrap_or("").into(),
+                                title: r["title"].as_str().unwrap_or("").into(),
+                                description: r["description"].as_str().unwrap_or("").into(),
+                                amount: None,
+                                agency: r["fullParentPathName"].as_str().unwrap_or("").into(),
+                                date: r["postedDate"].as_str().unwrap_or("").into(),
+                                naics: r["naicsCode"].as_str().unwrap_or("").into(),
+                                url: format!("https://sam.gov/opp/{}/view", r["noticeId"].as_str().unwrap_or("")),
+                            });
+                        }
+                    }
+
+                    offset += page_count as u32;
+                    // Stop if: no more results, hit 200 cap per code, or exhausted total
+                    if page_count == 0 || offset >= 200 || offset as u64 >= total {
+                        break;
+                    }
+                }
             }
-
-            let resp: serde_json::Value = client
-                .get(&url)
-                .send()
-                .await?
-                .json()
-                .await?;
-
-            let results = resp["opportunitiesData"].as_array().map(|arr| {
-                arr.iter().filter_map(|r| {
-                    let nc = r["naicsCode"].as_str().unwrap_or("");
-                    if !naics_set.is_empty() && !naics_set.contains(nc) { return None; }
-                    Some(Opportunity {
-                        source: "sam.gov".into(),
-                        id: r["noticeId"].as_str().unwrap_or("").into(),
-                        title: r["title"].as_str().unwrap_or("").into(),
-                        description: r["description"].as_str().unwrap_or("").into(),
-                        amount: None,
-                        agency: r["fullParentPathName"].as_str().unwrap_or("").into(),
-                        date: r["postedDate"].as_str().unwrap_or("").into(),
-                        naics: nc.into(),
-                        url: format!("https://sam.gov/opp/{}/view", r["noticeId"].as_str().unwrap_or("")),
-                    })
-                }).collect()
-            }).unwrap_or_default();
-
-            Ok(results)
+            Ok(all_opps)
         }
     }
 
