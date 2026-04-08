@@ -122,17 +122,75 @@ async fn main() -> anyhow::Result<()> {
 mod scout {
     use serde::{Deserialize, Serialize};
 
+    // === Common Open Opportunity Schema ===
+    // 4 record types, each with fields that match their source data cleanly.
+    // Stored in separate sled trees so queries don't mix concerns.
+
+    /// Biddable opportunities — things you can respond to TODAY
+    /// Sources: SAM.gov, Grants.gov, SBIR.gov
     #[derive(Debug, Serialize, Deserialize, Clone)]
-    pub struct Opportunity {
-        pub source: String,
-        pub id: String,
+    pub struct Bid {
+        pub source: String,        // sam.gov | grants | sbir
+        pub id: String,            // noticeId | oppNumber | solicitationId
         pub title: String,
         pub description: String,
-        pub amount: Option<f64>,
         pub agency: String,
-        pub date: String,
-        pub naics: String,
+        pub naics: String,         // NAICS code or "grant" / "sbir"
+        pub set_aside: String,     // SBA, SDVOSBC, 8A, etc. or ""
+        pub posted: String,        // YYYY-MM-DD
+        pub deadline: String,      // YYYY-MM-DD or ""
         pub url: String,
+    }
+
+    /// Past awards — who won what, competitive intel
+    /// Sources: USASpending, SAM.gov Contract Awards
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    pub struct Award {
+        pub source: String,        // usaspending | awards
+        pub id: String,            // Award ID | contractId
+        pub winner: String,        // company name
+        pub description: String,
+        pub amount: f64,
+        pub agency: String,
+        pub naics: String,
+        pub date: String,          // award/start date
+        pub url: String,
+    }
+
+    /// Early pipeline signals — RFIs, proposed rules, policy changes
+    /// Sources: Federal Register, Regulations.gov
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    pub struct Signal {
+        pub source: String,        // fedreg | regs
+        pub id: String,            // document_number | documentId
+        pub title: String,
+        pub description: String,
+        pub agency: String,
+        pub doc_type: String,      // NOTICE | Rule | Proposed Rule
+        pub date: String,
+        pub url: String,
+    }
+
+    /// Labor rate benchmarks — what the market charges
+    /// Source: CALC+
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    pub struct Rate {
+        pub id: String,
+        pub labor_category: String,
+        pub vendor: String,
+        pub sin: String,           // GSA SIN
+        pub price: f64,            // ceiling rate $/hr
+        pub education: String,
+        pub experience: String,
+    }
+
+    /// Unified report container
+    pub struct ScoutReport {
+        pub bids: Vec<Bid>,
+        pub awards: Vec<Award>,
+        pub signals: Vec<Signal>,
+        pub rates: Vec<Rate>,
+        pub new_count: u32,
     }
 
     fn open_db() -> sled::Db {
@@ -142,40 +200,36 @@ mod scout {
         sled::open(dir).expect("open sled db")
     }
 
-    fn cache_put(db: &sled::Db, opp: &Opportunity) -> bool {
-        let key = format!("{}:{}", opp.source, opp.id);
-        let is_new = db.insert(&key, serde_json::to_vec(opp).unwrap()).unwrap().is_none();
-        is_new
+    fn cache_bid(db: &sled::Db, b: &Bid) -> bool {
+        let key = format!("bid:{}:{}", b.source, b.id);
+        db.insert(&key, serde_json::to_vec(b).unwrap()).unwrap().is_none()
+    }
+    fn cache_award(db: &sled::Db, a: &Award) -> bool {
+        let key = format!("award:{}:{}", a.source, a.id);
+        db.insert(&key, serde_json::to_vec(a).unwrap()).unwrap().is_none()
+    }
+    fn cache_signal(db: &sled::Db, s: &Signal) -> bool {
+        let key = format!("signal:{}:{}", s.source, s.id);
+        db.insert(&key, serde_json::to_vec(s).unwrap()).unwrap().is_none()
+    }
+    fn cache_rate(db: &sled::Db, r: &Rate) -> bool {
+        let key = format!("rate:{}", r.id);
+        db.insert(&key, serde_json::to_vec(r).unwrap()).unwrap().is_none()
     }
 
     pub async fn run(naics: &[&str], keyword: Option<&str>, sam_key: Option<&str>, min_amount: u64, max_amount: u64) -> anyhow::Result<()> {
         let db = open_db();
-        let mut all: Vec<Opportunity> = Vec::new();
-        let mut new_count = 0u32;
+        let mut rpt = ScoutReport { bids: vec![], awards: vec![], signals: vec![], rates: vec![], new_count: 0 };
 
-        // --- USASpending (no auth, always available) ---
-        eprintln!("[usaspending] querying...");
-        match usaspending::query(naics, min_amount, max_amount).await {
-            Ok(opps) => {
-                eprintln!("[usaspending] {} results", opps.len());
-                for o in opps {
-                    if cache_put(&db, &o) { new_count += 1; }
-                    all.push(o);
-                }
-            }
-            Err(e) => eprintln!("[usaspending] error: {}", e),
-        }
+        // === BIDS (things you can respond to) ===
 
-        // --- SAM.gov (needs API key) ---
+        // SAM.gov Opportunities
         if let Some(key) = sam_key {
             eprintln!("[sam.gov] querying...");
             match sam::query(key, naics, keyword).await {
-                Ok(opps) => {
-                    eprintln!("[sam.gov] {} results", opps.len());
-                    for o in opps {
-                        if cache_put(&db, &o) { new_count += 1; }
-                        all.push(o);
-                    }
+                Ok(bids) => {
+                    eprintln!("[sam.gov] {} bids", bids.len());
+                    for b in bids { if cache_bid(&db, &b) { rpt.new_count += 1; } rpt.bids.push(b); }
                 }
                 Err(e) => eprintln!("[sam.gov] error: {}", e),
             }
@@ -183,101 +237,127 @@ mod scout {
             eprintln!("[sam.gov] skipped (no SAM_GOV_API)");
         }
 
-        // --- SBIR.gov (no auth) ---
-        eprintln!("[sbir] querying...");
-        match sbir::query(keyword.unwrap_or("cyber")).await {
-            Ok(opps) => {
-                eprintln!("[sbir] {} results", opps.len());
-                for o in opps {
-                    if cache_put(&db, &o) { new_count += 1; }
-                    all.push(o);
-                }
-            }
-            Err(e) => eprintln!("[sbir] error: {}", e),
-        }
-
-        // --- Federal Register (no auth, no limit) ---
-        let fr_keyword = keyword.unwrap_or("cybersecurity+software");
-        eprintln!("[fedreg] querying...");
-        match fedreg::query(fr_keyword).await {
-            Ok(opps) => {
-                eprintln!("[fedreg] {} results", opps.len());
-                for o in opps {
-                    if cache_put(&db, &o) { new_count += 1; }
-                    all.push(o);
-                }
-            }
-            Err(e) => eprintln!("[fedreg] error: {}", e),
-        }
-
-        // --- Grants.gov (no auth, POST) ---
-        let gr_keyword = keyword.unwrap_or("cybersecurity");
+        // Grants.gov
+        let gr_kw = keyword.unwrap_or("cybersecurity");
         eprintln!("[grants] querying...");
-        match grants::query(gr_keyword).await {
-            Ok(opps) => {
-                eprintln!("[grants] {} results", opps.len());
-                for o in opps {
-                    if cache_put(&db, &o) { new_count += 1; }
-                    all.push(o);
-                }
+        match grants::query(gr_kw).await {
+            Ok(bids) => {
+                eprintln!("[grants] {} bids", bids.len());
+                for b in bids { if cache_bid(&db, &b) { rpt.new_count += 1; } rpt.bids.push(b); }
             }
             Err(e) => eprintln!("[grants] error: {}", e),
         }
 
-        // --- Contract Awards (SAM.gov, same API key, competitor intel) ---
+        // SBIR.gov
+        eprintln!("[sbir] querying...");
+        match sbir::query(keyword.unwrap_or("cyber")).await {
+            Ok(bids) => {
+                eprintln!("[sbir] {} bids", bids.len());
+                for b in bids { if cache_bid(&db, &b) { rpt.new_count += 1; } rpt.bids.push(b); }
+            }
+            Err(e) => eprintln!("[sbir] error: {}", e),
+        }
+
+        // === AWARDS (competitive intel) ===
+
+        eprintln!("[usaspending] querying...");
+        match usaspending::query(naics, min_amount, max_amount).await {
+            Ok(awards) => {
+                eprintln!("[usaspending] {} awards", awards.len());
+                for a in awards { if cache_award(&db, &a) { rpt.new_count += 1; } rpt.awards.push(a); }
+            }
+            Err(e) => eprintln!("[usaspending] error: {}", e),
+        }
+
         if let Some(key) = sam_key {
             eprintln!("[awards] querying...");
             match contract_awards::query(key, naics).await {
-                Ok(opps) => {
-                    eprintln!("[awards] {} results", opps.len());
-                    for o in opps { if cache_put(&db, &o) { new_count += 1; } all.push(o); }
+                Ok(awards) => {
+                    eprintln!("[awards] {} awards", awards.len());
+                    for a in awards { if cache_award(&db, &a) { rpt.new_count += 1; } rpt.awards.push(a); }
                 }
                 Err(e) => eprintln!("[awards] error: {}", e),
             }
         }
 
-        // --- Regulations.gov (DEMO_KEY, early pipeline intel) ---
+        // === SIGNALS (early pipeline) ===
+
+        let sig_kw = keyword.unwrap_or("cybersecurity+software");
+        eprintln!("[fedreg] querying...");
+        match fedreg::query(sig_kw).await {
+            Ok(sigs) => {
+                eprintln!("[fedreg] {} signals", sigs.len());
+                for s in sigs { if cache_signal(&db, &s) { rpt.new_count += 1; } rpt.signals.push(s); }
+            }
+            Err(e) => eprintln!("[fedreg] error: {}", e),
+        }
+
         let reg_kw = keyword.unwrap_or("cybersecurity");
         eprintln!("[regs] querying...");
         match regulations::query(reg_kw).await {
-            Ok(opps) => {
-                eprintln!("[regs] {} results", opps.len());
-                for o in opps { if cache_put(&db, &o) { new_count += 1; } all.push(o); }
+            Ok(sigs) => {
+                eprintln!("[regs] {} signals", sigs.len());
+                for s in sigs { if cache_signal(&db, &s) { rpt.new_count += 1; } rpt.signals.push(s); }
             }
             Err(e) => eprintln!("[regs] error: {}", e),
         }
 
-        // --- CALC+ Labor Rates (no auth, pricing intel) ---
+        // === RATES (pricing intel) ===
+
         let calc_kw = keyword.unwrap_or("software engineer");
         eprintln!("[calc] querying...");
         match calc::query(calc_kw).await {
-            Ok(opps) => {
-                eprintln!("[calc] {} results", opps.len());
-                for o in opps { if cache_put(&db, &o) { new_count += 1; } all.push(o); }
+            Ok(rates) => {
+                eprintln!("[calc] {} rates", rates.len());
+                for r in rates { if cache_rate(&db, &r) { rpt.new_count += 1; } rpt.rates.push(r); }
             }
             Err(e) => eprintln!("[calc] error: {}", e),
         }
 
-        // --- Report ---
-        let kw = keyword.unwrap_or("");
-        let filtered: Vec<&Opportunity> = if kw.is_empty() {
-            all.iter().collect()
-        } else {
-            let kw_lower = kw.to_lowercase();
-            all.iter().filter(|o| {
-                o.title.to_lowercase().contains(&kw_lower) ||
-                o.description.to_lowercase().contains(&kw_lower)
-            }).collect()
-        };
+        // === REPORT ===
 
-        println!("\n{:<12} {:<12} {:<10} {:<50} {}", "Source", "Amount", "NAICS", "Title", "Agency");
-        println!("{}", "=".repeat(120));
-        for o in &filtered {
-            let amt = o.amount.map(|a| format!("${:.0}", a)).unwrap_or_else(|| "-".into());
-            let title = if o.title.len() > 48 { &o.title[..48] } else { &o.title };
-            println!("{:<12} {:<12} {:<10} {:<50} {}", o.source, amt, o.naics, title, o.agency);
+        let total = rpt.bids.len() + rpt.awards.len() + rpt.signals.len() + rpt.rates.len();
+
+        // Open Bids
+        println!("\n=== OPEN BIDS ({}) ===", rpt.bids.len());
+        println!("{:<10} {:<10} {:<12} {:<50} {}", "Source", "NAICS", "Deadline", "Title", "Agency");
+        println!("{}", "-".repeat(120));
+        for b in &rpt.bids {
+            let dl = if b.deadline.is_empty() { "open" } else { &b.deadline[..10.min(b.deadline.len())] };
+            let title = if b.title.len() > 48 { &b.title[..48] } else { &b.title };
+            println!("{:<10} {:<10} {:<12} {:<50} {}", b.source, b.naics, dl, title, b.agency);
         }
-        println!("\n{} total | {} new | {} cached", all.len(), new_count, db.len());
+
+        // Competitive Landscape
+        println!("\n=== AWARDS — WHO'S WINNING ({}) ===", rpt.awards.len());
+        println!("{:<12} {:<12} {:<40} {}", "Amount", "NAICS", "Winner", "Agency");
+        println!("{}", "-".repeat(110));
+        for a in &rpt.awards {
+            let winner = if a.winner.len() > 38 { &a.winner[..38] } else { &a.winner };
+            println!("${:<11.0} {:<12} {:<40} {}", a.amount, a.naics, winner, a.agency);
+        }
+
+        // Pipeline Signals
+        println!("\n=== PIPELINE SIGNALS ({}) ===", rpt.signals.len());
+        println!("{:<8} {:<12} {:<60} {}", "Source", "Date", "Title", "Agency");
+        println!("{}", "-".repeat(110));
+        for s in &rpt.signals {
+            let title = if s.title.len() > 58 { &s.title[..58] } else { &s.title };
+            let date = if s.date.len() >= 10 { &s.date[..10] } else { &s.date };
+            println!("{:<8} {:<12} {:<60} {}", s.source, date, title, s.agency);
+        }
+
+        // Rate Benchmarks
+        println!("\n=== RATE BENCHMARKS ({}) ===", rpt.rates.len());
+        println!("{:<12} {:<40} {}", "$/hr", "Labor Category", "Vendor");
+        println!("{}", "-".repeat(80));
+        for r in &rpt.rates {
+            let cat = if r.labor_category.len() > 38 { &r.labor_category[..38] } else { &r.labor_category };
+            let vendor = if r.vendor.len() > 30 { &r.vendor[..30] } else { &r.vendor };
+            println!("${:<11.2} {:<40} {}", r.price, cat, vendor);
+        }
+
+        println!("\n{} total | {} new | {} cached", total, rpt.new_count, db.len());
         db.flush()?;
         Ok(())
     }
@@ -286,11 +366,11 @@ mod scout {
     const PAGE_CAP: usize = 200;
 
     mod usaspending {
-        use super::{Opportunity, PAGE_CAP};
+        use super::{Award, PAGE_CAP};
 
         /// USASpending API — no auth, no rate limit
         /// Pagination: page param (1-indexed), limit per page, has_next_page in response
-        pub async fn query(naics: &[&str], min_amount: u64, max_amount: u64) -> anyhow::Result<Vec<Opportunity>> {
+        pub async fn query(naics: &[&str], min_amount: u64, max_amount: u64) -> anyhow::Result<Vec<Award>> {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
@@ -328,15 +408,15 @@ mod scout {
 
                 if let Some(arr) = results {
                     for r in arr {
-                        all.push(Opportunity {
+                        all.push(Award {
                             source: "usaspending".into(),
                             id: r["Award ID"].as_str().unwrap_or("").into(),
-                            title: r["Recipient Name"].as_str().unwrap_or("").into(),
+                            winner: r["Recipient Name"].as_str().unwrap_or("").into(),
                             description: r["Description"].as_str().unwrap_or("").into(),
-                            amount: r["Award Amount"].as_f64(),
+                            amount: r["Award Amount"].as_f64().unwrap_or(0.0),
                             agency: r["Awarding Agency"].as_str().unwrap_or("").into(),
-                            date: r["Start Date"].as_str().unwrap_or("").into(),
                             naics: "mixed".into(),
+                            date: r["Start Date"].as_str().unwrap_or("").into(),
                             url: format!("https://www.usaspending.gov/award/{}", r["generated_internal_id"].as_str().unwrap_or("")),
                         });
                     }
@@ -350,9 +430,9 @@ mod scout {
     }
 
     mod sam {
-        use super::Opportunity;
+        use super::Bid;
 
-        pub async fn query(api_key: &str, naics: &[&str], keyword: Option<&str>) -> anyhow::Result<Vec<Opportunity>> {
+        pub async fn query(api_key: &str, naics: &[&str], keyword: Option<&str>) -> anyhow::Result<Vec<Bid>> {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
@@ -395,15 +475,19 @@ mod scout {
 
                     if let Some(arr) = arr {
                         for r in arr {
-                            all_opps.push(Opportunity {
+                            let set_aside_val = r["typeOfSetAsideDescription"].as_str()
+                                .or_else(|| r["typeOfSetAside"].as_str())
+                                .unwrap_or("");
+                            all_opps.push(Bid {
                                 source: "sam.gov".into(),
                                 id: r["noticeId"].as_str().unwrap_or("").into(),
                                 title: r["title"].as_str().unwrap_or("").into(),
                                 description: r["description"].as_str().unwrap_or("").into(),
-                                amount: None,
                                 agency: r["fullParentPathName"].as_str().unwrap_or("").into(),
-                                date: r["postedDate"].as_str().unwrap_or("").into(),
                                 naics: r["naicsCode"].as_str().unwrap_or("").into(),
+                                set_aside: set_aside_val.into(),
+                                posted: r["postedDate"].as_str().unwrap_or("").into(),
+                                deadline: r["responseDeadLine"].as_str().unwrap_or("").into(),
                                 url: format!("https://sam.gov/opp/{}/view", r["noticeId"].as_str().unwrap_or("")),
                             });
                         }
@@ -425,9 +509,9 @@ mod scout {
     }
 
     mod sbir {
-        use super::Opportunity;
+        use super::Bid;
 
-        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Opportunity>> {
+        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Bid>> {
             let client = reqwest::Client::new();
             let url = format!(
                 "https://api.sbir.gov/solicitation?keyword={}&open=true&rows=25",
@@ -440,15 +524,16 @@ mod scout {
             let parsed: serde_json::Value = serde_json::from_str(&resp).unwrap_or(serde_json::Value::Array(vec![]));
 
             let results = parsed.as_array().map(|arr| {
-                arr.iter().map(|r| Opportunity {
+                arr.iter().map(|r| Bid {
                     source: "sbir".into(),
                     id: r["solicitationId"].as_str().unwrap_or("").into(),
                     title: r["solicitationTitle"].as_str().unwrap_or("").into(),
                     description: r["sbpiAbstract"].as_str().unwrap_or("").into(),
-                    amount: None,
                     agency: r["agency"].as_str().unwrap_or("").into(),
-                    date: r["openDate"].as_str().unwrap_or("").into(),
                     naics: "SBIR".into(),
+                    set_aside: String::new(),
+                    posted: r["openDate"].as_str().unwrap_or("").into(),
+                    deadline: r["closeDate"].as_str().unwrap_or("").into(),
                     url: format!("https://www.sbir.gov/node/{}", r["solicitationId"].as_str().unwrap_or("")),
                 }).collect()
             }).unwrap_or_default();
@@ -458,11 +543,11 @@ mod scout {
     }
 
     mod fedreg {
-        use super::Opportunity;
+        use super::{Signal, PAGE_CAP};
 
         /// Federal Register API v1 — no auth, no rate limit
         /// Pagination: per_page (max 1000), page param
-        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Opportunity>> {
+        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Signal>> {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
@@ -487,33 +572,32 @@ mod scout {
                             .and_then(|a| a.first())
                             .and_then(|a| a["name"].as_str())
                             .unwrap_or("");
-                        all.push(Opportunity {
+                        all.push(Signal {
                             source: "fedreg".into(),
                             id: r["document_number"].as_str().unwrap_or("").into(),
                             title: r["title"].as_str().unwrap_or("").into(),
                             description: r["abstract"].as_str().unwrap_or("").into(),
-                            amount: None,
                             agency: agency.into(),
+                            doc_type: r["type"].as_str().unwrap_or("NOTICE").into(),
                             date: r["publication_date"].as_str().unwrap_or("").into(),
-                            naics: "notice".into(),
                             url: r["html_url"].as_str().unwrap_or("").into(),
                         });
                     }
                 }
 
                 page += 1;
-                if count == 0 || all.len() >= super::PAGE_CAP || all.len() as u64 >= total { break; }
+                if count == 0 || all.len() >= PAGE_CAP || all.len() as u64 >= total { break; }
             }
             Ok(all)
         }
     }
 
     mod grants {
-        use super::Opportunity;
+        use super::{Bid, PAGE_CAP};
 
         /// Grants.gov API v1 — no auth, POST to /v1/api/search2
         /// Pagination: startRecordNum in body, hitCount in response
-        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Opportunity>> {
+        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Bid>> {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
@@ -543,35 +627,36 @@ mod scout {
 
                 if let Some(arr) = hits {
                     for r in arr {
-                        all.push(Opportunity {
+                        all.push(Bid {
                             source: "grants".into(),
                             id: r["number"].as_str().unwrap_or("").into(),
                             title: r["title"].as_str().unwrap_or("").into(),
                             description: r["docType"].as_str().unwrap_or("").into(),
-                            amount: None,
                             agency: r["agency"].as_str().unwrap_or("").into(),
-                            date: r["openDate"].as_str().unwrap_or("").into(),
                             naics: "grant".into(),
+                            set_aside: String::new(),
+                            posted: r["openDate"].as_str().unwrap_or("").into(),
+                            deadline: r["closeDate"].as_str().unwrap_or("").into(),
                             url: format!("https://www.grants.gov/search-results-detail/{}", r["id"].as_str().unwrap_or("")),
                         });
                     }
                 }
 
                 start += count as u32;
-                if count == 0 || all.len() >= super::PAGE_CAP || start as u64 >= hit_count { break; }
+                if count == 0 || all.len() >= PAGE_CAP || start as u64 >= hit_count { break; }
             }
             Ok(all)
         }
     }
 
     mod contract_awards {
-        use super::Opportunity;
+        use super::Award;
 
         /// SAM.gov Contract Awards API v1 — same API key as opportunities
         /// Endpoint: https://api.sam.gov/contract-awards/v1/search
         /// Params: naicsCode (~ separated), dollarsObligated (range), dateSigned (range), limit, offset
         /// Rate limit: shares daily budget with opportunities API
-        pub async fn query(api_key: &str, naics: &[&str]) -> anyhow::Result<Vec<Opportunity>> {
+        pub async fn query(api_key: &str, naics: &[&str]) -> anyhow::Result<Vec<Award>> {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
@@ -587,15 +672,15 @@ mod scout {
                 arr.iter().map(|r| {
                     let core = &r["coreData"];
                     let awardee = &r["awardeeData"];
-                    Opportunity {
+                    Award {
                         source: "awards".into(),
                         id: core["contractId"].as_str().unwrap_or("").into(),
-                        title: awardee["awardeeLegalBusinessName"].as_str().unwrap_or("").into(),
+                        winner: awardee["awardeeLegalBusinessName"].as_str().unwrap_or("").into(),
                         description: core["descriptionOfContractRequirement"].as_str().unwrap_or("").into(),
-                        amount: core["dollarsObligated"].as_f64(),
+                        amount: core["dollarsObligated"].as_f64().unwrap_or(0.0),
                         agency: core["fundingAgencyName"].as_str().unwrap_or("").into(),
-                        date: core["dateSigned"].as_str().unwrap_or("").into(),
                         naics: core["naicsCode"].as_str().unwrap_or("").into(),
+                        date: core["dateSigned"].as_str().unwrap_or("").into(),
                         url: "https://sam.gov/search?keywords=contract+awards".into(),
                     }
                 }).collect()
@@ -606,11 +691,11 @@ mod scout {
     }
 
     mod regulations {
-        use super::Opportunity;
+        use super::{Signal, PAGE_CAP};
 
         /// Regulations.gov API v4 — DEMO_KEY for testing, get real key from api.data.gov
         /// Pagination: page[size] max 250, page[number]
-        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Opportunity>> {
+        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Signal>> {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
@@ -639,35 +724,34 @@ mod scout {
                 if let Some(arr) = data {
                     for r in arr {
                         let attrs = &r["attributes"];
-                        all.push(Opportunity {
+                        all.push(Signal {
                             source: "regs".into(),
                             id: attrs["documentId"].as_str().unwrap_or("").into(),
                             title: attrs["title"].as_str().unwrap_or("").into(),
-                            description: attrs["documentType"].as_str().unwrap_or("").into(),
-                            amount: None,
+                            description: String::new(),
                             agency: attrs["agencyId"].as_str().unwrap_or("").into(),
+                            doc_type: attrs["documentType"].as_str().unwrap_or("").into(),
                             date: attrs["postedDate"].as_str().unwrap_or("").into(),
-                            naics: "reg".into(),
                             url: format!("https://www.regulations.gov/document/{}", attrs["documentId"].as_str().unwrap_or("")),
                         });
                     }
                 }
 
                 page += 1;
-                if count == 0 || all.len() >= super::PAGE_CAP || all.len() as u64 >= total { break; }
+                if count == 0 || all.len() >= PAGE_CAP || all.len() as u64 >= total { break; }
             }
             Ok(all)
         }
     }
 
     mod calc {
-        use super::Opportunity;
+        use super::Rate;
 
         /// GSA CALC+ Labor Rates API v3 — no auth required
         /// Endpoint: https://api.gsa.gov/acquisition/calc/v3/api/ceilingrates/
         /// Params: keyword (min 2 chars), page, page_size
         /// Returns labor categories with ceiling rates from GSA schedules
-        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Opportunity>> {
+        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Rate>> {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
@@ -681,17 +765,14 @@ mod scout {
             let results = resp["hits"]["hits"].as_array().map(|arr| {
                 arr.iter().map(|r| {
                     let s = &r["_source"];
-                    let price = s["current_price"].as_f64();
-                    Opportunity {
-                        source: "calc".into(),
+                    Rate {
                         id: r["_id"].as_str().unwrap_or("").into(),
-                        title: s["labor_category"].as_str().unwrap_or("").into(),
-                        description: format!("{} — {}", s["vendor_name"].as_str().unwrap_or(""), s["sin"].as_str().unwrap_or("")),
-                        amount: price,
-                        agency: "GSA Schedule".into(),
-                        date: "".into(),
-                        naics: "rate".into(),
-                        url: "https://buy.gsa.gov/pricing/".into(),
+                        labor_category: s["labor_category"].as_str().unwrap_or("").into(),
+                        vendor: s["vendor_name"].as_str().unwrap_or("").into(),
+                        sin: s["sin"].as_str().unwrap_or("").into(),
+                        price: s["current_price"].as_f64().unwrap_or(0.0),
+                        education: s["education_level"].as_str().unwrap_or("").into(),
+                        experience: s["min_years_experience"].as_str().unwrap_or("").into(),
                     }
                 }).collect()
             }).unwrap_or_default();
