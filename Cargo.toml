@@ -21,6 +21,7 @@ anyhow = "1"
 hickory-resolver = "0.25"
 sled = "0.34"
 dirs = "5"
+zstd = "0.13"
 
 [profile.release]
 opt-level = "z"

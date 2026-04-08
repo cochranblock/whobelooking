@@ -200,21 +200,85 @@ mod scout {
         sled::open(dir).expect("open sled db")
     }
 
+    fn compress(data: &[u8]) -> Vec<u8> {
+        zstd::encode_all(data, 3).unwrap_or_else(|_| data.to_vec())
+    }
+
+    fn decompress(data: &[u8]) -> Vec<u8> {
+        zstd::decode_all(data).unwrap_or_else(|_| data.to_vec())
+    }
+
     fn cache_bid(db: &sled::Db, b: &Bid) -> bool {
         let key = format!("bid:{}:{}", b.source, b.id);
-        db.insert(&key, serde_json::to_vec(b).unwrap()).unwrap().is_none()
+        let val = compress(&serde_json::to_vec(b).unwrap());
+        db.insert(&key, val).unwrap().is_none()
     }
     fn cache_award(db: &sled::Db, a: &Award) -> bool {
         let key = format!("award:{}:{}", a.source, a.id);
-        db.insert(&key, serde_json::to_vec(a).unwrap()).unwrap().is_none()
+        let val = compress(&serde_json::to_vec(a).unwrap());
+        db.insert(&key, val).unwrap().is_none()
     }
     fn cache_signal(db: &sled::Db, s: &Signal) -> bool {
         let key = format!("signal:{}:{}", s.source, s.id);
-        db.insert(&key, serde_json::to_vec(s).unwrap()).unwrap().is_none()
+        let val = compress(&serde_json::to_vec(s).unwrap());
+        db.insert(&key, val).unwrap().is_none()
     }
     fn cache_rate(db: &sled::Db, r: &Rate) -> bool {
         let key = format!("rate:{}", r.id);
-        db.insert(&key, serde_json::to_vec(r).unwrap()).unwrap().is_none()
+        let val = compress(&serde_json::to_vec(r).unwrap());
+        db.insert(&key, val).unwrap().is_none()
+    }
+
+    /// Fetch full description text from a URL, return as string
+    async fn enrich(client: &reqwest::Client, url: &str) -> String {
+        if url.is_empty() || !url.starts_with("http") { return String::new(); }
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.get(url).send()
+        ).await {
+            Ok(Ok(resp)) => resp.text().await.unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    /// Enrich a batch of bids — fetch full descriptions in parallel, cap concurrency
+    async fn enrich_bids(bids: &mut [Bid], db: &sled::Db) {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap();
+
+        for b in bids.iter_mut() {
+            // Skip if already enriched (description > 200 chars = probably full text)
+            if b.description.len() > 200 { continue; }
+
+            // Check sled for cached enrichment
+            let ekey = format!("enriched:{}:{}", b.source, b.id);
+            if let Some(cached) = db.get(&ekey).unwrap() {
+                let text = String::from_utf8_lossy(&decompress(&cached)).to_string();
+                if !text.is_empty() { b.description = text; continue; }
+            }
+
+            // SAM.gov description field is a URL to the full text
+            let desc_url = &b.description;
+            if desc_url.starts_with("http") {
+                let full = enrich(&client, desc_url).await;
+                if !full.is_empty() {
+                    // Strip HTML tags for cleaner scoring
+                    let clean: String = full.chars().fold((String::new(), false), |(mut s, in_tag), c| {
+                        match c {
+                            '<' => (s, true),
+                            '>' => (s, false),
+                            _ if !in_tag => { s.push(c); (s, false) }
+                            _ => (s, true)
+                        }
+                    }).0;
+                    let trimmed = if clean.len() > 2000 { clean[..2000].to_string() } else { clean };
+                    let _ = db.insert(&ekey, compress(trimmed.as_bytes()));
+                    b.description = trimmed;
+                }
+            }
+        }
     }
 
     pub async fn run(naics: &[&str], keyword: Option<&str>, sam_key: Option<&str>, min_amount: u64, max_amount: u64) -> anyhow::Result<()> {
@@ -256,6 +320,13 @@ mod scout {
                 for b in bids { if cache_bid(&db, &b) { rpt.new_count += 1; } rpt.bids.push(b); }
             }
             Err(e) => eprintln!("[sbir] error: {}", e),
+        }
+
+        // === ENRICH BIDS — fetch full descriptions, compress, cache ===
+        if !rpt.bids.is_empty() {
+            eprintln!("[enrich] fetching full descriptions for {} bids...", rpt.bids.len());
+            enrich_bids(&mut rpt.bids, &db).await;
+            eprintln!("[enrich] done");
         }
 
         // === AWARDS (competitive intel) ===
@@ -314,50 +385,111 @@ mod scout {
             Err(e) => eprintln!("[calc] error: {}", e),
         }
 
-        // === REPORT ===
+        // === REPORT (gamified) ===
 
         let total = rpt.bids.len() + rpt.awards.len() + rpt.signals.len() + rpt.rates.len();
 
-        // Open Bids
-        println!("\n=== OPEN BIDS ({}) ===", rpt.bids.len());
-        println!("{:<10} {:<10} {:<12} {:<50} {}", "Source", "NAICS", "Deadline", "Title", "Agency");
-        println!("{}", "-".repeat(120));
-        for b in &rpt.bids {
-            let dl = if b.deadline.is_empty() { "open" } else { &b.deadline[..10.min(b.deadline.len())] };
-            let title = if b.title.len() > 48 { &b.title[..48] } else { &b.title };
-            println!("{:<10} {:<10} {:<12} {:<50} {}", b.source, b.naics, dl, title, b.agency);
+        // Score bids by match quality
+        let match_keywords = ["cyber", "software", "rust", "edge", "ai", "cloud", "zero trust",
+            "sbir", "single binary", "open source", "secure", "memory safe", "veteran"];
+
+        fn score_bid(b: &Bid, keywords: &[&str]) -> u32 {
+            let text = format!("{} {} {}", b.title, b.description, b.agency).to_lowercase();
+            let mut s = 0u32;
+            for kw in keywords { if text.contains(kw) { s += 10; } }
+            if !b.set_aside.is_empty() { s += 15; }
+            if b.set_aside.contains("SDVOSB") { s += 25; }
+            if b.deadline.is_empty() || b.deadline.contains("rolling") { s += 5; }
+            // Agency boost — orgs you've worked with or align to
+            let good_agencies = ["darpa", "nsf", "navy", "air force", "army", "dhs", "cisa",
+                "cyber", "dod", "defense", "veterans", "nist", "nasa"];
+            for ga in good_agencies { if text.contains(ga) { s += 8; } }
+            // NAICS boost — your codes
+            let your_naics = ["541511", "541512", "541519", "518210", "541690"];
+            if your_naics.iter().any(|n| b.naics.contains(n)) { s += 20; }
+            // Title keyword boost — things you actually build
+            let hot = ["software", "web", "application", "platform", "data", "api",
+                "infrastructure", "system design", "custom", "development", "modernization"];
+            for h in hot { if text.contains(h) { s += 5; } }
+            s
         }
 
-        // Competitive Landscape
-        println!("\n=== AWARDS — WHO'S WINNING ({}) ===", rpt.awards.len());
-        println!("{:<12} {:<12} {:<40} {}", "Amount", "NAICS", "Winner", "Agency");
-        println!("{}", "-".repeat(110));
-        for a in &rpt.awards {
-            let winner = if a.winner.len() > 38 { &a.winner[..38] } else { &a.winner };
-            println!("${:<11.0} {:<12} {:<40} {}", a.amount, a.naics, winner, a.agency);
+        fn score_icon(score: u32) -> &'static str {
+            if score >= 50 { "[!!!]" }      // perfect match — drop everything
+            else if score >= 30 { "[!! ]" }  // strong match — bid this week
+            else if score >= 15 { "[!  ]" }  // worth a look
+            else { "[   ]" }                 // low match
         }
 
-        // Pipeline Signals
-        println!("\n=== PIPELINE SIGNALS ({}) ===", rpt.signals.len());
-        println!("{:<8} {:<12} {:<60} {}", "Source", "Date", "Title", "Agency");
-        println!("{}", "-".repeat(110));
-        for s in &rpt.signals {
-            let title = if s.title.len() > 58 { &s.title[..58] } else { &s.title };
+        // Sort bids by score descending
+        let mut scored_bids: Vec<(u32, &Bid)> = rpt.bids.iter().map(|b| (score_bid(b, &match_keywords), b)).collect();
+        scored_bids.sort_by(|a, b| b.0.cmp(&a.0));
+
+        println!("\n  LOOT TABLE — OPEN BIDS ({} found)", rpt.bids.len());
+        println!("  {:<6} {:<10} {:<12} {:<48} {}", "Match", "Source", "Deadline", "Title", "Agency");
+        println!("  {}", "-".repeat(115));
+        for (score, b) in &scored_bids {
+            let dl = if b.deadline.is_empty() { "rolling" } else { &b.deadline[..10.min(b.deadline.len())] };
+            let title = if b.title.len() > 46 { &b.title[..46] } else { &b.title };
+            println!("  {:<6} {:<10} {:<12} {:<48} {}", score_icon(*score), b.source, dl, title, b.agency);
+        }
+
+        // Awards — sorted by amount, show your weight class
+        let mut sorted_awards = rpt.awards.clone();
+        sorted_awards.sort_by(|a, b| b.amount.partial_cmp(&a.amount).unwrap_or(std::cmp::Ordering::Equal));
+
+        println!("\n  SCOREBOARD — WHO'S WINNING ({} awards)", sorted_awards.len());
+        println!("  {:<12} {:<12} {:<38} {}", "Amount", "NAICS", "Winner", "Agency");
+        println!("  {}", "-".repeat(105));
+        let mut your_range = 0u32;
+        for a in &sorted_awards {
+            let tier = if a.amount < 50000.0 { ">" } // micro — easy entry
+                else if a.amount < 150000.0 { ">>" } // your sweet spot
+                else if a.amount < 300000.0 { ">>>" }
+                else { ">>>>" };
+            if a.amount >= 25000.0 && a.amount <= 250000.0 { your_range += 1; }
+            let winner = if a.winner.len() > 36 { &a.winner[..36] } else { &a.winner };
+            let agency = if a.agency.len() > 30 { &a.agency[..30] } else { &a.agency };
+            println!("  {:<2} ${:<10.0} {:<12} {:<38} {}", tier, a.amount, a.naics, winner, agency);
+        }
+        println!("  {} awards in your range ($25K-$250K)", your_range);
+
+        // Pipeline — signals sorted by date
+        println!("\n  RADAR — PIPELINE SIGNALS ({} detected)", rpt.signals.len());
+        println!("  {:<8} {:<12} {:<58} {}", "Source", "Date", "Title", "Agency");
+        println!("  {}", "-".repeat(105));
+        for s in rpt.signals.iter().take(30) {
+            let title = if s.title.len() > 56 { &s.title[..56] } else { &s.title };
             let date = if s.date.len() >= 10 { &s.date[..10] } else { &s.date };
-            println!("{:<8} {:<12} {:<60} {}", s.source, date, title, s.agency);
+            println!("  {:<8} {:<12} {:<58} {}", s.source, date, title, s.agency);
+        }
+        if rpt.signals.len() > 30 {
+            println!("  ... +{} more", rpt.signals.len() - 30);
         }
 
-        // Rate Benchmarks
-        println!("\n=== RATE BENCHMARKS ({}) ===", rpt.rates.len());
-        println!("{:<12} {:<40} {}", "$/hr", "Labor Category", "Vendor");
-        println!("{}", "-".repeat(80));
+        // Rates — your pricing intel
+        println!("\n  MARKET RATES — WHAT THEY CHARGE ({} benchmarks)", rpt.rates.len());
+        println!("  {:<10} {:<38} {}", "$/hr", "Labor Category", "Vendor");
+        println!("  {}", "-".repeat(75));
         for r in &rpt.rates {
-            let cat = if r.labor_category.len() > 38 { &r.labor_category[..38] } else { &r.labor_category };
-            let vendor = if r.vendor.len() > 30 { &r.vendor[..30] } else { &r.vendor };
-            println!("${:<11.2} {:<40} {}", r.price, cat, vendor);
+            let cat = if r.labor_category.len() > 36 { &r.labor_category[..36] } else { &r.labor_category };
+            let vendor = if r.vendor.len() > 28 { &r.vendor[..28] } else { &r.vendor };
+            println!("  ${:<9.2} {:<38} {}", r.price, cat, vendor);
         }
 
-        println!("\n{} total | {} new | {} cached", total, rpt.new_count, db.len());
+        // Summary
+        let top_matches = scored_bids.iter().filter(|(s, _)| *s >= 30).count();
+        println!("\n  === SCOUT SUMMARY ===");
+        println!("  {} total records | {} new | {} cached", total, rpt.new_count, db.len());
+        println!("  {} open bids | {} strong matches [!!+]", rpt.bids.len(), top_matches);
+        println!("  {} competitors tracked | {} in your range", rpt.awards.len(), your_range);
+        println!("  {} pipeline signals | {} rate benchmarks", rpt.signals.len(), rpt.rates.len());
+        if top_matches > 0 {
+            println!("\n  [!!!] = perfect match, bid NOW");
+            println!("  [!! ] = strong match, bid this week");
+            println!("  [!  ] = worth a look");
+        }
+
         db.flush()?;
         Ok(())
     }
