@@ -229,6 +229,17 @@ mod scout {
         db.insert(&key, val).unwrap().is_none()
     }
 
+    fn strip_html(s: &str) -> String {
+        s.chars().fold((String::new(), false), |(mut out, in_tag), c| {
+            match c {
+                '<' => (out, true),
+                '>' => (out, false),
+                _ if !in_tag => { out.push(c); (out, false) }
+                _ => (out, true)
+            }
+        }).0
+    }
+
     /// Fetch full description text from a URL, return as string
     async fn enrich(client: &reqwest::Client, url: &str) -> String {
         if url.is_empty() || !url.starts_with("http") { return String::new(); }
@@ -259,23 +270,39 @@ mod scout {
                 if !text.is_empty() { b.description = text; continue; }
             }
 
-            // SAM.gov description field is a URL to the full text
-            let desc_url = &b.description;
-            if desc_url.starts_with("http") {
-                let full = enrich(&client, desc_url).await;
+            // SAM.gov: description field is a URL to full solicitation text
+            if b.description.starts_with("http") {
+                let full = enrich(&client, &b.description).await;
                 if !full.is_empty() {
-                    // Strip HTML tags for cleaner scoring
-                    let clean: String = full.chars().fold((String::new(), false), |(mut s, in_tag), c| {
-                        match c {
-                            '<' => (s, true),
-                            '>' => (s, false),
-                            _ if !in_tag => { s.push(c); (s, false) }
-                            _ => (s, true)
-                        }
-                    }).0;
+                    let clean = strip_html(&full);
                     let trimmed = if clean.len() > 2000 { clean[..2000].to_string() } else { clean };
                     let _ = db.insert(&ekey, compress(trimmed.as_bytes()));
                     b.description = trimmed;
+                }
+            }
+
+            // Grants.gov: fetch full synopsis via fetchOpportunity (no auth)
+            if b.source == "grants" && !b.id.is_empty() {
+                let body = serde_json::json!({"oppId": b.id});
+                let resp = client
+                    .post("https://api.grants.gov/v1/api/fetchOpportunity")
+                    .json(&body)
+                    .send()
+                    .await;
+                if let Ok(resp) = resp {
+                    if let Ok(val) = resp.json::<serde_json::Value>().await {
+                        // data.synopsis.synopsisDesc has the full text
+                        let desc = val["data"]["synopsis"]["synopsisDesc"]
+                            .as_str()
+                            .or_else(|| val["data"]["description"].as_str())
+                            .unwrap_or("");
+                        if !desc.is_empty() {
+                            let clean = strip_html(desc);
+                            let trimmed = if clean.len() > 2000 { clean[..2000].to_string() } else { clean };
+                            let _ = db.insert(&ekey, compress(trimmed.as_bytes()));
+                            b.description = trimmed;
+                        }
+                    }
                 }
             }
         }
