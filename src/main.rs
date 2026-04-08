@@ -1,13 +1,33 @@
 // Unlicense — cochranblock.org
 // Contributors: GotEmCoach, KOVA, Claude Opus 4.6
-//! whobelooking — Cloudflare visitor → rDNS → /24 neighbor scan → company ID.
-//! One binary. Zero cloud. Know who's looking at your site.
+//! whobelooking — Two modes:
+//! 1. Visitor ID: Cloudflare → rDNS → /24 neighbor scan → company ID.
+//! 2. Contract Scout: SAM.gov + USASpending + SBIR load-balanced queries → sled cache → report.
+//! One binary. Zero cloud.
 
 use clap::Parser;
 
 #[derive(Parser)]
 #[command(name = "whobelooking", about = "Who's looking at your site? CF → rDNS → company ID.")]
 enum Cmd {
+    /// Scout federal contract opportunities across SAM.gov, USASpending, SBIR
+    Scout {
+        /// NAICS codes to search (comma-separated)
+        #[arg(short, long, default_value = "541511,541512,541519,518210")]
+        naics: String,
+        /// Keyword filter
+        #[arg(short, long)]
+        keyword: Option<String>,
+        /// SAM.gov API key (optional — skips SAM.gov if absent)
+        #[arg(long, env = "SAM_API_KEY")]
+        sam_key: Option<String>,
+        /// Max award amount for USASpending filter
+        #[arg(long, default_value = "500000")]
+        max_amount: u64,
+        /// Min award amount
+        #[arg(long, default_value = "25000")]
+        min_amount: u64,
+    },
     /// Pull US visitor IPs from Cloudflare GraphQL for a given date
     Pull {
         /// Date (YYYY-MM-DD), default today
@@ -66,6 +86,10 @@ enum Cmd {
 async fn main() -> anyhow::Result<()> {
     let cmd = Cmd::parse();
     match cmd {
+        Cmd::Scout { naics, keyword, sam_key, max_amount, min_amount } => {
+            let codes: Vec<&str> = naics.split(',').map(|s| s.trim()).collect();
+            scout::run(&codes, keyword.as_deref(), sam_key.as_deref(), min_amount, max_amount).await?;
+        }
         Cmd::Pull { date, zone, token, country, min_hits } => {
             let visitors = cf::pull(&zone, &token, date.as_deref(), &country, min_hits).await?;
             for v in &visitors {
@@ -93,6 +117,229 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+mod scout {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    pub struct Opportunity {
+        pub source: String,
+        pub id: String,
+        pub title: String,
+        pub description: String,
+        pub amount: Option<f64>,
+        pub agency: String,
+        pub date: String,
+        pub naics: String,
+        pub url: String,
+    }
+
+    fn open_db() -> sled::Db {
+        let dir = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join("whobelooking");
+        sled::open(dir).expect("open sled db")
+    }
+
+    fn cache_put(db: &sled::Db, opp: &Opportunity) -> bool {
+        let key = format!("{}:{}", opp.source, opp.id);
+        let is_new = db.insert(&key, serde_json::to_vec(opp).unwrap()).unwrap().is_none();
+        is_new
+    }
+
+    pub async fn run(naics: &[&str], keyword: Option<&str>, sam_key: Option<&str>, min_amount: u64, max_amount: u64) -> anyhow::Result<()> {
+        let db = open_db();
+        let mut all: Vec<Opportunity> = Vec::new();
+        let mut new_count = 0u32;
+
+        // --- USASpending (no auth, always available) ---
+        eprintln!("[usaspending] querying...");
+        match usaspending::query(naics, min_amount, max_amount).await {
+            Ok(opps) => {
+                eprintln!("[usaspending] {} results", opps.len());
+                for o in opps {
+                    if cache_put(&db, &o) { new_count += 1; }
+                    all.push(o);
+                }
+            }
+            Err(e) => eprintln!("[usaspending] error: {}", e),
+        }
+
+        // --- SAM.gov (needs API key) ---
+        if let Some(key) = sam_key {
+            eprintln!("[sam.gov] querying...");
+            match sam::query(key, naics, keyword).await {
+                Ok(opps) => {
+                    eprintln!("[sam.gov] {} results", opps.len());
+                    for o in opps {
+                        if cache_put(&db, &o) { new_count += 1; }
+                        all.push(o);
+                    }
+                }
+                Err(e) => eprintln!("[sam.gov] error: {}", e),
+            }
+        } else {
+            eprintln!("[sam.gov] skipped (no SAM_API_KEY)");
+        }
+
+        // --- SBIR.gov (no auth) ---
+        eprintln!("[sbir] querying...");
+        match sbir::query(keyword.unwrap_or("cyber")).await {
+            Ok(opps) => {
+                eprintln!("[sbir] {} results", opps.len());
+                for o in opps {
+                    if cache_put(&db, &o) { new_count += 1; }
+                    all.push(o);
+                }
+            }
+            Err(e) => eprintln!("[sbir] error: {}", e),
+        }
+
+        // --- Report ---
+        let kw = keyword.unwrap_or("");
+        let filtered: Vec<&Opportunity> = if kw.is_empty() {
+            all.iter().collect()
+        } else {
+            let kw_lower = kw.to_lowercase();
+            all.iter().filter(|o| {
+                o.title.to_lowercase().contains(&kw_lower) ||
+                o.description.to_lowercase().contains(&kw_lower)
+            }).collect()
+        };
+
+        println!("\n{:<12} {:<12} {:<10} {:<50} {}", "Source", "Amount", "NAICS", "Title", "Agency");
+        println!("{}", "=".repeat(120));
+        for o in &filtered {
+            let amt = o.amount.map(|a| format!("${:.0}", a)).unwrap_or_else(|| "-".into());
+            let title = if o.title.len() > 48 { &o.title[..48] } else { &o.title };
+            println!("{:<12} {:<12} {:<10} {:<50} {}", o.source, amt, o.naics, title, o.agency);
+        }
+        println!("\n{} total | {} new | {} cached", all.len(), new_count, db.len());
+        db.flush()?;
+        Ok(())
+    }
+
+    mod usaspending {
+        use super::Opportunity;
+
+        pub async fn query(naics: &[&str], min_amount: u64, max_amount: u64) -> anyhow::Result<Vec<Opportunity>> {
+            let client = reqwest::Client::new();
+            let naics_arr: Vec<String> = naics.iter().map(|s| s.to_string()).collect();
+            let body = serde_json::json!({
+                "filters": {
+                    "naics_codes": naics_arr,
+                    "award_type_codes": ["A", "B", "C", "D"],
+                    "time_period": [{
+                        "start_date": "2025-10-01",
+                        "end_date": "2026-12-31"
+                    }],
+                    "award_amounts": [{
+                        "lower_bound": min_amount,
+                        "upper_bound": max_amount
+                    }]
+                },
+                "fields": ["Award ID", "Recipient Name", "Award Amount", "Description", "Start Date", "Awarding Agency"],
+                "limit": 25,
+                "sort": "Start Date",
+                "order": "desc"
+            });
+
+            let resp: serde_json::Value = client
+                .post("https://api.usaspending.gov/api/v2/search/spending_by_award/")
+                .json(&body)
+                .send()
+                .await?
+                .json()
+                .await?;
+
+            let results = resp["results"].as_array().map(|arr| {
+                arr.iter().map(|r| Opportunity {
+                    source: "usaspending".into(),
+                    id: r["Award ID"].as_str().unwrap_or("").into(),
+                    title: r["Recipient Name"].as_str().unwrap_or("").into(),
+                    description: r["Description"].as_str().unwrap_or("").into(),
+                    amount: r["Award Amount"].as_f64(),
+                    agency: r["Awarding Agency"].as_str().unwrap_or("").into(),
+                    date: r["Start Date"].as_str().unwrap_or("").into(),
+                    naics: "mixed".into(),
+                    url: format!("https://www.usaspending.gov/award/{}", r["generated_internal_id"].as_str().unwrap_or("")),
+                }).collect()
+            }).unwrap_or_default();
+
+            Ok(results)
+        }
+    }
+
+    mod sam {
+        use super::Opportunity;
+
+        pub async fn query(api_key: &str, naics: &[&str], keyword: Option<&str>) -> anyhow::Result<Vec<Opportunity>> {
+            let client = reqwest::Client::new();
+            let kw = keyword.unwrap_or("software");
+            let naics_param = naics.join(",");
+            let url = format!(
+                "https://api.sam.gov/opportunities/v2/search?api_key={}&naics={}&q={}&limit=25&postedFrom=01/01/2026&postedTo=12/31/2026",
+                api_key, naics_param, kw
+            );
+
+            let resp: serde_json::Value = client
+                .get(&url)
+                .send()
+                .await?
+                .json()
+                .await?;
+
+            let results = resp["opportunitiesData"].as_array().map(|arr| {
+                arr.iter().map(|r| Opportunity {
+                    source: "sam.gov".into(),
+                    id: r["noticeId"].as_str().unwrap_or("").into(),
+                    title: r["title"].as_str().unwrap_or("").into(),
+                    description: r["description"].as_str().unwrap_or("").into(),
+                    amount: None,
+                    agency: r["fullParentPathName"].as_str().unwrap_or("").into(),
+                    date: r["postedDate"].as_str().unwrap_or("").into(),
+                    naics: r["naicsCode"].as_str().unwrap_or("").into(),
+                    url: format!("https://sam.gov/opp/{}/view", r["noticeId"].as_str().unwrap_or("")),
+                }).collect()
+            }).unwrap_or_default();
+
+            Ok(results)
+        }
+    }
+
+    mod sbir {
+        use super::Opportunity;
+
+        pub async fn query(keyword: &str) -> anyhow::Result<Vec<Opportunity>> {
+            let client = reqwest::Client::new();
+            let url = format!(
+                "https://api.sbir.gov/solicitation?keyword={}&open=true&rows=25",
+                keyword
+            );
+
+            let resp = client.get(&url).send().await?.text().await?;
+
+            // SBIR API may return empty or HTML when under maintenance
+            let parsed: serde_json::Value = serde_json::from_str(&resp).unwrap_or(serde_json::Value::Array(vec![]));
+
+            let results = parsed.as_array().map(|arr| {
+                arr.iter().map(|r| Opportunity {
+                    source: "sbir".into(),
+                    id: r["solicitationId"].as_str().unwrap_or("").into(),
+                    title: r["solicitationTitle"].as_str().unwrap_or("").into(),
+                    description: r["sbpiAbstract"].as_str().unwrap_or("").into(),
+                    amount: None,
+                    agency: r["agency"].as_str().unwrap_or("").into(),
+                    date: r["openDate"].as_str().unwrap_or("").into(),
+                    naics: "SBIR".into(),
+                    url: format!("https://www.sbir.gov/node/{}", r["solicitationId"].as_str().unwrap_or("")),
+                }).collect()
+            }).unwrap_or_default();
+
+            Ok(results)
+        }
+    }
 }
 
 mod cf {

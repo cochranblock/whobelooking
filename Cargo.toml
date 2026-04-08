@@ -5,10 +5,10 @@
 name = "whobelooking"
 version = "0.1.0"
 edition = "2024"
-description = "Who's looking at your site? Cloudflare GraphQL → rDNS → /24 neighbor scan → company identification. Zero cloud. One binary."
+description = "Who's looking? CF visitor ID + federal contract scout. SAM.gov + USASpending + SBIR load-balanced queries. Zero cloud. One binary."
 license = "Unlicense"
 repository = "https://github.com/cochranblock/whobelooking"
-keywords = ["analytics", "reverse-dns", "lead-generation", "cloudflare", "visitor-identification"]
+keywords = ["analytics", "reverse-dns", "lead-generation", "cloudflare", "gov-contracts"]
 categories = ["command-line-utilities"]
 
 [dependencies]
@@ -19,6 +19,8 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 hickory-resolver = "0.25"
+sled = "0.34"
+dirs = "5"
 
 [profile.release]
 opt-level = "z"
