@@ -51,6 +51,9 @@ enum Cmd {
         /// Extract page text (strip HTML, print to stdout)
         #[arg(long, default_value = "true")]
         extract: bool,
+        /// Emulate mobile viewport (390x844 iPhone 14)
+        #[arg(long)]
+        mobile: bool,
     },
     /// Batch browse — read URLs from file, one Chrome instance, screenshot + text for each
     #[cfg(feature = "browser")]
@@ -132,8 +135,8 @@ async fn main() -> anyhow::Result<()> {
             browse::perf(&url, wait).await?;
         }
         #[cfg(feature = "browser")]
-        Cmd::Browse { url, out, wait, extract } => {
-            browse::run(&url, &out, wait, extract).await?;
+        Cmd::Browse { url, out, wait, extract, mobile } => {
+            browse::run(&url, &out, wait, extract, mobile).await?;
         }
         #[cfg(feature = "browser")]
         Cmd::Scrape { file, out, wait } => {
@@ -1233,11 +1236,11 @@ mod browse {
             .map_err(|e| format!("browser config: {}", e))
     }
 
-    pub async fn run(url: &str, out_dir: &str, wait: u64, extract: bool) -> anyhow::Result<()> {
+    pub async fn run(url: &str, out_dir: &str, wait: u64, extract: bool, mobile: bool) -> anyhow::Result<()> {
         let out = Path::new(out_dir);
         std::fs::create_dir_all(out)?;
 
-        eprintln!("[browse] launching headless chrome...");
+        eprintln!("[browse] launching headless chrome{}...", if mobile { " (mobile)" } else { "" });
         let config = browser_config().await.map_err(|e| anyhow::anyhow!(e))?;
         let (mut browser, mut handler) = chromiumoxide::Browser::launch(config)
             .await
@@ -1249,6 +1252,23 @@ mod browse {
 
         let page = browser.new_page("about:blank").await
             .map_err(|e| anyhow::anyhow!("new_page: {}", e))?;
+
+        // Set mobile viewport if requested (iPhone 14: 390x844)
+        if mobile {
+            // Set mobile viewport — CSS pixels, not device pixels
+            // device_scale_factor affects rendering density but NOT media query breakpoints
+            let _ = page.evaluate("window.resizeTo(390, 844)").await;
+            use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
+            if let Ok(params) = SetDeviceMetricsOverrideParams::builder()
+                .width(390)
+                .height(844)
+                .device_scale_factor(1.0)
+                .mobile(true)
+                .build()
+            {
+                let _ = page.execute(params).await;
+            }
+        }
 
         eprintln!("[browse] navigating to {}...", url);
         let _ = page.goto(url).await.map_err(|e| anyhow::anyhow!("goto: {}", e))?;
@@ -1271,6 +1291,13 @@ mod browse {
             &screenshot_path,
         ).await.map_err(|e| anyhow::anyhow!("screenshot: {}", e))?;
         eprintln!("[browse] screenshot saved: {}", screenshot_path.display());
+
+        // Debug mobile viewport
+        if mobile {
+            if let Ok(w) = page.evaluate("JSON.stringify({w:window.innerWidth, navDisplay:getComputedStyle(document.querySelector('.nav-links')).display, checked:document.getElementById('nav-check').checked})").await {
+                eprintln!("[browse] mobile debug: {}", w.into_value::<String>().unwrap_or_default());
+            }
+        }
 
         // Extract text — use innerText for clean rendered content (no CSS/JS noise)
         if extract {
