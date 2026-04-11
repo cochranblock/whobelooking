@@ -6,6 +6,8 @@
 //! One binary. Zero cloud.
 
 use clap::Parser;
+#[cfg(feature = "browser")]
+use clap::Subcommand;
 
 #[derive(Parser)]
 #[command(name = "whobelooking", about = "Who's looking at your site? CF → rDNS → company ID.")]
@@ -99,6 +101,12 @@ enum Cmd {
         #[arg(long, default_value = "true")]
         skip_isp: bool,
     },
+    /// Cross-verified CTO OSINT scout — pull, verify, draft
+    #[cfg(feature = "browser")]
+    Ctos {
+        #[command(subcommand)]
+        op: CtosOp,
+    },
     /// Full pipeline: pull → rdns → neighbor scan → report
     Report {
         /// Date (YYYY-MM-DD), default today
@@ -119,6 +127,33 @@ enum Cmd {
         /// Scan /24 neighbors for company PTR records
         #[arg(long, default_value = "true")]
         scan_neighbors: bool,
+    },
+}
+
+#[cfg(feature = "browser")]
+#[derive(Subcommand)]
+enum CtosOp {
+    /// Pull CTO mentions from HN, YC, GitHub, Reddit, podcasts
+    Pull {
+        /// Source filter: hn, yc, github, reddit, podcasts, all
+        #[arg(short, long, default_value = "all")]
+        source: String,
+        /// Optional keyword override
+        #[arg(short, long)]
+        keyword: Option<String>,
+    },
+    /// Show CTOs seen in 2+ distinct sources (same name + company)
+    Verified {
+        /// Visit company URLs observed in mentions and extract real emails
+        #[arg(long)]
+        scrape_emails: bool,
+    },
+    /// Write markdown drafts for verified CTOs that have scraped emails.
+    /// Skips any entry without a real scraped email — never derives.
+    Draft {
+        /// Output directory
+        #[arg(short, long, default_value = "cto_drafts")]
+        out: String,
     },
 }
 
@@ -166,6 +201,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Report { date, zone, token, country, min_hits, scan_neighbors } => {
             report::run(&zone, &token, date.as_deref(), &country, min_hits, scan_neighbors).await?;
+        }
+        #[cfg(feature = "browser")]
+        Cmd::Ctos { op } => {
+            ctos::run(op).await?;
         }
     }
     Ok(())
@@ -1212,6 +1251,48 @@ mod browse {
     use std::path::Path;
     use std::time::Duration;
 
+    /// Long-lived headless Chrome session for multiple fetches in one run.
+    /// Reused by ctos puller + email scraper to avoid launching Chrome per URL.
+    pub struct Session {
+        browser: chromiumoxide::Browser,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    impl Session {
+        pub async fn open() -> anyhow::Result<Self> {
+            let config = browser_config().await.map_err(|e| anyhow::anyhow!(e))?;
+            let (browser, mut handler) = chromiumoxide::Browser::launch(config)
+                .await
+                .map_err(|e| anyhow::anyhow!("launch: {}", e))?;
+            let handle = tokio::spawn(async move {
+                while futures::StreamExt::next(&mut handler).await.is_some() {}
+            });
+            Ok(Session { browser, handle })
+        }
+
+        /// Navigate, wait for JS, return innerText. Empty string on any failure.
+        pub async fn fetch_text(&self, url: &str, wait_secs: u64) -> anyhow::Result<String> {
+            let page = self.browser.new_page("about:blank").await
+                .map_err(|e| anyhow::anyhow!("new_page: {}", e))?;
+            if page.goto(url).await.is_err() {
+                let _ = page.close().await;
+                return Ok(String::new());
+            }
+            tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+            let text = page.evaluate("document.body.innerText").await
+                .ok()
+                .and_then(|v| v.into_value::<String>().ok())
+                .unwrap_or_default();
+            let _ = page.close().await;
+            Ok(text)
+        }
+
+        pub async fn close(mut self) {
+            let _ = self.browser.close().await;
+            self.handle.abort();
+        }
+    }
+
     async fn browser_config() -> Result<chromiumoxide::BrowserConfig, String> {
         let builder = chromiumoxide::BrowserConfig::builder();
         match builder.build() {
@@ -1313,8 +1394,17 @@ mod browse {
         Ok(())
     }
 
-    /// Perf benchmark — measure render performance via Chrome Performance API
+    /// Perf benchmark — measure render performance via Chrome DevTools Protocol.
+    /// Uses CDP Network domain for real transfer sizes (not Performance API which
+    /// returns 0 for cross-origin resources without CORS headers).
     pub async fn perf(url: &str, wait: u64) -> anyhow::Result<()> {
+        use chromiumoxide::cdp::browser_protocol::network::{
+            EnableParams, EventLoadingFinished, EventResponseReceived,
+            SetCacheDisabledParams,
+        };
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
         eprintln!("[perf] launching headless chrome...");
         let config = browser_config().await.map_err(|e| anyhow::anyhow!(e))?;
         let (mut browser, mut handler) = chromiumoxide::Browser::launch(config)
@@ -1327,6 +1417,42 @@ mod browse {
 
         let page = browser.new_page("about:blank").await
             .map_err(|e| anyhow::anyhow!("new_page: {}", e))?;
+
+        // Enable CDP Network domain + disable cache so encodedDataLength is real
+        let _ = page.execute(EnableParams::default()).await;
+        let _ = page.execute(SetCacheDisabledParams::new(true)).await;
+
+        // Subscribe to network events BEFORE navigation
+        let total_bytes = Arc::new(Mutex::new(0u64));
+        let request_count = Arc::new(Mutex::new(0u64));
+        let resource_types: Arc<Mutex<std::collections::HashMap<String, u64>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+
+        // Listen for LoadingFinished (has real encodedDataLength)
+        let bytes_clone = total_bytes.clone();
+        let count_clone = request_count.clone();
+        let mut loading_events = page.event_listener::<EventLoadingFinished>().await
+            .map_err(|e| anyhow::anyhow!("listen loading: {}", e))?;
+        tokio::spawn(async move {
+            while let Some(ev) = futures::StreamExt::next(&mut loading_events).await {
+                let mut b = bytes_clone.lock().await;
+                *b += ev.encoded_data_length as u64;
+                let mut c = count_clone.lock().await;
+                *c += 1;
+            }
+        });
+
+        // Listen for ResponseReceived (has resource type)
+        let types_clone = resource_types.clone();
+        let mut response_events = page.event_listener::<EventResponseReceived>().await
+            .map_err(|e| anyhow::anyhow!("listen response: {}", e))?;
+        tokio::spawn(async move {
+            while let Some(ev) = futures::StreamExt::next(&mut response_events).await {
+                let rtype = format!("{:?}", ev.r#type);
+                let mut t = types_clone.lock().await;
+                *t.entry(rtype).or_insert(0) += 1;
+            }
+        });
 
         eprintln!("[perf] navigating to {}...", url);
         let _ = page.goto(url).await;
@@ -1348,23 +1474,22 @@ mod browse {
         ).await.map_err(|e| anyhow::anyhow!("cls: {}", e))?
             .into_value::<f64>().unwrap_or(0.0);
 
-        // GPU layer count via compositing reasons
-        let layers = page.evaluate(
+        // DOM element count
+        let dom_elements = page.evaluate(
             "document.querySelectorAll('*').length"
-        ).await.map_err(|e| anyhow::anyhow!("layers: {}", e))?
+        ).await.map_err(|e| anyhow::anyhow!("dom: {}", e))?
             .into_value::<f64>().unwrap_or(0.0);
-
-        // Resource count and sizes
-        let resources = page.evaluate(
-            "JSON.stringify({count: performance.getEntriesByType('resource').length, totalBytes: performance.getEntriesByType('resource').reduce((a,r) => a + (r.transferSize||0), 0)})"
-        ).await.map_err(|e| anyhow::anyhow!("resources: {}", e))?
-            .into_value::<String>().unwrap_or_default();
 
         // Animation frame rate
         let fps = page.evaluate(
             "new Promise(r => { let frames=0; let start=performance.now(); function count(){frames++;if(performance.now()-start<2000){requestAnimationFrame(count)}else{r(Math.round(frames/((performance.now()-start)/1000)))}} requestAnimationFrame(count); })"
         ).await.map_err(|e| anyhow::anyhow!("fps: {}", e))?
             .into_value::<f64>().unwrap_or(0.0);
+
+        // Read CDP network totals
+        let cdp_bytes = *total_bytes.lock().await;
+        let cdp_requests = *request_count.lock().await;
+        let cdp_types = resource_types.lock().await.clone();
 
         // Parse and display
         println!("\n=== RENDER PERFORMANCE: {} ===\n", url);
@@ -1391,12 +1516,17 @@ mod browse {
 
         println!("  FPS (2s sample):         {:.0}", fps);
         println!("  CLS (layout shift):      {:.4}", cls);
-        println!("  DOM elements:            {:.0}", layers);
+        println!("  DOM elements:            {:.0}", dom_elements);
 
-        if let Ok(res) = serde_json::from_str::<serde_json::Value>(&resources) {
-            let count = res["count"].as_u64().unwrap_or(0);
-            let bytes = res["totalBytes"].as_f64().unwrap_or(0.0);
-            println!("  Resources:               {} ({:.0} KB)", count, bytes / 1024.0);
+        // CDP network — real transfer sizes
+        println!("\n  --- NETWORK (CDP) ---");
+        println!("  Total transfer:          {} ({:.0} KB)",
+            cdp_bytes, cdp_bytes as f64 / 1024.0);
+        println!("  Requests:                {}", cdp_requests);
+        let mut type_vec: Vec<_> = cdp_types.iter().collect();
+        type_vec.sort_by(|a, b| b.1.cmp(a.1));
+        for (rtype, count) in &type_vec {
+            println!("    {:<22} {}", rtype, count);
         }
 
         // Verdict
@@ -1529,4 +1659,655 @@ mod browse {
         let _ = page.close().await;
         Ok(())
     }
+}
+
+// =============================================================================
+// ctos — cross-verified CTO OSINT scout
+// =============================================================================
+//
+// Rules (never violate):
+//   1. Every contact field must come from a real, observed source URL.
+//   2. Never derive emails from company-name heuristics. Scrape or skip.
+//   3. A CTO is "verified" only when the same name + company appears in
+//      2+ distinct source types (hn, yc, github, reddit, podcasts).
+//   4. Drafts are only written when a scraped email exists for the CTO.
+//      No email → no draft. Period.
+//
+#[cfg(feature = "browser")]
+mod ctos {
+    use crate::browse;
+    use crate::CtosOp;
+    use serde::{Deserialize, Serialize};
+
+    // Pure logic lives in the lib crate so the test binary can exercise it
+    // without launching Chrome. Re-export for the pullers + commands below.
+    pub use whobelooking::ctos::{
+        extract_cto_from_text, extract_first_email, norm, norm_company, now_secs,
+        slugify, today_iso, truncate, verify, CtoMention,
+    };
+
+    // ----- Contact record (sled-only type, stays here) -----
+
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    pub struct CtoContact {
+        pub email: String,
+        pub email_source_url: String,
+        pub scraped_at: u64,
+    }
+
+    // ----- Sled I/O -----
+
+    fn open_db() -> sled::Db {
+        let dir = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join("whobelooking");
+        sled::open(dir).expect("open sled db")
+    }
+
+    fn hash_str(s: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut h);
+        format!("{:016x}", h.finish())
+    }
+
+    fn compress(data: &[u8]) -> Vec<u8> {
+        zstd::encode_all(data, 3).unwrap_or_else(|_| data.to_vec())
+    }
+    fn decompress(data: &[u8]) -> Vec<u8> {
+        zstd::decode_all(data).unwrap_or_else(|_| data.to_vec())
+    }
+
+    pub fn cache_mention(db: &sled::Db, m: &CtoMention) -> bool {
+        let uniq = format!("{}|{}|{}", m.source_url, m.name, m.company);
+        let key = format!("cto:mention:{}:{}", m.source, hash_str(&uniq));
+        let val = compress(&serde_json::to_vec(m).unwrap());
+        db.insert(key.as_bytes(), val).unwrap().is_none()
+    }
+
+    pub fn load_mentions(db: &sled::Db) -> Vec<CtoMention> {
+        db.scan_prefix(b"cto:mention:")
+            .filter_map(|r| r.ok())
+            .filter_map(|(_k, v)| serde_json::from_slice::<CtoMention>(&decompress(&v)).ok())
+            .collect()
+    }
+
+    fn contact_key(name: &str, company: &str) -> String {
+        format!("{}|{}", norm(name), norm_company(company))
+    }
+
+    fn cache_contact(db: &sled::Db, key: &str, c: &CtoContact) {
+        let k = format!("cto:contact:{}", key);
+        let val = compress(&serde_json::to_vec(c).unwrap());
+        let _ = db.insert(k.as_bytes(), val);
+    }
+
+    fn load_contact(db: &sled::Db, key: &str) -> Option<CtoContact> {
+        let k = format!("cto:contact:{}", key);
+        db.get(k.as_bytes()).ok().flatten().and_then(|v| {
+            serde_json::from_slice::<CtoContact>(&decompress(&v)).ok()
+        })
+    }
+
+    // ----- URL / HTML helpers used by the pullers -----
+
+    /// Minimal URL-encoder (alnum + unreserved stay raw, others become %HH).
+    fn urlencode(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for b in s.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(b as char);
+                }
+                b' ' => out.push('+'),
+                _ => out.push_str(&format!("%{:02X}", b)),
+            }
+        }
+        out
+    }
+
+    fn strip_html_simple(s: &str) -> String {
+        s.chars().fold((String::new(), false), |(mut out, in_tag), c| {
+            match c {
+                '<' => (out, true),
+                '>' => (out, false),
+                _ if !in_tag => { out.push(c); (out, false) }
+                _ => (out, true),
+            }
+        }).0
+    }
+
+    // =========================================================================
+    // Source pullers
+    // =========================================================================
+
+    mod hn {
+        use super::*;
+
+        /// HN Algolia search — no auth, covers stories + comments.
+        pub async fn pull(keyword: &str) -> anyhow::Result<Vec<CtoMention>> {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .user_agent("whobelooking/0.1 (+https://cochranblock.org)")
+                .build()?;
+            let query = if keyword.is_empty() { "I'm the CTO" } else { keyword };
+            let enc = urlencode(query);
+            let mut out = Vec::new();
+
+            // Comments thread — "I'm the CTO of X" style mentions
+            let curl = format!(
+                "https://hn.algolia.com/api/v1/search?query={}&tags=comment&hitsPerPage=100",
+                enc
+            );
+            if let Ok(resp) = client.get(&curl).send().await {
+                if let Ok(v) = resp.json::<serde_json::Value>().await {
+                    let hits = v["hits"].as_array().cloned().unwrap_or_default();
+                    for hit in hits {
+                        let text = hit["comment_text"].as_str().unwrap_or("");
+                        let clean = strip_html_simple(text);
+                        let story_id = hit["story_id"].as_u64().unwrap_or(0);
+                        let obj_id = hit["objectID"].as_str().unwrap_or("");
+                        let item_url = if story_id > 0 {
+                            format!("https://news.ycombinator.com/item?id={}", story_id)
+                        } else {
+                            format!("https://news.ycombinator.com/item?id={}", obj_id)
+                        };
+                        let author = hit["author"].as_str().unwrap_or("").to_string();
+                        for mut m in extract_cto_from_text(&clean, "hn", &item_url) {
+                            m.handle = author.clone();
+                            out.push(m);
+                        }
+                    }
+                }
+            }
+
+            // Story threads — launch posts, founder announcements
+            let surl = format!(
+                "https://hn.algolia.com/api/v1/search?query={}&tags=story&hitsPerPage=50",
+                enc
+            );
+            if let Ok(resp) = client.get(&surl).send().await {
+                if let Ok(v) = resp.json::<serde_json::Value>().await {
+                    let hits = v["hits"].as_array().cloned().unwrap_or_default();
+                    for hit in hits {
+                        let text = format!(
+                            "{} {}",
+                            hit["title"].as_str().unwrap_or(""),
+                            hit["story_text"].as_str().unwrap_or("")
+                        );
+                        let clean = strip_html_simple(&text);
+                        let obj_id = hit["objectID"].as_str().unwrap_or("");
+                        let item_url = format!("https://news.ycombinator.com/item?id={}", obj_id);
+                        out.extend(extract_cto_from_text(&clean, "hn", &item_url));
+                    }
+                }
+            }
+
+            Ok(out)
+        }
+    }
+
+    mod github {
+        use super::*;
+
+        /// GitHub user search — bio field filtered on "cto".
+        /// Populates name + company + email directly from profile API (real,
+        /// not derived). Uses GITHUB_TOKEN if set to raise rate limits.
+        pub async fn pull(keyword: &str) -> anyhow::Result<Vec<CtoMention>> {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .user_agent("whobelooking/0.1 (+https://cochranblock.org)")
+                .build()?;
+            let token = std::env::var("GITHUB_TOKEN").ok();
+            let q = if keyword.is_empty() { "cto" } else { keyword };
+            let search_url = format!(
+                "https://api.github.com/search/users?q={}+in:bio&per_page=30",
+                urlencode(q)
+            );
+            let mut req = client.get(&search_url)
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28");
+            if let Some(t) = &token {
+                req = req.header("Authorization", format!("Bearer {}", t));
+            }
+            let resp: serde_json::Value = match req.send().await {
+                Ok(r) => r.json().await.unwrap_or(serde_json::Value::Null),
+                Err(e) => return Err(anyhow::anyhow!("github search: {}", e)),
+            };
+            let items = resp["items"].as_array().cloned().unwrap_or_default();
+            let mut out = Vec::new();
+            for item in items.into_iter().take(30) {
+                let login = item["login"].as_str().unwrap_or("");
+                if login.is_empty() { continue; }
+                let prof_url = format!("https://api.github.com/users/{}", login);
+                let mut preq = client.get(&prof_url)
+                    .header("Accept", "application/vnd.github+json")
+                    .header("X-GitHub-Api-Version", "2022-11-28");
+                if let Some(t) = &token {
+                    preq = preq.header("Authorization", format!("Bearer {}", t));
+                }
+                let prof: serde_json::Value = match preq.send().await {
+                    Ok(r) => r.json().await.unwrap_or(serde_json::Value::Null),
+                    Err(_) => continue,
+                };
+                let name = prof["name"].as_str().unwrap_or("").trim().to_string();
+                let bio = prof["bio"].as_str().unwrap_or("").to_string();
+                let company_raw = prof["company"].as_str().unwrap_or("").trim().to_string();
+                let blog = prof["blog"].as_str().unwrap_or("").trim().to_string();
+                let public_email = prof["email"].as_str().unwrap_or("").trim().to_string();
+                let html_url = prof["html_url"].as_str().unwrap_or("").to_string();
+                let html_url = if html_url.is_empty() {
+                    format!("https://github.com/{}", login)
+                } else {
+                    html_url
+                };
+
+                let bio_lower = bio.to_lowercase();
+                if !bio_lower.contains("cto") && !bio_lower.contains("chief technology") {
+                    continue;
+                }
+                if name.is_empty() || company_raw.is_empty() { continue; }
+
+                let company = company_raw.trim_start_matches('@').to_string();
+                let company_url = if blog.starts_with("http") {
+                    blog
+                } else if !blog.is_empty() {
+                    format!("https://{}", blog)
+                } else {
+                    String::new()
+                };
+
+                out.push(CtoMention {
+                    source: "github".to_string(),
+                    source_url: html_url,
+                    name,
+                    company,
+                    handle: login.to_string(),
+                    context: truncate(&bio, 200),
+                    company_url,
+                    scraped_email: public_email,
+                    fetched_at: now_secs(),
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Ok(out)
+        }
+    }
+
+    mod reddit {
+        use super::*;
+
+        /// Reddit JSON — r/cto hot + r/startups CTO search.
+        pub async fn pull(keyword: &str) -> anyhow::Result<Vec<CtoMention>> {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .user_agent("whobelooking/0.1 (by u/cochranblock)")
+                .build()?;
+            let kw = if keyword.is_empty() { "CTO" } else { keyword };
+            let urls = vec![
+                "https://www.reddit.com/r/cto/top.json?limit=100&t=year".to_string(),
+                format!(
+                    "https://www.reddit.com/r/startups/search.json?q={}&limit=100&restrict_sr=1",
+                    urlencode(kw)
+                ),
+            ];
+            let mut out = Vec::new();
+            for url in urls {
+                let resp: serde_json::Value = match client.get(&url).send().await {
+                    Ok(r) => r.json().await.unwrap_or(serde_json::Value::Null),
+                    Err(_) => continue,
+                };
+                let children = resp["data"]["children"].as_array().cloned().unwrap_or_default();
+                for child in children {
+                    let d = &child["data"];
+                    let title = d["title"].as_str().unwrap_or("");
+                    let selftext = d["selftext"].as_str().unwrap_or("");
+                    let permalink = d["permalink"].as_str().unwrap_or("");
+                    let author = d["author"].as_str().unwrap_or("").to_string();
+                    let full_url = format!("https://www.reddit.com{}", permalink);
+                    let text = format!("{} {}", title, selftext);
+                    for mut m in extract_cto_from_text(&text, "reddit", &full_url) {
+                        if m.handle.is_empty() { m.handle = author.clone(); }
+                        out.push(m);
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    mod yc {
+        use super::*;
+
+        /// YC company directory — JS-rendered, needs headless Chrome.
+        /// CTO info lives on individual company pages; this first pass pulls
+        /// whatever CTO text appears on the main directory and people pages.
+        pub async fn pull(session: &browse::Session) -> anyhow::Result<Vec<CtoMention>> {
+            let mut out = Vec::new();
+            let pages = [
+                "https://www.ycombinator.com/companies",
+                "https://www.ycombinator.com/people",
+            ];
+            for url in pages {
+                let text = session.fetch_text(url, 6).await.unwrap_or_default();
+                out.extend(extract_cto_from_text(&text, "yc", url));
+            }
+            Ok(out)
+        }
+    }
+
+    mod podcasts {
+        use super::*;
+
+        /// Find podcast episode stories on HN Algolia, then browse the episode
+        /// page with headless Chrome to pull guest info.
+        pub async fn pull(
+            session: &browse::Session,
+            keyword: &str,
+        ) -> anyhow::Result<Vec<CtoMention>> {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .user_agent("whobelooking/0.1")
+                .build()?;
+            let q = if keyword.is_empty() { "podcast CTO" } else { keyword };
+            let url = format!(
+                "https://hn.algolia.com/api/v1/search?query={}&tags=story&hitsPerPage=40",
+                urlencode(q)
+            );
+            let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
+            let hits = resp["hits"].as_array().cloned().unwrap_or_default();
+            let podcast_hosts = [
+                "transistor.fm", "anchor.fm", "simplecast", "libsyn", "buzzsprout",
+                "podbean", "spotify.com/episode", "apple.com/podcast",
+                "podcasts.apple.com", "overcast.fm", "fireside.fm",
+                "pca.st", "castro.fm", "pod.link",
+            ];
+            let mut out = Vec::new();
+            for hit in hits {
+                let story_url = hit["url"].as_str().unwrap_or("").to_string();
+                if story_url.is_empty() { continue; }
+                if !podcast_hosts.iter().any(|h| story_url.contains(h)) { continue; }
+                let text = session.fetch_text(&story_url, 4).await.unwrap_or_default();
+                out.extend(extract_cto_from_text(&text, "podcasts", &story_url));
+            }
+            Ok(out)
+        }
+    }
+
+    // =========================================================================
+    // Commands: pull, verified, draft
+    // =========================================================================
+
+    pub async fn run(op: CtosOp) -> anyhow::Result<()> {
+        match op {
+            CtosOp::Pull { source, keyword } => {
+                pull_cmd(&source, keyword.as_deref().unwrap_or("")).await
+            }
+            CtosOp::Verified { scrape_emails } => verified_cmd(scrape_emails).await,
+            CtosOp::Draft { out } => draft_cmd(&out).await,
+        }
+    }
+
+    async fn pull_cmd(source: &str, keyword: &str) -> anyhow::Result<()> {
+        let db = open_db();
+        let pick = |s: &str| source == "all" || source == s;
+        let mut all = Vec::new();
+
+        if pick("hn") {
+            eprintln!("[hn] pulling...");
+            match hn::pull(keyword).await {
+                Ok(ms) => { eprintln!("[hn] {} mentions", ms.len()); all.extend(ms); }
+                Err(e) => eprintln!("[hn] error: {}", e),
+            }
+        }
+        if pick("github") {
+            eprintln!("[github] pulling...");
+            match github::pull(keyword).await {
+                Ok(ms) => { eprintln!("[github] {} mentions", ms.len()); all.extend(ms); }
+                Err(e) => eprintln!("[github] error: {}", e),
+            }
+        }
+        if pick("reddit") {
+            eprintln!("[reddit] pulling...");
+            match reddit::pull(keyword).await {
+                Ok(ms) => { eprintln!("[reddit] {} mentions", ms.len()); all.extend(ms); }
+                Err(e) => eprintln!("[reddit] error: {}", e),
+            }
+        }
+
+        let needs_browser = pick("yc") || pick("podcasts");
+        if needs_browser {
+            eprintln!("[browser] launching headless chrome...");
+            match browse::Session::open().await {
+                Ok(session) => {
+                    if pick("yc") {
+                        eprintln!("[yc] browsing ycombinator.com...");
+                        match yc::pull(&session).await {
+                            Ok(ms) => { eprintln!("[yc] {} mentions", ms.len()); all.extend(ms); }
+                            Err(e) => eprintln!("[yc] error: {}", e),
+                        }
+                    }
+                    if pick("podcasts") {
+                        eprintln!("[podcasts] browsing episode pages...");
+                        match podcasts::pull(&session, keyword).await {
+                            Ok(ms) => { eprintln!("[podcasts] {} mentions", ms.len()); all.extend(ms); }
+                            Err(e) => eprintln!("[podcasts] error: {}", e),
+                        }
+                    }
+                    session.close().await;
+                }
+                Err(e) => eprintln!("[browser] launch failed: {}", e),
+            }
+        }
+
+        // Cache direct emails scraped during pull (GitHub public email) into
+        // the contact tree right away — they're already source-cited.
+        let mut new_mentions = 0u32;
+        let mut direct_contacts = 0u32;
+        for m in &all {
+            if cache_mention(&db, m) { new_mentions += 1; }
+            if !m.scraped_email.is_empty() {
+                let key = contact_key(&m.name, &m.company);
+                if load_contact(&db, &key).is_none() {
+                    cache_contact(&db, &key, &CtoContact {
+                        email: m.scraped_email.clone(),
+                        email_source_url: m.source_url.clone(),
+                        scraped_at: now_secs(),
+                    });
+                    direct_contacts += 1;
+                }
+            }
+        }
+        db.flush()?;
+
+        let total_cached = db.scan_prefix(b"cto:mention:").count();
+        eprintln!("\n=== PULL SUMMARY ===");
+        eprintln!("  observed:         {}", all.len());
+        eprintln!("  new mentions:     {}", new_mentions);
+        eprintln!("  direct emails:    {}", direct_contacts);
+        eprintln!("  total in sled:    {}", total_cached);
+        Ok(())
+    }
+
+    async fn verified_cmd(scrape_emails: bool) -> anyhow::Result<()> {
+        let db = open_db();
+        let mentions = load_mentions(&db);
+        eprintln!("loaded {} mentions from sled", mentions.len());
+        let verified = verify(&mentions);
+        eprintln!("{} verified CTOs (2+ distinct sources)\n", verified.len());
+
+        println!("=== VERIFIED CTOs ===");
+        println!("{:<28} {:<30} {:<8} {}", "Name", "Company", "#src", "sources");
+        println!("{}", "-".repeat(100));
+        for v in &verified {
+            let src_list: Vec<&str> = v.sources.iter().map(|(s, _)| s.as_str()).collect();
+            let mut distinct: Vec<&str> = src_list.iter().copied().collect();
+            distinct.sort();
+            distinct.dedup();
+            println!(
+                "{:<28} {:<30} {:<8} {}",
+                truncate(&v.name, 28),
+                truncate(&v.company, 30),
+                distinct.len(),
+                distinct.join(",")
+            );
+            for (s, u) in &v.sources {
+                println!("  [{}] {}", s, u);
+            }
+        }
+
+        if scrape_emails {
+            eprintln!("\n[email] scraping company URLs observed in pull data...");
+            let session = browse::Session::open().await?;
+            let mut new_contacts = 0u32;
+            for v in &verified {
+                let key = contact_key(&v.name, &v.company);
+                if load_contact(&db, &key).is_some() { continue; }
+
+                // Priority 1: emails already scraped during pull (e.g. GitHub)
+                if let Some((email, src)) = v.direct_emails.first() {
+                    cache_contact(&db, &key, &CtoContact {
+                        email: email.clone(),
+                        email_source_url: src.clone(),
+                        scraped_at: now_secs(),
+                    });
+                    new_contacts += 1;
+                    continue;
+                }
+
+                // Priority 2: browse company URLs observed in mentions.
+                // ONLY URLs we actually saw in the data — no guessing from
+                // the company name.
+                let mut found = false;
+                for cu in &v.company_urls {
+                    if cu.is_empty() || !cu.starts_with("http") { continue; }
+                    for path in &["", "/about", "/team", "/contact"] {
+                        let full = format!("{}{}", cu.trim_end_matches('/'), path);
+                        let text = match session.fetch_text(&full, 4).await {
+                            Ok(t) => t,
+                            Err(_) => continue,
+                        };
+                        if let Some((email, _)) = extract_first_email(&text) {
+                            // Domain correlation: email domain should appear
+                            // in the observed URL. If not, skip — may be a
+                            // third-party support address.
+                            let url_host = full
+                                .trim_start_matches("https://")
+                                .trim_start_matches("http://")
+                                .split('/').next().unwrap_or("")
+                                .trim_start_matches("www.");
+                            let email_domain = email.split('@').nth(1).unwrap_or("");
+                            if url_host.contains(email_domain)
+                                || email_domain.contains(url_host)
+                                || url_host.ends_with(email_domain)
+                            {
+                                cache_contact(&db, &key, &CtoContact {
+                                    email: email.clone(),
+                                    email_source_url: full.clone(),
+                                    scraped_at: now_secs(),
+                                });
+                                println!("  [ok] {} → {} (from {})", v.name, email, full);
+                                new_contacts += 1;
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if found { break; }
+                }
+                if !found && v.company_urls.is_empty() {
+                    println!("  [skip] {} ({}) — no observed URL to scrape", v.name, v.company);
+                }
+            }
+            session.close().await;
+            eprintln!("[email] {} new contacts saved", new_contacts);
+            db.flush()?;
+        }
+        Ok(())
+    }
+
+    async fn draft_cmd(out_dir: &str) -> anyhow::Result<()> {
+        let db = open_db();
+        let mentions = load_mentions(&db);
+        let verified = verify(&mentions);
+
+        let out = std::path::Path::new(out_dir);
+        std::fs::create_dir_all(out)?;
+
+        let today = today_iso();
+        let mut written = 0u32;
+        let mut skipped_no_email = 0u32;
+        for v in &verified {
+            let key = contact_key(&v.name, &v.company);
+            let contact = match load_contact(&db, &key) {
+                Some(c) if !c.email.is_empty() => c,
+                _ => { skipped_no_email += 1; continue; }
+            };
+
+            // SOURCE: headers = every URL used to get this draft
+            let mut source_lines = Vec::new();
+            for (src, url) in &v.sources {
+                source_lines.push(format!("SOURCE: [{}] {}", src, url));
+            }
+            source_lines.push(format!("SOURCE: [email] {}", contact.email_source_url));
+
+            let slug = slugify(&format!("{}-{}", v.name, v.company));
+            let path = out.join(format!("{}.md", slug));
+
+            let body = format!(
+                "---\n\
+                {sources}\n\
+                NAME: {name}\n\
+                COMPANY: {company}\n\
+                EMAIL: {email}\n\
+                EMAIL_SOURCE: {email_src}\n\
+                VERIFIED: {nsrc} distinct sources\n\
+                DRAFT_DATE: {today}\n\
+                ---\n\
+                \n\
+                Subject: Cross-verified intro — {company}\n\
+                \n\
+                Hi {first_name},\n\
+                \n\
+                Saw you mentioned as CTO of {company} across {nsrc} public sources\n\
+                ({src_list}). I run a small team at cochranblock.org — we build\n\
+                single-binary Rust infra for teams that want zero-cloud tooling.\n\
+                \n\
+                Worth a short call to compare notes?\n\
+                \n\
+                — Matt\n\
+                cochranblock.org\n",
+                sources = source_lines.join("\n"),
+                name = v.name,
+                company = v.company,
+                email = contact.email,
+                email_src = contact.email_source_url,
+                nsrc = {
+                    let mut s: Vec<&str> = v.sources.iter().map(|(s, _)| s.as_str()).collect();
+                    s.sort(); s.dedup(); s.len()
+                },
+                today = today,
+                first_name = v.name.split_whitespace().next().unwrap_or(&v.name),
+                src_list = {
+                    let mut s: Vec<&str> = v.sources.iter().map(|(s, _)| s.as_str()).collect();
+                    s.sort(); s.dedup(); s.join(", ")
+                },
+            );
+            std::fs::write(&path, body)?;
+            written += 1;
+            println!("  [draft] {}", path.display());
+        }
+
+        eprintln!("\n=== DRAFT SUMMARY ===");
+        eprintln!("  verified:              {}", verified.len());
+        eprintln!("  drafts written:        {}", written);
+        eprintln!("  skipped (no email):    {}", skipped_no_email);
+        eprintln!("  output dir:            {}", out.display());
+        if skipped_no_email > 0 {
+            eprintln!("\n  → run `ctos verified --scrape-emails` to pull more contacts");
+            eprintln!("  → skipped entries will never get a fabricated email");
+        }
+        Ok(())
+    }
+
 }

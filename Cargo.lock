@@ -539,6 +539,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "exopack"
+version = "0.1.0"
+source = "git+https://github.com/cochranblock/exopack#fce2bbad55dbecf2432ae07167548967df7a926c"
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2440,6 +2445,7 @@ dependencies = [
  "chromiumoxide",
  "clap",
  "dirs",
+ "exopack",
  "futures",
  "hickory-resolver",
  "reqwest 0.12.28",

@@ -11,6 +11,19 @@ repository = "https://github.com/cochranblock/whobelooking"
 keywords = ["analytics", "reverse-dns", "lead-generation", "cloudflare", "gov-contracts"]
 categories = ["command-line-utilities"]
 
+[lib]
+name = "whobelooking"
+path = "src/lib.rs"
+
+[[bin]]
+name = "whobelooking"
+path = "src/main.rs"
+
+[[bin]]
+name = "whobelooking-test"
+path = "src/bin/whobelooking-test.rs"
+required-features = ["tests"]
+
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
@@ -24,10 +37,12 @@ dirs = "5"
 zstd = "0.13"
 chromiumoxide = { version = "0.9", features = ["fetcher", "rustls", "zip8"], optional = true }
 futures = { version = "0.3", optional = true }
+exopack = { git = "https://github.com/cochranblock/exopack", features = ["triple_sims"], optional = true }
 
 [features]
 default = []
 browser = ["dep:chromiumoxide", "dep:futures"]
+tests = ["dep:exopack"]
 
 [profile.release]
 opt-level = "z"
