@@ -37,14 +37,20 @@ fn kill_old(pid: u32) {
         use std::process::Command;
         use std::time::{Duration, Instant};
 
-        let _ = Command::new("kill").arg("-TERM").arg(pid.to_string()).output();
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .output();
         tracing::info!("sent SIGTERM to old PID {}", pid);
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             let alive = Command::new("kill")
-                .arg("-0").arg(pid.to_string()).output()
-                .map(|o| o.status.success()).unwrap_or(false);
+                .arg("-0")
+                .arg(pid.to_string())
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
             if !alive {
                 tracing::info!("old PID {} exited cleanly", pid);
                 return;
@@ -52,14 +58,20 @@ fn kill_old(pid: u32) {
             std::thread::sleep(Duration::from_millis(100));
         }
 
-        let _ = Command::new("kill").arg("-KILL").arg(pid.to_string()).output();
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(pid.to_string())
+            .output();
         tracing::warn!("sent SIGKILL to old PID {} (didn't exit in 5s)", pid);
         std::thread::sleep(Duration::from_millis(200));
     }
 }
 
 #[derive(Parser)]
-#[command(name = "whobelooking", about = "Who's looking at your site? CF → rDNS → company ID.")]
+#[command(
+    name = "whobelooking",
+    about = "Who's looking at your site? CF → rDNS → company ID."
+)]
 enum Cmd {
     /// Start the web server (whobelooking.org)
     #[cfg(feature = "serve")]
@@ -268,21 +280,29 @@ async fn main() -> anyhow::Result<()> {
                 println!("queue empty");
             } else {
                 for j in &jobs {
-                    println!("{} {:?} {} {:.1}h {}", j.id, j.status, j.customer_email, j.estimated_hours, j.tier.label());
+                    println!(
+                        "{} {:?} {} {:.1}h {}",
+                        j.id,
+                        j.status,
+                        j.customer_email,
+                        j.estimated_hours,
+                        j.tier.label()
+                    );
                 }
             }
             let hours = queue::hours_this_week();
             println!("\n{:.1} of 12 hours committed this week", hours);
         }
-        Cmd::Pop => {
-            match queue::pop_job()? {
-                Some(job) => {
-                    println!("popped: {} ({}) — {:?}", job.id, job.customer_email, job.source_type);
-                    println!("tier: {} ({:.1}h)", job.tier.label(), job.estimated_hours);
-                }
-                None => println!("no pending jobs"),
+        Cmd::Pop => match queue::pop_job()? {
+            Some(job) => {
+                println!(
+                    "popped: {} ({}) — {:?}",
+                    job.id, job.customer_email, job.source_type
+                );
+                println!("tier: {} ({:.1}h)", job.tier.label(), job.estimated_hours);
             }
-        }
+            None => println!("no pending jobs"),
+        },
         Cmd::Done { id, report } => {
             queue::complete_job(&id, report)?;
             println!("marked complete: {}", id);
@@ -291,23 +311,48 @@ async fn main() -> anyhow::Result<()> {
             queue::deliver_job(&id)?;
             println!("marked delivered: {}", id);
         }
-        Cmd::Scout { naics, keyword, sam_key, max_amount, min_amount } => {
+        Cmd::Scout {
+            naics,
+            keyword,
+            sam_key,
+            max_amount,
+            min_amount,
+        } => {
             let codes: Vec<&str> = naics.split(',').map(|s| s.trim()).collect();
-            scout::run(&codes, keyword.as_deref(), sam_key.as_deref(), min_amount, max_amount).await?;
+            scout::run(
+                &codes,
+                keyword.as_deref(),
+                sam_key.as_deref(),
+                min_amount,
+                max_amount,
+            )
+            .await?;
         }
         #[cfg(feature = "browser")]
         Cmd::Perf { url, wait } => {
             browse::perf(&url, wait).await?;
         }
         #[cfg(feature = "browser")]
-        Cmd::Browse { url, out, wait, extract, mobile } => {
+        Cmd::Browse {
+            url,
+            out,
+            wait,
+            extract,
+            mobile,
+        } => {
             browse::run(&url, &out, wait, extract, mobile).await?;
         }
         #[cfg(feature = "browser")]
         Cmd::Scrape { file, out, wait } => {
             browse::scrape(&file, &out, wait).await?;
         }
-        Cmd::Pull { date, zone, token, country, min_hits } => {
+        Cmd::Pull {
+            date,
+            zone,
+            token,
+            country,
+            min_hits,
+        } => {
             let visitors = cf::pull(&zone, &token, date.as_deref(), &country, min_hits).await?;
             for v in &visitors {
                 println!("{:<6} {}", v.hits, v.ip);
@@ -329,8 +374,23 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("no company PTR records found in /24");
             }
         }
-        Cmd::Report { date, zone, token, country, min_hits, scan_neighbors } => {
-            report::run(&zone, &token, date.as_deref(), &country, min_hits, scan_neighbors).await?;
+        Cmd::Report {
+            date,
+            zone,
+            token,
+            country,
+            min_hits,
+            scan_neighbors,
+        } => {
+            report::run(
+                &zone,
+                &token,
+                date.as_deref(),
+                &country,
+                min_hits,
+                scan_neighbors,
+            )
+            .await?;
         }
         #[cfg(feature = "browser")]
         Cmd::Ctos { op } => {
@@ -351,15 +411,15 @@ mod scout {
     /// Sources: SAM.gov, Grants.gov, SBIR.gov
     #[derive(Debug, Serialize, Deserialize, Clone)]
     pub struct Bid {
-        pub source: String,        // sam.gov | grants | sbir
-        pub id: String,            // noticeId | oppNumber | solicitationId
+        pub source: String, // sam.gov | grants | sbir
+        pub id: String,     // noticeId | oppNumber | solicitationId
         pub title: String,
         pub description: String,
         pub agency: String,
-        pub naics: String,         // NAICS code or "grant" / "sbir"
-        pub set_aside: String,     // SBA, SDVOSBC, 8A, etc. or ""
-        pub posted: String,        // YYYY-MM-DD
-        pub deadline: String,      // YYYY-MM-DD or ""
+        pub naics: String,     // NAICS code or "grant" / "sbir"
+        pub set_aside: String, // SBA, SDVOSBC, 8A, etc. or ""
+        pub posted: String,    // YYYY-MM-DD
+        pub deadline: String,  // YYYY-MM-DD or ""
         pub url: String,
     }
 
@@ -367,14 +427,14 @@ mod scout {
     /// Sources: USASpending, SAM.gov Contract Awards
     #[derive(Debug, Serialize, Deserialize, Clone)]
     pub struct Award {
-        pub source: String,        // usaspending | awards
-        pub id: String,            // Award ID | contractId
-        pub winner: String,        // company name
+        pub source: String, // usaspending | awards
+        pub id: String,     // Award ID | contractId
+        pub winner: String, // company name
         pub description: String,
         pub amount: f64,
         pub agency: String,
         pub naics: String,
-        pub date: String,          // award/start date
+        pub date: String, // award/start date
         pub url: String,
     }
 
@@ -382,12 +442,12 @@ mod scout {
     /// Sources: Federal Register, Regulations.gov
     #[derive(Debug, Serialize, Deserialize, Clone)]
     pub struct Signal {
-        pub source: String,        // fedreg | regs
-        pub id: String,            // document_number | documentId
+        pub source: String, // fedreg | regs
+        pub id: String,     // document_number | documentId
         pub title: String,
         pub description: String,
         pub agency: String,
-        pub doc_type: String,      // NOTICE | Rule | Proposed Rule
+        pub doc_type: String, // NOTICE | Rule | Proposed Rule
         pub date: String,
         pub url: String,
     }
@@ -399,8 +459,8 @@ mod scout {
         pub id: String,
         pub labor_category: String,
         pub vendor: String,
-        pub sin: String,           // GSA SIN
-        pub price: f64,            // ceiling rate $/hr
+        pub sin: String, // GSA SIN
+        pub price: f64,  // ceiling rate $/hr
         pub education: String,
         pub experience: String,
     }
@@ -451,23 +511,26 @@ mod scout {
     }
 
     fn strip_html(s: &str) -> String {
-        s.chars().fold((String::new(), false), |(mut out, in_tag), c| {
-            match c {
+        s.chars()
+            .fold((String::new(), false), |(mut out, in_tag), c| match c {
                 '<' => (out, true),
                 '>' => (out, false),
-                _ if !in_tag => { out.push(c); (out, false) }
-                _ => (out, true)
-            }
-        }).0
+                _ if !in_tag => {
+                    out.push(c);
+                    (out, false)
+                }
+                _ => (out, true),
+            })
+            .0
     }
 
     /// Fetch full description text from a URL, return as string
     async fn enrich(client: &reqwest::Client, url: &str) -> String {
-        if url.is_empty() || !url.starts_with("http") { return String::new(); }
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            client.get(url).send()
-        ).await {
+        if url.is_empty() || !url.starts_with("http") {
+            return String::new();
+        }
+        match tokio::time::timeout(std::time::Duration::from_secs(10), client.get(url).send()).await
+        {
             Ok(Ok(resp)) => resp.text().await.unwrap_or_default(),
             _ => String::new(),
         }
@@ -482,13 +545,18 @@ mod scout {
 
         for b in bids.iter_mut() {
             // Skip if already enriched (description > 200 chars = probably full text)
-            if b.description.len() > 200 { continue; }
+            if b.description.len() > 200 {
+                continue;
+            }
 
             // Check sled for cached enrichment
             let ekey = format!("enriched:{}:{}", b.source, b.id);
             if let Some(cached) = db.get(&ekey).unwrap() {
                 let text = String::from_utf8_lossy(&decompress(&cached)).to_string();
-                if !text.is_empty() { b.description = text; continue; }
+                if !text.is_empty() {
+                    b.description = text;
+                    continue;
+                }
             }
 
             // SAM.gov: description field is a URL to full solicitation text
@@ -496,7 +564,11 @@ mod scout {
                 let full = enrich(&client, &b.description).await;
                 if !full.is_empty() {
                     let clean = strip_html(&full);
-                    let trimmed = if clean.len() > 2000 { clean[..2000].to_string() } else { clean };
+                    let trimmed = if clean.len() > 2000 {
+                        clean[..2000].to_string()
+                    } else {
+                        clean
+                    };
                     let _ = db.insert(&ekey, compress(trimmed.as_bytes()));
                     b.description = trimmed;
                 }
@@ -519,7 +591,11 @@ mod scout {
                             .unwrap_or("");
                         if !desc.is_empty() {
                             let clean = strip_html(desc);
-                            let trimmed = if clean.len() > 2000 { clean[..2000].to_string() } else { clean };
+                            let trimmed = if clean.len() > 2000 {
+                                clean[..2000].to_string()
+                            } else {
+                                clean
+                            };
                             let _ = db.insert(&ekey, compress(trimmed.as_bytes()));
                             b.description = trimmed;
                         }
@@ -529,9 +605,21 @@ mod scout {
         }
     }
 
-    pub async fn run(naics: &[&str], keyword: Option<&str>, sam_key: Option<&str>, min_amount: u64, max_amount: u64) -> anyhow::Result<()> {
+    pub async fn run(
+        naics: &[&str],
+        keyword: Option<&str>,
+        sam_key: Option<&str>,
+        min_amount: u64,
+        max_amount: u64,
+    ) -> anyhow::Result<()> {
         let db = open_db();
-        let mut rpt = ScoutReport { bids: vec![], awards: vec![], signals: vec![], rates: vec![], new_count: 0 };
+        let mut rpt = ScoutReport {
+            bids: vec![],
+            awards: vec![],
+            signals: vec![],
+            rates: vec![],
+            new_count: 0,
+        };
 
         // === BIDS (things you can respond to) ===
 
@@ -541,7 +629,12 @@ mod scout {
             match sam::query(key, naics, keyword).await {
                 Ok(bids) => {
                     eprintln!("[sam.gov] {} bids", bids.len());
-                    for b in bids { if cache_bid(&db, &b) { rpt.new_count += 1; } rpt.bids.push(b); }
+                    for b in bids {
+                        if cache_bid(&db, &b) {
+                            rpt.new_count += 1;
+                        }
+                        rpt.bids.push(b);
+                    }
                 }
                 Err(e) => eprintln!("[sam.gov] error: {}", e),
             }
@@ -555,7 +648,12 @@ mod scout {
         match grants::query(gr_kw).await {
             Ok(bids) => {
                 eprintln!("[grants] {} bids", bids.len());
-                for b in bids { if cache_bid(&db, &b) { rpt.new_count += 1; } rpt.bids.push(b); }
+                for b in bids {
+                    if cache_bid(&db, &b) {
+                        rpt.new_count += 1;
+                    }
+                    rpt.bids.push(b);
+                }
             }
             Err(e) => eprintln!("[grants] error: {}", e),
         }
@@ -565,14 +663,22 @@ mod scout {
         match sbir::query(keyword.unwrap_or("cyber")).await {
             Ok(bids) => {
                 eprintln!("[sbir] {} bids", bids.len());
-                for b in bids { if cache_bid(&db, &b) { rpt.new_count += 1; } rpt.bids.push(b); }
+                for b in bids {
+                    if cache_bid(&db, &b) {
+                        rpt.new_count += 1;
+                    }
+                    rpt.bids.push(b);
+                }
             }
             Err(e) => eprintln!("[sbir] error: {}", e),
         }
 
         // === ENRICH BIDS — fetch full descriptions, compress, cache ===
         if !rpt.bids.is_empty() {
-            eprintln!("[enrich] fetching full descriptions for {} bids...", rpt.bids.len());
+            eprintln!(
+                "[enrich] fetching full descriptions for {} bids...",
+                rpt.bids.len()
+            );
             enrich_bids(&mut rpt.bids, &db).await;
             eprintln!("[enrich] done");
         }
@@ -583,7 +689,12 @@ mod scout {
         match usaspending::query(naics, min_amount, max_amount).await {
             Ok(awards) => {
                 eprintln!("[usaspending] {} awards", awards.len());
-                for a in awards { if cache_award(&db, &a) { rpt.new_count += 1; } rpt.awards.push(a); }
+                for a in awards {
+                    if cache_award(&db, &a) {
+                        rpt.new_count += 1;
+                    }
+                    rpt.awards.push(a);
+                }
             }
             Err(e) => eprintln!("[usaspending] error: {}", e),
         }
@@ -593,7 +704,12 @@ mod scout {
             match contract_awards::query(key, naics).await {
                 Ok(awards) => {
                     eprintln!("[awards] {} awards", awards.len());
-                    for a in awards { if cache_award(&db, &a) { rpt.new_count += 1; } rpt.awards.push(a); }
+                    for a in awards {
+                        if cache_award(&db, &a) {
+                            rpt.new_count += 1;
+                        }
+                        rpt.awards.push(a);
+                    }
                 }
                 Err(e) => eprintln!("[awards] error: {}", e),
             }
@@ -606,7 +722,12 @@ mod scout {
         match fedreg::query(sig_kw).await {
             Ok(sigs) => {
                 eprintln!("[fedreg] {} signals", sigs.len());
-                for s in sigs { if cache_signal(&db, &s) { rpt.new_count += 1; } rpt.signals.push(s); }
+                for s in sigs {
+                    if cache_signal(&db, &s) {
+                        rpt.new_count += 1;
+                    }
+                    rpt.signals.push(s);
+                }
             }
             Err(e) => eprintln!("[fedreg] error: {}", e),
         }
@@ -616,7 +737,12 @@ mod scout {
         match regulations::query(reg_kw).await {
             Ok(sigs) => {
                 eprintln!("[regs] {} signals", sigs.len());
-                for s in sigs { if cache_signal(&db, &s) { rpt.new_count += 1; } rpt.signals.push(s); }
+                for s in sigs {
+                    if cache_signal(&db, &s) {
+                        rpt.new_count += 1;
+                    }
+                    rpt.signals.push(s);
+                }
             }
             Err(e) => eprintln!("[regs] error: {}", e),
         }
@@ -628,7 +754,12 @@ mod scout {
         match calc::query(calc_kw).await {
             Ok(rates) => {
                 eprintln!("[calc] {} rates", rates.len());
-                for r in rates { if cache_rate(&db, &r) { rpt.new_count += 1; } rpt.rates.push(r); }
+                for r in rates {
+                    if cache_rate(&db, &r) {
+                        rpt.new_count += 1;
+                    }
+                    rpt.rates.push(r);
+                }
             }
             Err(e) => eprintln!("[calc] error: {}", e),
         }
@@ -638,77 +769,213 @@ mod scout {
         let total = rpt.bids.len() + rpt.awards.len() + rpt.signals.len() + rpt.rates.len();
 
         // Score bids by match quality
-        let match_keywords = ["cyber", "software", "rust", "edge", "ai", "cloud", "zero trust",
-            "sbir", "single binary", "open source", "secure", "memory safe", "veteran"];
+        let match_keywords = [
+            "cyber",
+            "software",
+            "rust",
+            "edge",
+            "ai",
+            "cloud",
+            "zero trust",
+            "sbir",
+            "single binary",
+            "open source",
+            "secure",
+            "memory safe",
+            "veteran",
+        ];
 
         fn score_bid(b: &Bid, keywords: &[&str]) -> u32 {
             let text = format!("{} {} {}", b.title, b.description, b.agency).to_lowercase();
             let mut s = 0u32;
-            for kw in keywords { if text.contains(kw) { s += 10; } }
-            if !b.set_aside.is_empty() { s += 15; }
-            if b.set_aside.contains("SDVOSB") { s += 25; }
-            if b.deadline.is_empty() || b.deadline.contains("rolling") { s += 5; }
+            for kw in keywords {
+                if text.contains(kw) {
+                    s += 10;
+                }
+            }
+            if !b.set_aside.is_empty() {
+                s += 15;
+            }
+            if b.set_aside.contains("SDVOSB") {
+                s += 25;
+            }
+            if b.deadline.is_empty() || b.deadline.contains("rolling") {
+                s += 5;
+            }
             // Agency boost — orgs you've worked with or align to
-            let good_agencies = ["darpa", "nsf", "navy", "air force", "army", "dhs", "cisa",
-                "cyber", "dod", "defense", "veterans", "nist", "nasa"];
-            for ga in good_agencies { if text.contains(ga) { s += 8; } }
+            let good_agencies = [
+                "darpa",
+                "nsf",
+                "navy",
+                "air force",
+                "army",
+                "dhs",
+                "cisa",
+                "cyber",
+                "dod",
+                "defense",
+                "veterans",
+                "nist",
+                "nasa",
+            ];
+            for ga in good_agencies {
+                if text.contains(ga) {
+                    s += 8;
+                }
+            }
             // NAICS boost — your codes
             let your_naics = ["541511", "541512", "541519", "518210", "541690"];
-            if your_naics.iter().any(|n| b.naics.contains(n)) { s += 20; }
+            if your_naics.iter().any(|n| b.naics.contains(n)) {
+                s += 20;
+            }
             // Title keyword boost — things you actually build
-            let hot = ["software", "web", "application", "platform", "data", "api",
-                "infrastructure", "system design", "custom", "development", "modernization"];
-            for h in hot { if text.contains(h) { s += 5; } }
+            let hot = [
+                "software",
+                "web",
+                "application",
+                "platform",
+                "data",
+                "api",
+                "infrastructure",
+                "system design",
+                "custom",
+                "development",
+                "modernization",
+            ];
+            for h in hot {
+                if text.contains(h) {
+                    s += 5;
+                }
+            }
             s
         }
 
         fn score_icon(score: u32) -> &'static str {
-            if score >= 50 { "[!!!]" }      // perfect match — drop everything
-            else if score >= 30 { "[!! ]" }  // strong match — bid this week
-            else if score >= 15 { "[!  ]" }  // worth a look
-            else { "[   ]" }                 // low match
+            if score >= 50 {
+                "[!!!]"
+            }
+            // perfect match — drop everything
+            else if score >= 30 {
+                "[!! ]"
+            }
+            // strong match — bid this week
+            else if score >= 15 {
+                "[!  ]"
+            }
+            // worth a look
+            else {
+                "[   ]"
+            } // low match
         }
 
         // Sort bids by score descending
-        let mut scored_bids: Vec<(u32, &Bid)> = rpt.bids.iter().map(|b| (score_bid(b, &match_keywords), b)).collect();
+        let mut scored_bids: Vec<(u32, &Bid)> = rpt
+            .bids
+            .iter()
+            .map(|b| (score_bid(b, &match_keywords), b))
+            .collect();
         scored_bids.sort_by(|a, b| b.0.cmp(&a.0));
 
         println!("\n  LOOT TABLE — OPEN BIDS ({} found)", rpt.bids.len());
-        println!("  {:<6} {:<10} {:<12} {:<48} {}", "Match", "Source", "Deadline", "Title", "Agency");
+        println!(
+            "  {:<6} {:<10} {:<12} {:<48} {}",
+            "Match", "Source", "Deadline", "Title", "Agency"
+        );
         println!("  {}", "-".repeat(115));
         for (score, b) in &scored_bids {
-            let dl = if b.deadline.is_empty() { "rolling" } else { &b.deadline[..10.min(b.deadline.len())] };
-            let title = if b.title.len() > 46 { &b.title[..46] } else { &b.title };
-            println!("  {:<6} {:<10} {:<12} {:<48} {}", score_icon(*score), b.source, dl, title, b.agency);
+            let dl = if b.deadline.is_empty() {
+                "rolling"
+            } else {
+                &b.deadline[..10.min(b.deadline.len())]
+            };
+            let title = if b.title.len() > 46 {
+                &b.title[..46]
+            } else {
+                &b.title
+            };
+            println!(
+                "  {:<6} {:<10} {:<12} {:<48} {}",
+                score_icon(*score),
+                b.source,
+                dl,
+                title,
+                b.agency
+            );
         }
 
         // Awards — sorted by amount, show your weight class
         let mut sorted_awards = rpt.awards.clone();
-        sorted_awards.sort_by(|a, b| b.amount.partial_cmp(&a.amount).unwrap_or(std::cmp::Ordering::Equal));
+        sorted_awards.sort_by(|a, b| {
+            b.amount
+                .partial_cmp(&a.amount)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-        println!("\n  SCOREBOARD — WHO'S WINNING ({} awards)", sorted_awards.len());
-        println!("  {:<12} {:<12} {:<38} {}", "Amount", "NAICS", "Winner", "Agency");
+        println!(
+            "\n  SCOREBOARD — WHO'S WINNING ({} awards)",
+            sorted_awards.len()
+        );
+        println!(
+            "  {:<12} {:<12} {:<38} {}",
+            "Amount", "NAICS", "Winner", "Agency"
+        );
         println!("  {}", "-".repeat(105));
         let mut your_range = 0u32;
         for a in &sorted_awards {
-            let tier = if a.amount < 50000.0 { ">" } // micro — easy entry
-                else if a.amount < 150000.0 { ">>" } // your sweet spot
-                else if a.amount < 300000.0 { ">>>" }
-                else { ">>>>" };
-            if a.amount >= 25000.0 && a.amount <= 250000.0 { your_range += 1; }
-            let winner = if a.winner.len() > 36 { &a.winner[..36] } else { &a.winner };
-            let agency = if a.agency.len() > 30 { &a.agency[..30] } else { &a.agency };
-            println!("  {:<2} ${:<10.0} {:<12} {:<38} {}", tier, a.amount, a.naics, winner, agency);
+            let tier = if a.amount < 50000.0 {
+                ">"
+            }
+            // micro — easy entry
+            else if a.amount < 150000.0 {
+                ">>"
+            }
+            // your sweet spot
+            else if a.amount < 300000.0 {
+                ">>>"
+            } else {
+                ">>>>"
+            };
+            if a.amount >= 25000.0 && a.amount <= 250000.0 {
+                your_range += 1;
+            }
+            let winner = if a.winner.len() > 36 {
+                &a.winner[..36]
+            } else {
+                &a.winner
+            };
+            let agency = if a.agency.len() > 30 {
+                &a.agency[..30]
+            } else {
+                &a.agency
+            };
+            println!(
+                "  {:<2} ${:<10.0} {:<12} {:<38} {}",
+                tier, a.amount, a.naics, winner, agency
+            );
         }
         println!("  {} awards in your range ($25K-$250K)", your_range);
 
         // Pipeline — signals sorted by date
-        println!("\n  RADAR — PIPELINE SIGNALS ({} detected)", rpt.signals.len());
-        println!("  {:<8} {:<12} {:<58} {}", "Source", "Date", "Title", "Agency");
+        println!(
+            "\n  RADAR — PIPELINE SIGNALS ({} detected)",
+            rpt.signals.len()
+        );
+        println!(
+            "  {:<8} {:<12} {:<58} {}",
+            "Source", "Date", "Title", "Agency"
+        );
         println!("  {}", "-".repeat(105));
         for s in rpt.signals.iter().take(30) {
-            let title = if s.title.len() > 56 { &s.title[..56] } else { &s.title };
-            let date = if s.date.len() >= 10 { &s.date[..10] } else { &s.date };
+            let title = if s.title.len() > 56 {
+                &s.title[..56]
+            } else {
+                &s.title
+            };
+            let date = if s.date.len() >= 10 {
+                &s.date[..10]
+            } else {
+                &s.date
+            };
             println!("  {:<8} {:<12} {:<58} {}", s.source, date, title, s.agency);
         }
         if rpt.signals.len() > 30 {
@@ -716,22 +983,50 @@ mod scout {
         }
 
         // Rates — your pricing intel
-        println!("\n  MARKET RATES — WHAT THEY CHARGE ({} benchmarks)", rpt.rates.len());
+        println!(
+            "\n  MARKET RATES — WHAT THEY CHARGE ({} benchmarks)",
+            rpt.rates.len()
+        );
         println!("  {:<10} {:<38} {}", "$/hr", "Labor Category", "Vendor");
         println!("  {}", "-".repeat(75));
         for r in &rpt.rates {
-            let cat = if r.labor_category.len() > 36 { &r.labor_category[..36] } else { &r.labor_category };
-            let vendor = if r.vendor.len() > 28 { &r.vendor[..28] } else { &r.vendor };
+            let cat = if r.labor_category.len() > 36 {
+                &r.labor_category[..36]
+            } else {
+                &r.labor_category
+            };
+            let vendor = if r.vendor.len() > 28 {
+                &r.vendor[..28]
+            } else {
+                &r.vendor
+            };
             println!("  ${:<9.2} {:<38} {}", r.price, cat, vendor);
         }
 
         // Summary
         let top_matches = scored_bids.iter().filter(|(s, _)| *s >= 30).count();
         println!("\n  === SCOUT SUMMARY ===");
-        println!("  {} total records | {} new | {} cached", total, rpt.new_count, db.len());
-        println!("  {} open bids | {} strong matches [!!+]", rpt.bids.len(), top_matches);
-        println!("  {} competitors tracked | {} in your range", rpt.awards.len(), your_range);
-        println!("  {} pipeline signals | {} rate benchmarks", rpt.signals.len(), rpt.rates.len());
+        println!(
+            "  {} total records | {} new | {} cached",
+            total,
+            rpt.new_count,
+            db.len()
+        );
+        println!(
+            "  {} open bids | {} strong matches [!!+]",
+            rpt.bids.len(),
+            top_matches
+        );
+        println!(
+            "  {} competitors tracked | {} in your range",
+            rpt.awards.len(),
+            your_range
+        );
+        println!(
+            "  {} pipeline signals | {} rate benchmarks",
+            rpt.signals.len(),
+            rpt.rates.len()
+        );
         if top_matches > 0 {
             println!("\n  [!!!] = perfect match, bid NOW");
             println!("  [!! ] = strong match, bid this week");
@@ -750,7 +1045,11 @@ mod scout {
 
         /// USASpending API — no auth, no rate limit
         /// Pagination: page param (1-indexed), limit per page, has_next_page in response
-        pub async fn query(naics: &[&str], min_amount: u64, max_amount: u64) -> anyhow::Result<Vec<Award>> {
+        pub async fn query(
+            naics: &[&str],
+            min_amount: u64,
+            max_amount: u64,
+        ) -> anyhow::Result<Vec<Award>> {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
@@ -797,13 +1096,18 @@ mod scout {
                             agency: r["Awarding Agency"].as_str().unwrap_or("").into(),
                             naics: "mixed".into(),
                             date: r["Start Date"].as_str().unwrap_or("").into(),
-                            url: format!("https://www.usaspending.gov/award/{}", r["generated_internal_id"].as_str().unwrap_or("")),
+                            url: format!(
+                                "https://www.usaspending.gov/award/{}",
+                                r["generated_internal_id"].as_str().unwrap_or("")
+                            ),
                         });
                     }
                 }
 
                 page += 1;
-                if count == 0 || !has_next || all.len() >= PAGE_CAP { break; }
+                if count == 0 || !has_next || all.len() >= PAGE_CAP {
+                    break;
+                }
             }
             Ok(all)
         }
@@ -812,7 +1116,11 @@ mod scout {
     mod sam {
         use super::Bid;
 
-        pub async fn query(api_key: &str, naics: &[&str], keyword: Option<&str>) -> anyhow::Result<Vec<Bid>> {
+        pub async fn query(
+            api_key: &str,
+            naics: &[&str],
+            keyword: Option<&str>,
+        ) -> anyhow::Result<Vec<Bid>> {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
@@ -822,11 +1130,14 @@ mod scout {
             let mut all_opps = Vec::new();
             let page_size = 100;
             let db = super::open_db();
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
             for code in naics {
                 let cache_key = format!("sam_last:{}", code);
                 if let Some(ts_bytes) = db.get(&cache_key).unwrap() {
-                    let ts = u64::from_le_bytes(ts_bytes.as_ref().try_into().unwrap_or([0;8]));
+                    let ts = u64::from_le_bytes(ts_bytes.as_ref().try_into().unwrap_or([0; 8]));
                     if now - ts < 86400 {
                         eprintln!("[sam.gov] {} cached (<24h), skipping API call", code);
                         continue;
@@ -842,12 +1153,7 @@ mod scout {
                         url.push_str(&format!("&q={}", kw));
                     }
 
-                    let resp: serde_json::Value = client
-                        .get(&url)
-                        .send()
-                        .await?
-                        .json()
-                        .await?;
+                    let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
 
                     let total = resp["totalRecords"].as_u64().unwrap_or(0);
                     let arr = resp["opportunitiesData"].as_array();
@@ -855,7 +1161,8 @@ mod scout {
 
                     if let Some(arr) = arr {
                         for r in arr {
-                            let set_aside_val = r["typeOfSetAsideDescription"].as_str()
+                            let set_aside_val = r["typeOfSetAsideDescription"]
+                                .as_str()
                                 .or_else(|| r["typeOfSetAside"].as_str())
                                 .unwrap_or("");
                             all_opps.push(Bid {
@@ -868,7 +1175,10 @@ mod scout {
                                 set_aside: set_aside_val.into(),
                                 posted: r["postedDate"].as_str().unwrap_or("").into(),
                                 deadline: r["responseDeadLine"].as_str().unwrap_or("").into(),
-                                url: format!("https://sam.gov/opp/{}/view", r["noticeId"].as_str().unwrap_or("")),
+                                url: format!(
+                                    "https://sam.gov/opp/{}/view",
+                                    r["noticeId"].as_str().unwrap_or("")
+                                ),
                             });
                         }
                     }
@@ -901,29 +1211,38 @@ mod scout {
             let resp = client.get(&url).send().await?.text().await?;
 
             // SBIR API may return empty or HTML when under maintenance
-            let parsed: serde_json::Value = serde_json::from_str(&resp).unwrap_or(serde_json::Value::Array(vec![]));
+            let parsed: serde_json::Value =
+                serde_json::from_str(&resp).unwrap_or(serde_json::Value::Array(vec![]));
 
-            let results = parsed.as_array().map(|arr| {
-                arr.iter().map(|r| Bid {
-                    source: "sbir".into(),
-                    id: r["solicitationId"].as_str().unwrap_or("").into(),
-                    title: r["solicitationTitle"].as_str().unwrap_or("").into(),
-                    description: r["sbpiAbstract"].as_str().unwrap_or("").into(),
-                    agency: r["agency"].as_str().unwrap_or("").into(),
-                    naics: "SBIR".into(),
-                    set_aside: String::new(),
-                    posted: r["openDate"].as_str().unwrap_or("").into(),
-                    deadline: r["closeDate"].as_str().unwrap_or("").into(),
-                    url: format!("https://www.sbir.gov/node/{}", r["solicitationId"].as_str().unwrap_or("")),
-                }).collect()
-            }).unwrap_or_default();
+            let results = parsed
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|r| Bid {
+                            source: "sbir".into(),
+                            id: r["solicitationId"].as_str().unwrap_or("").into(),
+                            title: r["solicitationTitle"].as_str().unwrap_or("").into(),
+                            description: r["sbpiAbstract"].as_str().unwrap_or("").into(),
+                            agency: r["agency"].as_str().unwrap_or("").into(),
+                            naics: "SBIR".into(),
+                            set_aside: String::new(),
+                            posted: r["openDate"].as_str().unwrap_or("").into(),
+                            deadline: r["closeDate"].as_str().unwrap_or("").into(),
+                            url: format!(
+                                "https://www.sbir.gov/node/{}",
+                                r["solicitationId"].as_str().unwrap_or("")
+                            ),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
 
             Ok(results)
         }
     }
 
     mod fedreg {
-        use super::{Signal, PAGE_CAP};
+        use super::{PAGE_CAP, Signal};
 
         /// Federal Register API v1 — no auth, no rate limit
         /// Pagination: per_page (max 1000), page param
@@ -948,7 +1267,8 @@ mod scout {
 
                 if let Some(arr) = results {
                     for r in arr {
-                        let agency = r["agencies"].as_array()
+                        let agency = r["agencies"]
+                            .as_array()
                             .and_then(|a| a.first())
                             .and_then(|a| a["name"].as_str())
                             .unwrap_or("");
@@ -966,7 +1286,9 @@ mod scout {
                 }
 
                 page += 1;
-                if count == 0 || all.len() >= PAGE_CAP || all.len() as u64 >= total { break; }
+                if count == 0 || all.len() >= PAGE_CAP || all.len() as u64 >= total {
+                    break;
+                }
             }
             Ok(all)
         }
@@ -1017,13 +1339,18 @@ mod scout {
                             set_aside: String::new(),
                             posted: r["openDate"].as_str().unwrap_or("").into(),
                             deadline: r["closeDate"].as_str().unwrap_or("").into(),
-                            url: format!("https://www.grants.gov/search-results-detail/{}", r["id"].as_str().unwrap_or("")),
+                            url: format!(
+                                "https://www.grants.gov/search-results-detail/{}",
+                                r["id"].as_str().unwrap_or("")
+                            ),
                         });
                     }
                 }
 
                 start += count as u32;
-                if count == 0 || all.len() >= PAGE_CAP || start as u64 >= hit_count { break; }
+                if count == 0 || all.len() >= PAGE_CAP || start as u64 >= hit_count {
+                    break;
+                }
             }
             Ok(all)
         }
@@ -1048,30 +1375,41 @@ mod scout {
 
             let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
 
-            let results = resp["awardSummary"].as_array().map(|arr| {
-                arr.iter().map(|r| {
-                    let core = &r["coreData"];
-                    let awardee = &r["awardeeData"];
-                    Award {
-                        source: "awards".into(),
-                        id: core["contractId"].as_str().unwrap_or("").into(),
-                        winner: awardee["awardeeLegalBusinessName"].as_str().unwrap_or("").into(),
-                        description: core["descriptionOfContractRequirement"].as_str().unwrap_or("").into(),
-                        amount: core["dollarsObligated"].as_f64().unwrap_or(0.0),
-                        agency: core["fundingAgencyName"].as_str().unwrap_or("").into(),
-                        naics: core["naicsCode"].as_str().unwrap_or("").into(),
-                        date: core["dateSigned"].as_str().unwrap_or("").into(),
-                        url: "https://sam.gov/search?keywords=contract+awards".into(),
-                    }
-                }).collect()
-            }).unwrap_or_default();
+            let results = resp["awardSummary"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|r| {
+                            let core = &r["coreData"];
+                            let awardee = &r["awardeeData"];
+                            Award {
+                                source: "awards".into(),
+                                id: core["contractId"].as_str().unwrap_or("").into(),
+                                winner: awardee["awardeeLegalBusinessName"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .into(),
+                                description: core["descriptionOfContractRequirement"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .into(),
+                                amount: core["dollarsObligated"].as_f64().unwrap_or(0.0),
+                                agency: core["fundingAgencyName"].as_str().unwrap_or("").into(),
+                                naics: core["naicsCode"].as_str().unwrap_or("").into(),
+                                date: core["dateSigned"].as_str().unwrap_or("").into(),
+                                url: "https://sam.gov/search?keywords=contract+awards".into(),
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
 
             Ok(results)
         }
     }
 
     mod regulations {
-        use super::{Signal, PAGE_CAP};
+        use super::{PAGE_CAP, Signal};
 
         /// Regulations.gov API v4 — DEMO_KEY for testing, get real key from api.data.gov
         /// Pagination: page[size] max 250, page[number]
@@ -1112,13 +1450,18 @@ mod scout {
                             agency: attrs["agencyId"].as_str().unwrap_or("").into(),
                             doc_type: attrs["documentType"].as_str().unwrap_or("").into(),
                             date: attrs["postedDate"].as_str().unwrap_or("").into(),
-                            url: format!("https://www.regulations.gov/document/{}", attrs["documentId"].as_str().unwrap_or("")),
+                            url: format!(
+                                "https://www.regulations.gov/document/{}",
+                                attrs["documentId"].as_str().unwrap_or("")
+                            ),
                         });
                     }
                 }
 
                 page += 1;
-                if count == 0 || all.len() >= PAGE_CAP || all.len() as u64 >= total { break; }
+                if count == 0 || all.len() >= PAGE_CAP || all.len() as u64 >= total {
+                    break;
+                }
             }
             Ok(all)
         }
@@ -1142,20 +1485,25 @@ mod scout {
 
             let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
 
-            let results = resp["hits"]["hits"].as_array().map(|arr| {
-                arr.iter().map(|r| {
-                    let s = &r["_source"];
-                    Rate {
-                        id: r["_id"].as_str().unwrap_or("").into(),
-                        labor_category: s["labor_category"].as_str().unwrap_or("").into(),
-                        vendor: s["vendor_name"].as_str().unwrap_or("").into(),
-                        sin: s["sin"].as_str().unwrap_or("").into(),
-                        price: s["current_price"].as_f64().unwrap_or(0.0),
-                        education: s["education_level"].as_str().unwrap_or("").into(),
-                        experience: s["min_years_experience"].as_str().unwrap_or("").into(),
-                    }
-                }).collect()
-            }).unwrap_or_default();
+            let results = resp["hits"]["hits"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|r| {
+                            let s = &r["_source"];
+                            Rate {
+                                id: r["_id"].as_str().unwrap_or("").into(),
+                                labor_category: s["labor_category"].as_str().unwrap_or("").into(),
+                                vendor: s["vendor_name"].as_str().unwrap_or("").into(),
+                                sin: s["sin"].as_str().unwrap_or("").into(),
+                                price: s["current_price"].as_f64().unwrap_or(0.0),
+                                education: s["education_level"].as_str().unwrap_or("").into(),
+                                experience: s["min_years_experience"].as_str().unwrap_or("").into(),
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
 
             Ok(results)
         }
@@ -1203,10 +1551,16 @@ mod cf {
         message: String,
     }
 
-    pub async fn pull(zone: &str, token: &str, date: Option<&str>, country: &str, min_hits: u32) -> anyhow::Result<Vec<Visitor>> {
-        let date = date.map(|d| d.to_string()).unwrap_or_else(|| {
-            chrono_free_today()
-        });
+    pub async fn pull(
+        zone: &str,
+        token: &str,
+        date: Option<&str>,
+        country: &str,
+        min_hits: u32,
+    ) -> anyhow::Result<Vec<Visitor>> {
+        let date = date
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| chrono_free_today());
 
         let query = format!(
             r#"{{ viewer {{ zones(filter: {{zoneTag: "{}"}}) {{ httpRequestsAdaptiveGroups(limit: 200, filter: {{date: "{}", clientCountryName: "{}"}}, orderBy: [count_DESC]) {{ count dimensions {{ clientIP }} }} }} }} }}"#,
@@ -1229,13 +1583,24 @@ mod cf {
             }
         }
 
-        let data = resp.data.ok_or_else(|| anyhow::anyhow!("no data in response"))?;
-        let zone = data.viewer.zones.into_iter().next().ok_or_else(|| anyhow::anyhow!("no zone data"))?;
+        let data = resp
+            .data
+            .ok_or_else(|| anyhow::anyhow!("no data in response"))?;
+        let zone = data
+            .viewer
+            .zones
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no zone data"))?;
 
-        Ok(zone.groups
+        Ok(zone
+            .groups
             .into_iter()
             .filter(|g| g.count >= min_hits)
-            .map(|g| Visitor { ip: g.dimensions.client_ip, hits: g.count })
+            .map(|g| Visitor {
+                ip: g.dimensions.client_ip,
+                hits: g.count,
+            })
             .collect())
     }
 
@@ -1248,7 +1613,11 @@ mod cf {
         let y = (10000 * days + 14780) / 3652425;
         let doy = days - (365 * y + y / 4 - y / 100 + y / 400);
         let y = if doy < 0 { y - 1 } else { y };
-        let doy = if doy < 0 { days - (365 * y + y / 4 - y / 100 + y / 400) } else { doy };
+        let doy = if doy < 0 {
+            days - (365 * y + y / 4 - y / 100 + y / 400)
+        } else {
+            doy
+        };
         let mi = (100 * doy + 52) / 3060;
         let month = mi + 3 - 12 * (mi / 10);
         let year = y + mi / 10;
@@ -1265,20 +1634,44 @@ mod dns {
     use std::time::Duration;
 
     const ISP_PATTERNS: &[&str] = &[
-        "spectrum", "comcast", "verizon", "sbcglobal", "att.net", "cox",
-        "cable", "pool-", "dsl", "dhcp", "static-", "cpe.", "res.",
-        "biz.", "biz6.", "inf6.", "lightspeed", "hsd1.", "socal.",
-        "nycmny", "rr.com", "charter.com", "alticeusa",
+        "spectrum",
+        "comcast",
+        "verizon",
+        "sbcglobal",
+        "att.net",
+        "cox",
+        "cable",
+        "pool-",
+        "dsl",
+        "dhcp",
+        "static-",
+        "cpe.",
+        "res.",
+        "biz.",
+        "biz6.",
+        "inf6.",
+        "lightspeed",
+        "hsd1.",
+        "socal.",
+        "nycmny",
+        "rr.com",
+        "charter.com",
+        "alticeusa",
     ];
 
     fn make_resolver() -> TokioResolver {
         TokioResolver::builder_tokio()
-            .unwrap_or_else(|_| TokioResolver::builder_with_config(Default::default(), Default::default()))
+            .unwrap_or_else(|_| {
+                TokioResolver::builder_with_config(Default::default(), Default::default())
+            })
             .build()
     }
 
     fn hostname_from_lookup(lookup: ReverseLookup) -> Option<String> {
-        lookup.iter().next().map(|n| n.to_string().trim_end_matches('.').to_string())
+        lookup
+            .iter()
+            .next()
+            .map(|n| n.to_string().trim_end_matches('.').to_string())
     }
 
     pub async fn rdns_batch(ips: &[String]) -> Vec<(String, Option<String>)> {
@@ -1287,7 +1680,10 @@ mod dns {
         for ip in ips {
             let addr = match IpAddr::from_str(ip) {
                 Ok(a) => a,
-                Err(_) => { results.push((ip.clone(), None)); continue; }
+                Err(_) => {
+                    results.push((ip.clone(), None));
+                    continue;
+                }
             };
             let rdns = tokio::time::timeout(Duration::from_secs(3), resolver.reverse_lookup(addr))
                 .await
@@ -1315,11 +1711,14 @@ mod dns {
         for i in 1..=254u8 {
             let neighbor = format!("{}.{}", base, i);
             let neighbor_addr: IpAddr = neighbor.parse()?;
-            let rdns = tokio::time::timeout(Duration::from_secs(2), resolver.reverse_lookup(neighbor_addr))
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .and_then(hostname_from_lookup);
+            let rdns = tokio::time::timeout(
+                Duration::from_secs(2),
+                resolver.reverse_lookup(neighbor_addr),
+            )
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .and_then(hostname_from_lookup);
 
             if let Some(hostname) = rdns {
                 let lower = hostname.to_lowercase();
@@ -1341,7 +1740,14 @@ mod report {
     use super::cf;
     use super::dns;
 
-    pub async fn run(zone: &str, token: &str, date: Option<&str>, country: &str, min_hits: u32, scan_neighbors: bool) -> anyhow::Result<()> {
+    pub async fn run(
+        zone: &str,
+        token: &str,
+        date: Option<&str>,
+        country: &str,
+        min_hits: u32,
+        scan_neighbors: bool,
+    ) -> anyhow::Result<()> {
         eprintln!("pulling visitors from Cloudflare...");
         let visitors = cf::pull(zone, token, date, country, min_hits).await?;
         eprintln!("{} IPs above {} hits", visitors.len(), min_hits);
@@ -1362,14 +1768,18 @@ mod report {
                 if !v.ip.contains(':') {
                     if let Ok(neighbors) = dns::scan_neighbors(&v.ip, true).await {
                         if !neighbors.is_empty() {
-                            let names: Vec<&str> = neighbors.iter().map(|(_, h)| h.as_str()).take(3).collect();
+                            let names: Vec<&str> =
+                                neighbors.iter().map(|(_, h)| h.as_str()).take(3).collect();
                             neighbor_str = names.join(", ");
                         }
                     }
                 }
             }
 
-            println!("{:<6} {:<42} {:<55} {}", v.hits, v.ip, rdns_str, neighbor_str);
+            println!(
+                "{:<6} {:<42} {:<55} {}",
+                v.hits, v.ip, rdns_str, neighbor_str
+            );
         }
 
         Ok(())
@@ -1402,14 +1812,19 @@ mod browse {
 
         /// Navigate, wait for JS, return innerText. Empty string on any failure.
         pub async fn fetch_text(&self, url: &str, wait_secs: u64) -> anyhow::Result<String> {
-            let page = self.browser.new_page("about:blank").await
+            let page = self
+                .browser
+                .new_page("about:blank")
+                .await
                 .map_err(|e| anyhow::anyhow!("new_page: {}", e))?;
             if page.goto(url).await.is_err() {
                 let _ = page.close().await;
                 return Ok(String::new());
             }
             tokio::time::sleep(Duration::from_secs(wait_secs)).await;
-            let text = page.evaluate("document.body.innerText").await
+            let text = page
+                .evaluate("document.body.innerText")
+                .await
                 .ok()
                 .and_then(|v| v.into_value::<String>().ok())
                 .unwrap_or_default();
@@ -1440,28 +1855,43 @@ mod browse {
                 .build()
                 .map_err(|e| format!("fetcher opts: {}", e))?,
         );
-        let info = fetcher.fetch().await.map_err(|e| format!("fetcher: {}", e))?;
+        let info = fetcher
+            .fetch()
+            .await
+            .map_err(|e| format!("fetcher: {}", e))?;
         chromiumoxide::BrowserConfig::builder()
             .chrome_executable(info.executable_path)
             .build()
             .map_err(|e| format!("browser config: {}", e))
     }
 
-    pub async fn run(url: &str, out_dir: &str, wait: u64, extract: bool, mobile: bool) -> anyhow::Result<()> {
+    pub async fn run(
+        url: &str,
+        out_dir: &str,
+        wait: u64,
+        extract: bool,
+        mobile: bool,
+    ) -> anyhow::Result<()> {
         let out = Path::new(out_dir);
         std::fs::create_dir_all(out)?;
 
-        eprintln!("[browse] launching headless chrome{}...", if mobile { " (mobile)" } else { "" });
+        eprintln!(
+            "[browse] launching headless chrome{}...",
+            if mobile { " (mobile)" } else { "" }
+        );
         let config = browser_config().await.map_err(|e| anyhow::anyhow!(e))?;
         let (mut browser, mut handler) = chromiumoxide::Browser::launch(config)
             .await
             .map_err(|e| anyhow::anyhow!("launch: {}", e))?;
 
-        let handle = tokio::spawn(async move {
-            while futures::StreamExt::next(&mut handler).await.is_some() {}
-        });
+        let handle =
+            tokio::spawn(
+                async move { while futures::StreamExt::next(&mut handler).await.is_some() {} },
+            );
 
-        let page = browser.new_page("about:blank").await
+        let page = browser
+            .new_page("about:blank")
+            .await
             .map_err(|e| anyhow::anyhow!("new_page: {}", e))?;
 
         // Set mobile viewport if requested (iPhone 14: 390x844)
@@ -1482,11 +1912,15 @@ mod browse {
         }
 
         eprintln!("[browse] navigating to {}...", url);
-        let _ = page.goto(url).await.map_err(|e| anyhow::anyhow!("goto: {}", e))?;
+        let _ = page
+            .goto(url)
+            .await
+            .map_err(|e| anyhow::anyhow!("goto: {}", e))?;
         tokio::time::sleep(Duration::from_secs(wait)).await;
 
         // Screenshot
-        let slug: String = url.chars()
+        let slug: String = url
+            .chars()
             .map(|c| if c.is_alphanumeric() { c } else { '_' })
             .take(60)
             .collect();
@@ -1500,7 +1934,9 @@ mod browse {
                 .full_page(true)
                 .build(),
             &screenshot_path,
-        ).await.map_err(|e| anyhow::anyhow!("screenshot: {}", e))?;
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("screenshot: {}", e))?;
         eprintln!("[browse] screenshot saved: {}", screenshot_path.display());
 
         // Debug mobile viewport
@@ -1512,7 +1948,9 @@ mod browse {
 
         // Extract text — use innerText for clean rendered content (no CSS/JS noise)
         if extract {
-            let text = page.evaluate("document.body.innerText").await
+            let text = page
+                .evaluate("document.body.innerText")
+                .await
                 .map_err(|e| anyhow::anyhow!("evaluate: {}", e))?
                 .into_value::<String>()
                 .unwrap_or_default();
@@ -1529,8 +1967,7 @@ mod browse {
     /// returns 0 for cross-origin resources without CORS headers).
     pub async fn perf(url: &str, wait: u64) -> anyhow::Result<()> {
         use chromiumoxide::cdp::browser_protocol::network::{
-            EnableParams, EventLoadingFinished, EventResponseReceived,
-            SetCacheDisabledParams,
+            EnableParams, EventLoadingFinished, EventResponseReceived, SetCacheDisabledParams,
         };
         use std::sync::Arc;
         use tokio::sync::Mutex;
@@ -1541,11 +1978,14 @@ mod browse {
             .await
             .map_err(|e| anyhow::anyhow!("launch: {}", e))?;
 
-        let handle = tokio::spawn(async move {
-            while futures::StreamExt::next(&mut handler).await.is_some() {}
-        });
+        let handle =
+            tokio::spawn(
+                async move { while futures::StreamExt::next(&mut handler).await.is_some() {} },
+            );
 
-        let page = browser.new_page("about:blank").await
+        let page = browser
+            .new_page("about:blank")
+            .await
             .map_err(|e| anyhow::anyhow!("new_page: {}", e))?;
 
         // Enable CDP Network domain + disable cache so encodedDataLength is real
@@ -1561,7 +2001,9 @@ mod browse {
         // Listen for LoadingFinished (has real encodedDataLength)
         let bytes_clone = total_bytes.clone();
         let count_clone = request_count.clone();
-        let mut loading_events = page.event_listener::<EventLoadingFinished>().await
+        let mut loading_events = page
+            .event_listener::<EventLoadingFinished>()
+            .await
             .map_err(|e| anyhow::anyhow!("listen loading: {}", e))?;
         tokio::spawn(async move {
             while let Some(ev) = futures::StreamExt::next(&mut loading_events).await {
@@ -1574,7 +2016,9 @@ mod browse {
 
         // Listen for ResponseReceived (has resource type)
         let types_clone = resource_types.clone();
-        let mut response_events = page.event_listener::<EventResponseReceived>().await
+        let mut response_events = page
+            .event_listener::<EventResponseReceived>()
+            .await
             .map_err(|e| anyhow::anyhow!("listen response: {}", e))?;
         tokio::spawn(async move {
             while let Some(ev) = futures::StreamExt::next(&mut response_events).await {
@@ -1589,14 +2033,20 @@ mod browse {
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
 
         // Performance timing
-        let timing = page.evaluate("JSON.stringify(performance.timing)").await
+        let timing = page
+            .evaluate("JSON.stringify(performance.timing)")
+            .await
             .map_err(|e| anyhow::anyhow!("timing: {}", e))?
-            .into_value::<String>().unwrap_or_default();
+            .into_value::<String>()
+            .unwrap_or_default();
 
         // Paint metrics
-        let paint = page.evaluate("JSON.stringify(performance.getEntriesByType('paint'))").await
+        let paint = page
+            .evaluate("JSON.stringify(performance.getEntriesByType('paint'))")
+            .await
             .map_err(|e| anyhow::anyhow!("paint: {}", e))?
-            .into_value::<String>().unwrap_or_default();
+            .into_value::<String>()
+            .unwrap_or_default();
 
         // Layout shift
         let cls = page.evaluate(
@@ -1605,10 +2055,12 @@ mod browse {
             .into_value::<f64>().unwrap_or(0.0);
 
         // DOM element count
-        let dom_elements = page.evaluate(
-            "document.querySelectorAll('*').length"
-        ).await.map_err(|e| anyhow::anyhow!("dom: {}", e))?
-            .into_value::<f64>().unwrap_or(0.0);
+        let dom_elements = page
+            .evaluate("document.querySelectorAll('*').length")
+            .await
+            .map_err(|e| anyhow::anyhow!("dom: {}", e))?
+            .into_value::<f64>()
+            .unwrap_or(0.0);
 
         // Animation frame rate
         let fps = page.evaluate(
@@ -1650,8 +2102,11 @@ mod browse {
 
         // CDP network — real transfer sizes
         println!("\n  --- NETWORK (CDP) ---");
-        println!("  Total transfer:          {} ({:.0} KB)",
-            cdp_bytes, cdp_bytes as f64 / 1024.0);
+        println!(
+            "  Total transfer:          {} ({:.0} KB)",
+            cdp_bytes,
+            cdp_bytes as f64 / 1024.0
+        );
         println!("  Requests:                {}", cdp_requests);
         let mut type_vec: Vec<_> = cdp_types.iter().collect();
         type_vec.sort_by(|a, b| b.1.cmp(a.1));
@@ -1661,10 +2116,16 @@ mod browse {
 
         // Verdict
         println!("\n  --- VERDICT ---");
-        if fps >= 55.0 { println!("  FPS:  PASS ({:.0} fps)", fps); }
-        else { println!("  FPS:  FAIL ({:.0} fps — should be 60)", fps); }
-        if cls < 0.1 { println!("  CLS:  PASS ({:.4} — under 0.1 threshold)", cls); }
-        else { println!("  CLS:  FAIL ({:.4} — over 0.1 threshold)", cls); }
+        if fps >= 55.0 {
+            println!("  FPS:  PASS ({:.0} fps)", fps);
+        } else {
+            println!("  FPS:  FAIL ({:.0} fps — should be 60)", fps);
+        }
+        if cls < 0.1 {
+            println!("  CLS:  PASS ({:.4} — under 0.1 threshold)", cls);
+        } else {
+            println!("  CLS:  FAIL ({:.4} — over 0.1 threshold)", cls);
+        }
 
         let _ = browser.close().await;
         handle.abort();
@@ -1694,8 +2155,14 @@ mod browse {
             }
             todo.push(url.clone());
         }
-        eprintln!("[scrape] {} cached, {} remaining", total - todo.len(), todo.len());
-        if todo.is_empty() { return Ok(()); }
+        eprintln!(
+            "[scrape] {} cached, {} remaining",
+            total - todo.len(),
+            todo.len()
+        );
+        if todo.is_empty() {
+            return Ok(());
+        }
 
         eprintln!("[scrape] launching headless chrome...");
         let config = browser_config().await.map_err(|e| anyhow::anyhow!(e))?;
@@ -1703,9 +2170,10 @@ mod browse {
             .await
             .map_err(|e| anyhow::anyhow!("launch: {}", e))?;
 
-        let handle = tokio::spawn(async move {
-            while futures::StreamExt::next(&mut handler).await.is_some() {}
-        });
+        let handle =
+            tokio::spawn(
+                async move { while futures::StreamExt::next(&mut handler).await.is_some() {} },
+            );
 
         let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1)); // 1 tab — Chrome crashes with concurrent tabs
         let browser = std::sync::Arc::new(browser);
@@ -1752,7 +2220,13 @@ mod browse {
             .replace("/view", "")
             .replace("https://", "")
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .take(60)
             .collect()
     }
@@ -1764,21 +2238,28 @@ mod browse {
         txt: &std::path::Path,
         wait: u64,
     ) -> anyhow::Result<()> {
-        let page = browser.new_page("about:blank").await
+        let page = browser
+            .new_page("about:blank")
+            .await
             .map_err(|e| anyhow::anyhow!("new_page: {}", e))?;
-        let _ = page.goto(url).await.map_err(|e| anyhow::anyhow!("goto: {}", e))?;
+        let _ = page
+            .goto(url)
+            .await
+            .map_err(|e| anyhow::anyhow!("goto: {}", e))?;
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
 
         // Screenshot
         use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
         use chromiumoxide::page::ScreenshotParams;
-        let _ = page.save_screenshot(
-            ScreenshotParams::builder()
-                .format(CaptureScreenshotFormat::Png)
-                .full_page(true)
-                .build(),
-            png,
-        ).await;
+        let _ = page
+            .save_screenshot(
+                ScreenshotParams::builder()
+                    .format(CaptureScreenshotFormat::Png)
+                    .full_page(true)
+                    .build(),
+                png,
+            )
+            .await;
 
         // Extract text — innerText gives clean rendered content
         if let Ok(val) = page.evaluate("document.body.innerText").await {
@@ -1805,15 +2286,15 @@ mod browse {
 //
 #[cfg(feature = "browser")]
 mod ctos {
-    use crate::browse;
     use crate::CtosOp;
+    use crate::browse;
     use serde::{Deserialize, Serialize};
 
     // Pure logic lives in the lib crate so the test binary can exercise it
     // without launching Chrome. Re-export for the pullers + commands below.
     pub use whobelooking::ctos::{
-        extract_cto_from_text, extract_first_email, norm, norm_company, now_secs,
-        slugify, today_iso, truncate, verify, CtoMention,
+        CtoMention, extract_cto_from_text, extract_first_email, norm, norm_company, now_secs,
+        slugify, today_iso, truncate, verify,
     };
 
     // ----- Contact record (sled-only type, stays here) -----
@@ -1874,9 +2355,10 @@ mod ctos {
 
     fn load_contact(db: &sled::Db, key: &str) -> Option<CtoContact> {
         let k = format!("cto:contact:{}", key);
-        db.get(k.as_bytes()).ok().flatten().and_then(|v| {
-            serde_json::from_slice::<CtoContact>(&decompress(&v)).ok()
-        })
+        db.get(k.as_bytes())
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_slice::<CtoContact>(&decompress(&v)).ok())
     }
 
     // ----- URL / HTML helpers used by the pullers -----
@@ -1897,14 +2379,17 @@ mod ctos {
     }
 
     fn strip_html_simple(s: &str) -> String {
-        s.chars().fold((String::new(), false), |(mut out, in_tag), c| {
-            match c {
+        s.chars()
+            .fold((String::new(), false), |(mut out, in_tag), c| match c {
                 '<' => (out, true),
                 '>' => (out, false),
-                _ if !in_tag => { out.push(c); (out, false) }
+                _ if !in_tag => {
+                    out.push(c);
+                    (out, false)
+                }
                 _ => (out, true),
-            }
-        }).0
+            })
+            .0
     }
 
     // =========================================================================
@@ -1920,7 +2405,11 @@ mod ctos {
                 .timeout(std::time::Duration::from_secs(15))
                 .user_agent("whobelooking/0.1 (+https://cochranblock.org)")
                 .build()?;
-            let query = if keyword.is_empty() { "I'm the CTO" } else { keyword };
+            let query = if keyword.is_empty() {
+                "I'm the CTO"
+            } else {
+                keyword
+            };
             let enc = urlencode(query);
             let mut out = Vec::new();
 
@@ -1994,7 +2483,8 @@ mod ctos {
                 "https://api.github.com/search/users?q={}+in:bio&per_page=30",
                 urlencode(q)
             );
-            let mut req = client.get(&search_url)
+            let mut req = client
+                .get(&search_url)
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28");
             if let Some(t) = &token {
@@ -2008,9 +2498,12 @@ mod ctos {
             let mut out = Vec::new();
             for item in items.into_iter().take(30) {
                 let login = item["login"].as_str().unwrap_or("");
-                if login.is_empty() { continue; }
+                if login.is_empty() {
+                    continue;
+                }
                 let prof_url = format!("https://api.github.com/users/{}", login);
-                let mut preq = client.get(&prof_url)
+                let mut preq = client
+                    .get(&prof_url)
                     .header("Accept", "application/vnd.github+json")
                     .header("X-GitHub-Api-Version", "2022-11-28");
                 if let Some(t) = &token {
@@ -2036,7 +2529,9 @@ mod ctos {
                 if !bio_lower.contains("cto") && !bio_lower.contains("chief technology") {
                     continue;
                 }
-                if name.is_empty() || company_raw.is_empty() { continue; }
+                if name.is_empty() || company_raw.is_empty() {
+                    continue;
+                }
 
                 let company = company_raw.trim_start_matches('@').to_string();
                 let company_url = if blog.starts_with("http") {
@@ -2087,7 +2582,10 @@ mod ctos {
                     Ok(r) => r.json().await.unwrap_or(serde_json::Value::Null),
                     Err(_) => continue,
                 };
-                let children = resp["data"]["children"].as_array().cloned().unwrap_or_default();
+                let children = resp["data"]["children"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
                 for child in children {
                     let d = &child["data"];
                     let title = d["title"].as_str().unwrap_or("");
@@ -2097,7 +2595,9 @@ mod ctos {
                     let full_url = format!("https://www.reddit.com{}", permalink);
                     let text = format!("{} {}", title, selftext);
                     for mut m in extract_cto_from_text(&text, "reddit", &full_url) {
-                        if m.handle.is_empty() { m.handle = author.clone(); }
+                        if m.handle.is_empty() {
+                            m.handle = author.clone();
+                        }
                         out.push(m);
                     }
                 }
@@ -2139,7 +2639,11 @@ mod ctos {
                 .timeout(std::time::Duration::from_secs(15))
                 .user_agent("whobelooking/0.1")
                 .build()?;
-            let q = if keyword.is_empty() { "podcast CTO" } else { keyword };
+            let q = if keyword.is_empty() {
+                "podcast CTO"
+            } else {
+                keyword
+            };
             let url = format!(
                 "https://hn.algolia.com/api/v1/search?query={}&tags=story&hitsPerPage=40",
                 urlencode(q)
@@ -2147,16 +2651,30 @@ mod ctos {
             let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
             let hits = resp["hits"].as_array().cloned().unwrap_or_default();
             let podcast_hosts = [
-                "transistor.fm", "anchor.fm", "simplecast", "libsyn", "buzzsprout",
-                "podbean", "spotify.com/episode", "apple.com/podcast",
-                "podcasts.apple.com", "overcast.fm", "fireside.fm",
-                "pca.st", "castro.fm", "pod.link",
+                "transistor.fm",
+                "anchor.fm",
+                "simplecast",
+                "libsyn",
+                "buzzsprout",
+                "podbean",
+                "spotify.com/episode",
+                "apple.com/podcast",
+                "podcasts.apple.com",
+                "overcast.fm",
+                "fireside.fm",
+                "pca.st",
+                "castro.fm",
+                "pod.link",
             ];
             let mut out = Vec::new();
             for hit in hits {
                 let story_url = hit["url"].as_str().unwrap_or("").to_string();
-                if story_url.is_empty() { continue; }
-                if !podcast_hosts.iter().any(|h| story_url.contains(h)) { continue; }
+                if story_url.is_empty() {
+                    continue;
+                }
+                if !podcast_hosts.iter().any(|h| story_url.contains(h)) {
+                    continue;
+                }
                 let text = session.fetch_text(&story_url, 4).await.unwrap_or_default();
                 out.extend(extract_cto_from_text(&text, "podcasts", &story_url));
             }
@@ -2186,21 +2704,30 @@ mod ctos {
         if pick("hn") {
             eprintln!("[hn] pulling...");
             match hn::pull(keyword).await {
-                Ok(ms) => { eprintln!("[hn] {} mentions", ms.len()); all.extend(ms); }
+                Ok(ms) => {
+                    eprintln!("[hn] {} mentions", ms.len());
+                    all.extend(ms);
+                }
                 Err(e) => eprintln!("[hn] error: {}", e),
             }
         }
         if pick("github") {
             eprintln!("[github] pulling...");
             match github::pull(keyword).await {
-                Ok(ms) => { eprintln!("[github] {} mentions", ms.len()); all.extend(ms); }
+                Ok(ms) => {
+                    eprintln!("[github] {} mentions", ms.len());
+                    all.extend(ms);
+                }
                 Err(e) => eprintln!("[github] error: {}", e),
             }
         }
         if pick("reddit") {
             eprintln!("[reddit] pulling...");
             match reddit::pull(keyword).await {
-                Ok(ms) => { eprintln!("[reddit] {} mentions", ms.len()); all.extend(ms); }
+                Ok(ms) => {
+                    eprintln!("[reddit] {} mentions", ms.len());
+                    all.extend(ms);
+                }
                 Err(e) => eprintln!("[reddit] error: {}", e),
             }
         }
@@ -2213,14 +2740,20 @@ mod ctos {
                     if pick("yc") {
                         eprintln!("[yc] browsing ycombinator.com...");
                         match yc::pull(&session).await {
-                            Ok(ms) => { eprintln!("[yc] {} mentions", ms.len()); all.extend(ms); }
+                            Ok(ms) => {
+                                eprintln!("[yc] {} mentions", ms.len());
+                                all.extend(ms);
+                            }
                             Err(e) => eprintln!("[yc] error: {}", e),
                         }
                     }
                     if pick("podcasts") {
                         eprintln!("[podcasts] browsing episode pages...");
                         match podcasts::pull(&session, keyword).await {
-                            Ok(ms) => { eprintln!("[podcasts] {} mentions", ms.len()); all.extend(ms); }
+                            Ok(ms) => {
+                                eprintln!("[podcasts] {} mentions", ms.len());
+                                all.extend(ms);
+                            }
                             Err(e) => eprintln!("[podcasts] error: {}", e),
                         }
                     }
@@ -2235,15 +2768,21 @@ mod ctos {
         let mut new_mentions = 0u32;
         let mut direct_contacts = 0u32;
         for m in &all {
-            if cache_mention(&db, m) { new_mentions += 1; }
+            if cache_mention(&db, m) {
+                new_mentions += 1;
+            }
             if !m.scraped_email.is_empty() {
                 let key = contact_key(&m.name, &m.company);
                 if load_contact(&db, &key).is_none() {
-                    cache_contact(&db, &key, &CtoContact {
-                        email: m.scraped_email.clone(),
-                        email_source_url: m.source_url.clone(),
-                        scraped_at: now_secs(),
-                    });
+                    cache_contact(
+                        &db,
+                        &key,
+                        &CtoContact {
+                            email: m.scraped_email.clone(),
+                            email_source_url: m.source_url.clone(),
+                            scraped_at: now_secs(),
+                        },
+                    );
                     direct_contacts += 1;
                 }
             }
@@ -2267,7 +2806,10 @@ mod ctos {
         eprintln!("{} verified CTOs (2+ distinct sources)\n", verified.len());
 
         println!("=== VERIFIED CTOs ===");
-        println!("{:<28} {:<30} {:<8} {}", "Name", "Company", "#src", "sources");
+        println!(
+            "{:<28} {:<30} {:<8} {}",
+            "Name", "Company", "#src", "sources"
+        );
         println!("{}", "-".repeat(100));
         for v in &verified {
             let src_list: Vec<&str> = v.sources.iter().map(|(s, _)| s.as_str()).collect();
@@ -2292,15 +2834,21 @@ mod ctos {
             let mut new_contacts = 0u32;
             for v in &verified {
                 let key = contact_key(&v.name, &v.company);
-                if load_contact(&db, &key).is_some() { continue; }
+                if load_contact(&db, &key).is_some() {
+                    continue;
+                }
 
                 // Priority 1: emails already scraped during pull (e.g. GitHub)
                 if let Some((email, src)) = v.direct_emails.first() {
-                    cache_contact(&db, &key, &CtoContact {
-                        email: email.clone(),
-                        email_source_url: src.clone(),
-                        scraped_at: now_secs(),
-                    });
+                    cache_contact(
+                        &db,
+                        &key,
+                        &CtoContact {
+                            email: email.clone(),
+                            email_source_url: src.clone(),
+                            scraped_at: now_secs(),
+                        },
+                    );
                     new_contacts += 1;
                     continue;
                 }
@@ -2310,7 +2858,9 @@ mod ctos {
                 // the company name.
                 let mut found = false;
                 for cu in &v.company_urls {
-                    if cu.is_empty() || !cu.starts_with("http") { continue; }
+                    if cu.is_empty() || !cu.starts_with("http") {
+                        continue;
+                    }
                     for path in &["", "/about", "/team", "/contact"] {
                         let full = format!("{}{}", cu.trim_end_matches('/'), path);
                         let text = match session.fetch_text(&full, 4).await {
@@ -2324,18 +2874,24 @@ mod ctos {
                             let url_host = full
                                 .trim_start_matches("https://")
                                 .trim_start_matches("http://")
-                                .split('/').next().unwrap_or("")
+                                .split('/')
+                                .next()
+                                .unwrap_or("")
                                 .trim_start_matches("www.");
                             let email_domain = email.split('@').nth(1).unwrap_or("");
                             if url_host.contains(email_domain)
                                 || email_domain.contains(url_host)
                                 || url_host.ends_with(email_domain)
                             {
-                                cache_contact(&db, &key, &CtoContact {
-                                    email: email.clone(),
-                                    email_source_url: full.clone(),
-                                    scraped_at: now_secs(),
-                                });
+                                cache_contact(
+                                    &db,
+                                    &key,
+                                    &CtoContact {
+                                        email: email.clone(),
+                                        email_source_url: full.clone(),
+                                        scraped_at: now_secs(),
+                                    },
+                                );
                                 println!("  [ok] {} → {} (from {})", v.name, email, full);
                                 new_contacts += 1;
                                 found = true;
@@ -2343,10 +2899,15 @@ mod ctos {
                             }
                         }
                     }
-                    if found { break; }
+                    if found {
+                        break;
+                    }
                 }
                 if !found && v.company_urls.is_empty() {
-                    println!("  [skip] {} ({}) — no observed URL to scrape", v.name, v.company);
+                    println!(
+                        "  [skip] {} ({}) — no observed URL to scrape",
+                        v.name, v.company
+                    );
                 }
             }
             session.close().await;
@@ -2371,7 +2932,10 @@ mod ctos {
             let key = contact_key(&v.name, &v.company);
             let contact = match load_contact(&db, &key) {
                 Some(c) if !c.email.is_empty() => c,
-                _ => { skipped_no_email += 1; continue; }
+                _ => {
+                    skipped_no_email += 1;
+                    continue;
+                }
             };
 
             // SOURCE: headers = every URL used to get this draft
@@ -2414,13 +2978,17 @@ mod ctos {
                 email_src = contact.email_source_url,
                 nsrc = {
                     let mut s: Vec<&str> = v.sources.iter().map(|(s, _)| s.as_str()).collect();
-                    s.sort(); s.dedup(); s.len()
+                    s.sort();
+                    s.dedup();
+                    s.len()
                 },
                 today = today,
                 first_name = v.name.split_whitespace().next().unwrap_or(&v.name),
                 src_list = {
                     let mut s: Vec<&str> = v.sources.iter().map(|(s, _)| s.as_str()).collect();
-                    s.sort(); s.dedup(); s.join(", ")
+                    s.sort();
+                    s.dedup();
+                    s.join(", ")
                 },
             );
             std::fs::write(&path, body)?;
@@ -2439,5 +3007,4 @@ mod ctos {
         }
         Ok(())
     }
-
 }

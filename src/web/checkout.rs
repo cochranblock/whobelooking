@@ -1,11 +1,11 @@
 // All Rights Reserved — The Cochran Block, LLC
 //! Order submission — no payment at order time. Payment at download.
 
+use crate::web::admin;
+use axum::Form;
 use axum::extract::Query;
 use axum::response::{Html, IntoResponse, Redirect};
-use axum::Form;
 use serde::Deserialize;
-use crate::web::admin;
 
 #[derive(Deserialize)]
 pub struct OrderForm {
@@ -27,8 +27,19 @@ pub async fn create_checkout(Form(form): Form<OrderForm>) -> axum::response::Res
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    if admin::create_order(&id, &form.email, &form.site_url, &form.source_type, &form.tier) {
-        tracing::info!("new order: {} from {} for {}", id, form.email, form.site_url);
+    if admin::create_order(
+        &id,
+        &form.email,
+        &form.site_url,
+        &form.source_type,
+        &form.tier,
+    ) {
+        tracing::info!(
+            "new order: {} from {} for {}",
+            id,
+            form.email,
+            form.site_url
+        );
         Redirect::to(&format!("/order/confirmed?id={}", id)).into_response()
     } else {
         Redirect::to("/order?error=capacity").into_response()
@@ -41,7 +52,8 @@ pub async fn checkout_success(Query(q): Query<ConfirmQuery>) -> Html<String> {
     let short = if id.len() > 12 { &id[..12] } else { &id };
     let pending = admin::pending_count();
 
-    Html(format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    Html(format!(
+        r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Request Received — whobelooking</title>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:'JetBrains Mono',monospace;background:#050508;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}}

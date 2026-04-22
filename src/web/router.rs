@@ -1,11 +1,11 @@
 // All Rights Reserved — The Cochran Block, LLC
 //! Router for whobelooking.org
 
-use axum::{Router, routing::{get, post}};
-use tower_http::{
-    compression::CompressionLayer,
-    trace::TraceLayer,
+use axum::{
+    Router,
+    routing::{get, post},
 };
+use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
 use super::{admin, checkout, pages};
 

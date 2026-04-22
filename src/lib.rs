@@ -1,4 +1,5 @@
 // All Rights Reserved — The Cochran Block, LLC
+#![forbid(unsafe_code)]
 // Contributors: GotEmCoach, KOVA, Claude Opus 4.6
 //! whobelooking library — pure logic exposed for the main binary and the
 //! test binary. Sled I/O and source pullers stay in src/main.rs; everything
@@ -85,13 +86,17 @@ pub mod ctos {
         // Loop until stable — "Beta Co AI" → strip " ai" → strip " co" → "beta"
         loop {
             let before = n.len();
-            for suffix in [" inc", " llc", " ltd", " corp", " gmbh", " co", " company", " io", " ai"] {
+            for suffix in [
+                " inc", " llc", " ltd", " corp", " gmbh", " co", " company", " io", " ai",
+            ] {
                 if n.ends_with(suffix) {
                     n.truncate(n.len() - suffix.len());
                     n = n.trim().to_string();
                 }
             }
-            if n.len() == before { break; }
+            if n.len() == before {
+                break;
+            }
         }
         n
     }
@@ -134,9 +139,16 @@ pub mod ctos {
                     .chars()
                     .take(80)
                     .take_while(|c| {
-                        *c != '.' && *c != ',' && *c != ';' && *c != '\n'
-                            && *c != '—' && *c != '(' && *c != ')' && *c != '|'
-                            && *c != '!' && *c != '?'
+                        *c != '.'
+                            && *c != ','
+                            && *c != ';'
+                            && *c != '\n'
+                            && *c != '—'
+                            && *c != '('
+                            && *c != ')'
+                            && *c != '|'
+                            && *c != '!'
+                            && *c != '?'
                     })
                     .collect();
                 let company_words: Vec<&str> = company_raw.split_whitespace().take(3).collect();
@@ -214,23 +226,86 @@ pub mod ctos {
         let lower: String = s.to_lowercase();
         matches!(
             lower.as_str(),
-            "and" | "she" | "he" | "they" | "who" | "which" | "where" | "that"
-            | "this" | "explained" | "said" | "told" | "announced" | "spoke"
-            | "described" | "launched" | "built" | "reported" | "joined" | "left"
-            | "while" | "because" | "since" | "when" | "presented" | "is" | "was"
-            | "has" | "had" | "will" | "the" | "to" | "for" | "with" | "on"
-            | "in" | "a" | "an"
+            "and"
+                | "she"
+                | "he"
+                | "they"
+                | "who"
+                | "which"
+                | "where"
+                | "that"
+                | "this"
+                | "explained"
+                | "said"
+                | "told"
+                | "announced"
+                | "spoke"
+                | "described"
+                | "launched"
+                | "built"
+                | "reported"
+                | "joined"
+                | "left"
+                | "while"
+                | "because"
+                | "since"
+                | "when"
+                | "presented"
+                | "is"
+                | "was"
+                | "has"
+                | "had"
+                | "will"
+                | "the"
+                | "to"
+                | "for"
+                | "with"
+                | "on"
+                | "in"
+                | "a"
+                | "an"
         )
     }
 
     fn is_noise_word(s: &str) -> bool {
         matches!(
             s,
-            "The" | "Our" | "My" | "His" | "Her" | "Their" | "CTO" | "A" | "An"
-            | "I" | "We" | "Is" | "As" | "Co" | "Ex" | "Former" | "New" | "Hi"
-            | "Hello" | "Hey" | "This" | "That" | "Hiring" | "Founder" | "Chief"
-            | "Technology" | "Officer" | "Engineering" | "Engineer" | "Senior"
-            | "Lead" | "Ask" | "Show" | "Tell" | "YC" | "Startup"
+            "The"
+                | "Our"
+                | "My"
+                | "His"
+                | "Her"
+                | "Their"
+                | "CTO"
+                | "A"
+                | "An"
+                | "I"
+                | "We"
+                | "Is"
+                | "As"
+                | "Co"
+                | "Ex"
+                | "Former"
+                | "New"
+                | "Hi"
+                | "Hello"
+                | "Hey"
+                | "This"
+                | "That"
+                | "Hiring"
+                | "Founder"
+                | "Chief"
+                | "Technology"
+                | "Officer"
+                | "Engineering"
+                | "Engineer"
+                | "Senior"
+                | "Lead"
+                | "Ask"
+                | "Show"
+                | "Tell"
+                | "YC"
+                | "Startup"
         )
     }
 

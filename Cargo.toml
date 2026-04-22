@@ -5,6 +5,7 @@
 name = "whobelooking"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Visitor intelligence platform. Any IP source → rDNS → /24 scan → whois → company ID → enrichment flywheel → intelligence report. One binary. Zero cloud."
 license = "LicenseRef-Proprietary"
 repository = "https://github.com/cochranblock/whobelooking"
@@ -43,13 +44,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chromiumoxide = { version = "0.9", features = ["fetcher", "rustls", "zip8"], optional = true }
 futures = { version = "0.3", optional = true }
 regex-lite = { version = "0.1", optional = true }
-exopack = { git = "ssh://git@github.com/cochranblock/exopack", features = ["triple_sims"], optional = true }
+exopack = { git = "ssh://git@github.com/cochranblock/exopack", features = ["triple_sims", "standards_check"], optional = true }
 
 [features]
 default = []
 serve = ["dep:axum", "dep:tower-http"]
 browser = ["dep:chromiumoxide", "dep:futures"]
 tests = ["dep:exopack", "dep:regex-lite"]
+standards = ["dep:exopack"]
 
 [profile.release]
 opt-level = "z"

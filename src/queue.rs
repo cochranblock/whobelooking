@@ -115,10 +115,7 @@ pub fn pop_job() -> anyhow::Result<Option<Job>> {
         job.status = JobStatus::InProgress;
         job.started_at = Some(now());
         let data = serde_json::to_vec(&job)?;
-        db.insert(
-            format!("queue:job:{}", job.id).as_bytes(),
-            compress(&data),
-        )?;
+        db.insert(format!("queue:job:{}", job.id).as_bytes(), compress(&data))?;
         db.flush()?;
         Ok(Some(job))
     } else {

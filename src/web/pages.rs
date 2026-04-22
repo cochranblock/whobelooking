@@ -1,8 +1,8 @@
 // All Rights Reserved — The Cochran Block, LLC
 //! Pages for whobelooking.org — story first, sample report prominent, sell the feeling.
 
-use axum::response::Html;
 use crate::queue;
+use axum::response::Html;
 
 const DEMO_HTML: &str = include_str!("../../demo.html");
 
@@ -15,7 +15,8 @@ pub async fn index() -> Html<String> {
     let (ips, companies) = queue::enrichment_stats();
     let capacity_pct = ((hours / 12.0) * 100.0).min(100.0) as u32;
 
-    Html(format!(r##"<!DOCTYPE html><html lang="en"><head>
+    Html(format!(
+        r##"<!DOCTYPE html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>whobelooking — Who's looking at your site?</title>
 <meta name="description" content="Visitor intelligence. We tell you which companies are silently evaluating your site, which pages they read, and what it means. Starting at $150.">
@@ -538,11 +539,13 @@ body::before {{
   setTimeout(addLine, 2000);
 }})();
 </script>
-</body></html>"##))
+</body></html>"##
+    ))
 }
 
 pub async fn order_form() -> Html<&'static str> {
-    Html(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    Html(
+        r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Order — whobelooking</title>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&family=Rajdhani:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'JetBrains Mono',monospace;background:#050508;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}
@@ -592,7 +595,8 @@ select{cursor:pointer}
 <p style="margin-top:1.5rem;text-align:center"><a href="/">&larr; whobelooking.org</a></p>
 </div>
 <script>function selectTier(el){document.querySelectorAll('.tier-opt').forEach(function(e){e.classList.remove('selected')});el.classList.add('selected');el.querySelector('input').checked=true;}</script>
-</body></html>"#)
+</body></html>"#,
+    )
 }
 
 pub async fn queue_status() -> Html<String> {
@@ -600,7 +604,8 @@ pub async fn queue_status() -> Html<String> {
     let capacity_pct = ((hours / 12.0) * 100.0).min(100.0) as u32;
     let (ips, companies) = queue::enrichment_stats();
 
-    Html(format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    Html(format!(
+        r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Capacity — whobelooking</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&family=Instrument+Serif:ital@1&display=swap" rel="stylesheet">
 <style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:'JetBrains Mono',monospace;background:#050508;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}}
@@ -620,7 +625,8 @@ p{{font-size:0.8rem;color:#9ca3af;margin-top:1.5rem}}a{{color:#00d9ff;text-decor
 <div class="stat"><span class="stat-num">{companies}</span><span class="stat-label">Companies identified</span></div>
 <p>One person. Every report gets full attention.</p>
 <p><a href="/">&larr; whobelooking.org</a> &middot; <a href="/order">Request a report</a></p>
-</div></body></html>"#))
+</div></body></html>"#
+    ))
 }
 
 pub async fn job_status(axum::extract::Path(id): axum::extract::Path<String>) -> Html<String> {
@@ -673,7 +679,10 @@ pub async fn download_report(
     use axum::response::IntoResponse;
 
     // Sanitize ID
-    let clean_id: String = id.chars().filter(|c| c.is_alphanumeric() || *c == '-').collect();
+    let clean_id: String = id
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-')
+        .collect();
     if clean_id.is_empty() || clean_id.len() > 64 {
         return (axum::http::StatusCode::NOT_FOUND, "invalid id").into_response();
     }
@@ -697,16 +706,16 @@ pub async fn download_report(
         if !stripe_key.is_empty() {
             let client = reqwest::Client::new();
             let url = format!("https://api.stripe.com/v1/checkout/sessions/{}", session_id);
-            match client.get(&url)
+            match client
+                .get(&url)
                 .header("Authorization", format!("Bearer {}", stripe_key))
-                .send().await
+                .send()
+                .await
             {
-                Ok(resp) => {
-                    match resp.json::<serde_json::Value>().await {
-                        Ok(body) => body["payment_status"].as_str() == Some("paid"),
-                        Err(_) => false,
-                    }
-                }
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Ok(body) => body["payment_status"].as_str() == Some("paid"),
+                    Err(_) => false,
+                },
                 Err(_) => false,
             }
         } else {
@@ -724,9 +733,11 @@ pub async fn download_report(
             .join("whobelooking")
             .join("orders");
         // Try to read tier from approved/{id}/order.txt
-        let tier_text = std::fs::read_to_string(order_dir.join("approved").join(&clean_id).join("order.txt"))
-            .unwrap_or_default();
-        let tier = tier_text.lines()
+        let tier_text =
+            std::fs::read_to_string(order_dir.join("approved").join(&clean_id).join("order.txt"))
+                .unwrap_or_default();
+        let tier = tier_text
+            .lines()
             .find(|l| l.starts_with("tier:"))
             .map(|l| l.trim_start_matches("tier:").trim())
             .unwrap_or("starter");
@@ -751,15 +762,33 @@ pub async fn download_report(
                 ("payment_method_types[]", "card"),
                 ("mode", "payment"),
                 ("line_items[0][price_data][currency]", "usd"),
-                ("line_items[0][price_data][unit_amount]", &price_cents.to_string()),
-                ("line_items[0][price_data][product_data][name]", "whobelooking Intelligence Report"),
+                (
+                    "line_items[0][price_data][unit_amount]",
+                    &price_cents.to_string(),
+                ),
+                (
+                    "line_items[0][price_data][product_data][name]",
+                    "whobelooking Intelligence Report",
+                ),
                 ("line_items[0][quantity]", "1"),
-                ("success_url", &format!("https://whobelooking.org/download/{}?session_id={{CHECKOUT_SESSION_ID}}", clean_id)),
-                ("cancel_url", &format!("https://whobelooking.org/download/{}", clean_id)),
+                (
+                    "success_url",
+                    &format!(
+                        "https://whobelooking.org/download/{}?session_id={{CHECKOUT_SESSION_ID}}",
+                        clean_id
+                    ),
+                ),
+                (
+                    "cancel_url",
+                    &format!("https://whobelooking.org/download/{}", clean_id),
+                ),
             ];
-            if let Ok(resp) = client.post("https://api.stripe.com/v1/checkout/sessions")
+            if let Ok(resp) = client
+                .post("https://api.stripe.com/v1/checkout/sessions")
                 .header("Authorization", format!("Bearer {}", stripe_key))
-                .form(&params).send().await
+                .form(&params)
+                .send()
+                .await
             {
                 if let Ok(body) = resp.json::<serde_json::Value>().await {
                     if let Some(url) = body["url"].as_str() {
@@ -792,15 +821,22 @@ a.btn:hover{{background:#33ffd6}}
     // Paid — serve the PDF
     match std::fs::read(&path) {
         Ok(data) => {
-            let filename = format!("whobelooking-{}.pdf", &clean_id[..std::cmp::min(clean_id.len(), 8)]);
+            let filename = format!(
+                "whobelooking-{}.pdf",
+                &clean_id[..std::cmp::min(clean_id.len(), 8)]
+            );
             tracing::info!("report downloaded: {}", clean_id);
             (
                 [
                     (axum::http::header::CONTENT_TYPE, "application/pdf"),
-                    (axum::http::header::CONTENT_DISPOSITION, &format!("attachment; filename=\"{}\"", filename)),
+                    (
+                        axum::http::header::CONTENT_DISPOSITION,
+                        &format!("attachment; filename=\"{}\"", filename),
+                    ),
                 ],
                 data,
-            ).into_response()
+            )
+                .into_response()
         }
         Err(_) => (axum::http::StatusCode::NOT_FOUND, "report file error").into_response(),
     }
@@ -816,12 +852,16 @@ pub async fn robots() -> &'static str {
 
 pub async fn not_found(uri: axum::http::Uri) -> (axum::http::StatusCode, Html<&'static str>) {
     let _ = uri; // consumed for type matching
-    (axum::http::StatusCode::NOT_FOUND,
-    Html(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>404 — whobelooking</title>
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Html(
+            r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>404 — whobelooking</title>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@1&display=swap" rel="stylesheet">
 <style>*{margin:0;padding:0}body{font-family:'JetBrains Mono',monospace;background:#050508;color:#e8e8e8;display:flex;align-items:center;justify-content:center;height:100vh}
 a{color:#00d9ff;text-decoration:none}</style></head><body><div style="text-align:center">
 <h1 style="font-family:'Instrument Serif',serif;font-style:italic;color:#00d9ff;font-size:4rem;font-weight:400">404</h1>
 <p style="color:#555;margin-top:0.5rem"><a href="/">whobelooking.org</a></p>
-</div></body></html>"#))
+</div></body></html>"#,
+        ),
+    )
 }

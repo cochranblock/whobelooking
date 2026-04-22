@@ -33,7 +33,10 @@ fn orders_dir() -> std::path::PathBuf {
 pub fn pending_count() -> usize {
     let dir = orders_dir().join("pending");
     std::fs::read_dir(dir)
-        .map(|r| r.filter(|e| e.as_ref().map(|e| e.path().is_dir()).unwrap_or(false)).count())
+        .map(|r| {
+            r.filter(|e| e.as_ref().map(|e| e.path().is_dir()).unwrap_or(false))
+                .count()
+        })
         .unwrap_or(0)
 }
 
@@ -51,7 +54,11 @@ pub fn create_order(id: &str, email: &str, site_url: &str, source_type: &str, ti
     }
     let content = format!(
         "id: {}\nemail: {}\nsite: {}\nsource: {}\ntier: {}\ncreated: {}\n",
-        id, email, site_url, source_type, tier,
+        id,
+        email,
+        site_url,
+        source_type,
+        tier,
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -74,7 +81,8 @@ pub async fn dashboard(Query(q): Query<AdminQuery>) -> Html<String> {
             for entry in entries.flatten() {
                 if entry.path().is_dir() {
                     let id = entry.file_name().to_string_lossy().to_string();
-                    let order_txt = std::fs::read_to_string(entry.path().join("order.txt")).unwrap_or_default();
+                    let order_txt =
+                        std::fs::read_to_string(entry.path().join("order.txt")).unwrap_or_default();
                     let has_report = entry.path().join("report.pdf").exists();
                     let color = match folder {
                         "pending" => "#00d9ff",
@@ -82,15 +90,21 @@ pub async fn dashboard(Query(q): Query<AdminQuery>) -> Html<String> {
                         "rejected" => "#ff6b35",
                         _ => "#555",
                     };
-                    let email = order_txt.lines()
+                    let email = order_txt
+                        .lines()
                         .find(|l| l.starts_with("email:"))
                         .map(|l| l.trim_start_matches("email:").trim())
                         .unwrap_or("?");
-                    let tier = order_txt.lines()
+                    let tier = order_txt
+                        .lines()
                         .find(|l| l.starts_with("tier:"))
                         .map(|l| l.trim_start_matches("tier:").trim())
                         .unwrap_or("?");
-                    let report_badge = if has_report { "<span style='color:#00ffcc'>PDF</span>" } else { "" };
+                    let report_badge = if has_report {
+                        "<span style='color:#00ffcc'>PDF</span>"
+                    } else {
+                        ""
+                    };
 
                     rows.push_str(&format!(
                         "<tr><td style='color:{color}'>{folder}</td><td style='font-size:10px;color:#555'>{short_id}</td><td>{email}</td><td>{tier}</td><td>{report_badge}</td></tr>\n",
@@ -112,7 +126,8 @@ pub async fn dashboard(Query(q): Query<AdminQuery>) -> Html<String> {
 
     let pending = pending_count();
 
-    Html(format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    Html(format!(
+        r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Admin — whobelooking</title>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
@@ -145,6 +160,12 @@ Upload report: <code>cp report.pdf approved/{{id}}/report.pdf</code>
 }
 
 // Remove upload/done/deliver handlers — filesystem handles it
-pub async fn mark_done() -> &'static str { "use filesystem" }
-pub async fn mark_delivered() -> &'static str { "use filesystem" }
-pub async fn upload_report() -> &'static str { "use filesystem" }
+pub async fn mark_done() -> &'static str {
+    "use filesystem"
+}
+pub async fn mark_delivered() -> &'static str {
+    "use filesystem"
+}
+pub async fn upload_report() -> &'static str {
+    "use filesystem"
+}

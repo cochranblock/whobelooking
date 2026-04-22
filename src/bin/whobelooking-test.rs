@@ -10,14 +10,13 @@
 //! Stage 3: triple sims — run everything 3x, all must pass
 //! Stage 4: exit 0 = pass, 1 = fail
 
+use exopack::standards_check;
 use exopack::triple_sims::f60;
 use whobelooking::ctos::{
-    extract_cto_from_text, extract_first_email, norm, norm_company, slugify,
-    truncate, verify, CtoMention,
+    CtoMention, extract_cto_from_text, extract_first_email, norm, norm_company, slugify, truncate,
+    verify,
 };
-use whobelooking::queue_types::{
-    has_capacity, Job, JobStatus, SourceType, Tier, HOURS_PER_WEEK,
-};
+use whobelooking::queue_types::{HOURS_PER_WEEK, Job, JobStatus, SourceType, Tier, has_capacity};
 
 fn mk(source: &str, url: &str, name: &str, company: &str) -> CtoMention {
     CtoMention {
@@ -33,13 +32,7 @@ fn mk(source: &str, url: &str, name: &str, company: &str) -> CtoMention {
     }
 }
 
-fn mk_with_email(
-    source: &str,
-    url: &str,
-    name: &str,
-    company: &str,
-    email: &str,
-) -> CtoMention {
+fn mk_with_email(source: &str, url: &str, name: &str, company: &str, email: &str) -> CtoMention {
     let mut m = mk(source, url, name, company);
     m.scraped_email = email.to_string();
     m
@@ -111,7 +104,10 @@ fn test_verify_case_insensitive_name_company() -> Result<(), String> {
     ];
     let v = verify(&ms);
     if v.len() != 1 {
-        return Err(format!("case-insensitive match must verify, got {}", v.len()));
+        return Err(format!(
+            "case-insensitive match must verify, got {}",
+            v.len()
+        ));
     }
     Ok(())
 }
@@ -123,14 +119,23 @@ fn test_verify_strips_company_suffixes() -> Result<(), String> {
     ];
     let v = verify(&ms);
     if v.len() != 1 {
-        return Err(format!("company suffix stripping must match, got {}", v.len()));
+        return Err(format!(
+            "company suffix stripping must match, got {}",
+            v.len()
+        ));
     }
     Ok(())
 }
 
 fn test_verify_preserves_direct_emails() -> Result<(), String> {
     let ms = vec![
-        mk_with_email("github", "https://gh/jd", "Jane Doe", "Acme", "jane@acme.com"),
+        mk_with_email(
+            "github",
+            "https://gh/jd",
+            "Jane Doe",
+            "Acme",
+            "jane@acme.com",
+        ),
         mk("hn", "https://hn/1", "Jane Doe", "Acme"),
     ];
     let v = verify(&ms);
@@ -249,16 +254,19 @@ fn test_norm_lowercases_and_strips() -> Result<(), String> {
 
 fn test_norm_company_strips_suffix() -> Result<(), String> {
     for (input, expected) in [
-        ("Acme Corp Inc", "acme"),    // strips both " inc" and " corp"
+        ("Acme Corp Inc", "acme"), // strips both " inc" and " corp"
         ("@Acme LLC", "acme"),
-        ("Beta Co AI", "beta"),       // strips " ai" then " co"
+        ("Beta Co AI", "beta"), // strips " ai" then " co"
         ("Simple", "simple"),
         ("BigTech LLC", "bigtech"),
         ("NoSuffix Here", "nosuffix here"),
     ] {
         let out = norm_company(input);
         if out != expected {
-            return Err(format!("norm_company({:?}): expected '{}', got '{}'", input, expected, out));
+            return Err(format!(
+                "norm_company({:?}): expected '{}', got '{}'",
+                input, expected, out
+            ));
         }
     }
     Ok(())
@@ -273,7 +281,10 @@ fn test_extract_finds_cto_of_pattern() -> Result<(), String> {
         return Err("expected at least 1 mention from 'CTO of'".into());
     }
     if ms[0].company != "Zeta Labs" {
-        return Err(format!("expected company 'Zeta Labs', got '{}'", ms[0].company));
+        return Err(format!(
+            "expected company 'Zeta Labs', got '{}'",
+            ms[0].company
+        ));
     }
     Ok(())
 }
@@ -285,7 +296,10 @@ fn test_extract_finds_cto_at_pattern() -> Result<(), String> {
         return Err("expected at least 1 mention from 'CTO at'".into());
     }
     if ms[0].company != "NexGen Systems" {
-        return Err(format!("expected 'NexGen Systems', got '{}'", ms[0].company));
+        return Err(format!(
+            "expected 'NexGen Systems', got '{}'",
+            ms[0].company
+        ));
     }
     Ok(())
 }
@@ -372,7 +386,13 @@ fn test_fabrication_guard_empty_email_no_verify() -> Result<(), String> {
 fn test_fabrication_guard_mixed_email() -> Result<(), String> {
     // One source has email, one doesn't. Verified CTO carries the real email.
     let ms = vec![
-        mk_with_email("github", "https://gh/1", "Jane Doe", "Acme", "jane@acme.com"),
+        mk_with_email(
+            "github",
+            "https://gh/1",
+            "Jane Doe",
+            "Acme",
+            "jane@acme.com",
+        ),
         mk("hn", "https://hn/1", "Jane Doe", "Acme"),
     ];
     let v = verify(&ms);
@@ -418,7 +438,10 @@ fn test_queue_job_serialization() -> Result<(), String> {
     let job = Job {
         id: "test-123".into(),
         customer_email: "buyer@company.com".into(),
-        source_type: SourceType::Cloudflare { zone: "abc".into(), token: "xyz".into() },
+        source_type: SourceType::Cloudflare {
+            zone: "abc".into(),
+            token: "xyz".into(),
+        },
         tier: Tier::Growth,
         status: JobStatus::InProgress,
         estimated_hours: 3.0,
@@ -430,12 +453,24 @@ fn test_queue_job_serialization() -> Result<(), String> {
     };
     let json = serde_json::to_vec(&job).map_err(|e| format!("serialize: {}", e))?;
     let back: Job = serde_json::from_slice(&json).map_err(|e| format!("deserialize: {}", e))?;
-    if back.id != "test-123" { return Err(format!("id: {}", back.id)); }
-    if back.customer_email != "buyer@company.com" { return Err(format!("email: {}", back.customer_email)); }
-    if back.tier != Tier::Growth { return Err(format!("tier: {:?}", back.tier)); }
-    if back.status != JobStatus::InProgress { return Err(format!("status: {:?}", back.status)); }
-    if back.started_at != Some(1234567900) { return Err("started_at lost".into()); }
-    if back.notes.as_deref() != Some("urgent") { return Err("notes lost".into()); }
+    if back.id != "test-123" {
+        return Err(format!("id: {}", back.id));
+    }
+    if back.customer_email != "buyer@company.com" {
+        return Err(format!("email: {}", back.customer_email));
+    }
+    if back.tier != Tier::Growth {
+        return Err(format!("tier: {:?}", back.tier));
+    }
+    if back.status != JobStatus::InProgress {
+        return Err(format!("status: {:?}", back.status));
+    }
+    if back.started_at != Some(1234567900) {
+        return Err("started_at lost".into());
+    }
+    if back.notes.as_deref() != Some("urgent") {
+        return Err("notes lost".into());
+    }
     Ok(())
 }
 
@@ -447,10 +482,18 @@ fn test_queue_tiers_complete() -> Result<(), String> {
     for t in tiers {
         let price = t.price_cents();
         let hours = t.estimated_hours();
-        if price == 0 { return Err(format!("{:?} has zero price", t)); }
-        if hours <= 0.0 { return Err(format!("{:?} has zero hours", t)); }
-        if price <= prev_price { return Err(format!("{:?} price {} not > prev {}", t, price, prev_price)); }
-        if hours <= prev_hours { return Err(format!("{:?} hours {} not > prev {}", t, hours, prev_hours)); }
+        if price == 0 {
+            return Err(format!("{:?} has zero price", t));
+        }
+        if hours <= 0.0 {
+            return Err(format!("{:?} has zero hours", t));
+        }
+        if price <= prev_price {
+            return Err(format!("{:?} price {} not > prev {}", t, price, prev_price));
+        }
+        if hours <= prev_hours {
+            return Err(format!("{:?} hours {} not > prev {}", t, hours, prev_hours));
+        }
         prev_price = price;
         prev_hours = hours;
     }
@@ -473,14 +516,18 @@ fn test_queue_capacity_overflow() -> Result<(), String> {
 fn test_queue_all_source_types() -> Result<(), String> {
     // All source types must serialize and deserialize
     let sources = vec![
-        SourceType::Cloudflare { zone: "z".into(), token: "t".into() },
+        SourceType::Cloudflare {
+            zone: "z".into(),
+            token: "t".into(),
+        },
         SourceType::AccessLog,
         SourceType::Csv,
         SourceType::Json,
     ];
     for src in sources {
         let json = serde_json::to_string(&src).map_err(|e| format!("ser: {}", e))?;
-        let _back: SourceType = serde_json::from_str(&json).map_err(|e| format!("de {}: {}", json, e))?;
+        let _back: SourceType =
+            serde_json::from_str(&json).map_err(|e| format!("de {}: {}", json, e))?;
     }
     Ok(())
 }
@@ -502,18 +549,28 @@ fn test_queue_job_optional_fields() -> Result<(), String> {
     };
     let json = serde_json::to_vec(&job).map_err(|e| format!("{}", e))?;
     let back: Job = serde_json::from_slice(&json).map_err(|e| format!("{}", e))?;
-    if back.started_at.is_some() { return Err("started_at should be None".into()); }
-    if back.report_path.is_some() { return Err("report_path should be None".into()); }
-    if back.notes.is_some() { return Err("notes should be None".into()); }
+    if back.started_at.is_some() {
+        return Err("started_at should be None".into());
+    }
+    if back.report_path.is_some() {
+        return Err("report_path should be None".into());
+    }
+    if back.notes.is_some() {
+        return Err("notes should be None".into());
+    }
     // Now with all Some
     let job2 = Job {
-        started_at: Some(100), completed_at: Some(200),
+        started_at: Some(100),
+        completed_at: Some(200),
         report_path: Some("/tmp/report.pdf".into()),
-        notes: Some("test note".into()), ..back
+        notes: Some("test note".into()),
+        ..back
     };
     let json2 = serde_json::to_vec(&job2).map_err(|e| format!("{}", e))?;
     let back2: Job = serde_json::from_slice(&json2).map_err(|e| format!("{}", e))?;
-    if back2.report_path.as_deref() != Some("/tmp/report.pdf") { return Err("report_path lost".into()); }
+    if back2.report_path.as_deref() != Some("/tmp/report.pdf") {
+        return Err("report_path lost".into());
+    }
     Ok(())
 }
 
@@ -551,7 +608,10 @@ fn test_demo_no_full_ips() -> Result<(), String> {
         let ip = m.as_str();
         // Allow x.x patterns and 0.0.0.0 style
         if !ip.contains("x.x") && !ip.starts_with("0.") && ip != "100.0" {
-            return Err(format!("full IP found in demo: {} — must be redacted to first two octets", ip));
+            return Err(format!(
+                "full IP found in demo: {} — must be redacted to first two octets",
+                ip
+            ));
         }
     }
     Ok(())
@@ -587,8 +647,13 @@ fn test_demo_has_friend_reference() -> Result<(), String> {
 
 fn test_no_secrets_in_demo() -> Result<(), String> {
     let banned = [
-        "CF_TOKEN", "CF_ZONE_ID", "STRIPE_KEY", "API_KEY",
-        "mcochran/.secrets", "kovakey", "id_ed25519",
+        "CF_TOKEN",
+        "CF_ZONE_ID",
+        "STRIPE_KEY",
+        "API_KEY",
+        "mcochran/.secrets",
+        "kovakey",
+        "id_ed25519",
     ];
     for s in banned {
         if DEMO.contains(s) {
@@ -600,8 +665,12 @@ fn test_no_secrets_in_demo() -> Result<(), String> {
 
 fn test_no_internal_paths_in_demo() -> Result<(), String> {
     let banned = [
-        "/Users/mcochran", "/home/mcochran", "/tmp/cochranblock",
-        "~/.ssh", "~/.secrets", "~/.claude",
+        "/Users/mcochran",
+        "/home/mcochran",
+        "/tmp/cochranblock",
+        "~/.ssh",
+        "~/.secrets",
+        "~/.claude",
     ];
     for s in banned {
         if DEMO.contains(s) {
@@ -629,7 +698,10 @@ fn test_demo_no_monokai() -> Result<(), String> {
     let banned = ["#ffd866", "#ff6188", "#a9dc76", "#78dce8", "#ab9df2"];
     for color in banned {
         if DEMO.contains(color) {
-            return Err(format!("stale Monokai color {} found — should be cosmic", color));
+            return Err(format!(
+                "stale Monokai color {} found — should be cosmic",
+                color
+            ));
         }
     }
     Ok(())
@@ -731,7 +803,14 @@ fn test_demo_has_autoplay() -> Result<(), String> {
 // --- Content integrity: the real story must be complete ---
 
 fn test_all_companies() -> Result<(), String> {
-    let companies = ["Microsoft", "Google", "IBM", "Domino", "Verizon", "NextGenWebs"];
+    let companies = [
+        "Microsoft",
+        "Google",
+        "IBM",
+        "Domino",
+        "Verizon",
+        "NextGenWebs",
+    ];
     for c in companies {
         if !DEMO.contains(c) {
             return Err(format!("demo missing company: {}", c));
@@ -863,7 +942,10 @@ fn test_order_capacity_limit() -> Result<(), String> {
     }
     // Count pending — should be 5
     let count = std::fs::read_dir(base.join("pending"))
-        .map(|r| r.filter(|e| e.as_ref().map(|e| e.path().is_dir()).unwrap_or(false)).count())
+        .map(|r| {
+            r.filter(|e| e.as_ref().map(|e| e.path().is_dir()).unwrap_or(false))
+                .count()
+        })
         .unwrap_or(0);
     if count != 5 {
         return Err(format!("expected 5 pending, got {}", count));
@@ -886,7 +968,8 @@ fn test_order_txt_fields() -> Result<(), String> {
         }
     }
     // Verify email is extractable
-    let email = content.lines()
+    let email = content
+        .lines()
         .find(|l| l.starts_with("email:"))
         .map(|l| l.trim_start_matches("email:").trim())
         .unwrap_or("");
@@ -962,44 +1045,107 @@ type TestFn = fn() -> Result<(), String>;
 
 const TESTS: &[(&str, TestFn)] = &[
     // Cross-verification
-    ("verify_rejects_single_source", test_verify_rejects_single_source),
-    ("verify_accepts_two_distinct_sources", test_verify_accepts_two_distinct_sources),
-    ("verify_dedup_same_source_twice", test_verify_dedup_same_source_twice),
-    ("verify_drops_partial_mentions", test_verify_drops_partial_mentions),
-    ("verify_case_insensitive_name_company", test_verify_case_insensitive_name_company),
-    ("verify_strips_company_suffixes", test_verify_strips_company_suffixes),
-    ("verify_preserves_direct_emails", test_verify_preserves_direct_emails),
-    ("verify_three_sources_higher_rank", test_verify_three_sources_higher_rank),
+    (
+        "verify_rejects_single_source",
+        test_verify_rejects_single_source,
+    ),
+    (
+        "verify_accepts_two_distinct_sources",
+        test_verify_accepts_two_distinct_sources,
+    ),
+    (
+        "verify_dedup_same_source_twice",
+        test_verify_dedup_same_source_twice,
+    ),
+    (
+        "verify_drops_partial_mentions",
+        test_verify_drops_partial_mentions,
+    ),
+    (
+        "verify_case_insensitive_name_company",
+        test_verify_case_insensitive_name_company,
+    ),
+    (
+        "verify_strips_company_suffixes",
+        test_verify_strips_company_suffixes,
+    ),
+    (
+        "verify_preserves_direct_emails",
+        test_verify_preserves_direct_emails,
+    ),
+    (
+        "verify_three_sources_higher_rank",
+        test_verify_three_sources_higher_rank,
+    ),
     // Email extraction
-    ("email_extracts_real_address", test_email_extracts_real_address),
+    (
+        "email_extracts_real_address",
+        test_email_extracts_real_address,
+    ),
     ("email_skips_noreply", test_email_skips_noreply),
     ("email_skips_example", test_email_skips_example),
     ("email_skips_sentry", test_email_skips_sentry),
     ("email_skips_test", test_email_skips_test),
-    ("email_requires_dot_in_domain", test_email_requires_dot_in_domain),
+    (
+        "email_requires_dot_in_domain",
+        test_email_requires_dot_in_domain,
+    ),
     ("email_finds_first_valid", test_email_finds_first_valid),
     ("email_with_plus_tag", test_email_with_plus_tag),
     // Normalization
-    ("norm_lowercases_and_strips", test_norm_lowercases_and_strips),
-    ("norm_company_strips_suffix", test_norm_company_strips_suffix),
+    (
+        "norm_lowercases_and_strips",
+        test_norm_lowercases_and_strips,
+    ),
+    (
+        "norm_company_strips_suffix",
+        test_norm_company_strips_suffix,
+    ),
     // Pattern extraction
-    ("extract_finds_cto_of_pattern", test_extract_finds_cto_of_pattern),
-    ("extract_finds_cto_at_pattern", test_extract_finds_cto_at_pattern),
-    ("extract_captures_name_before_marker", test_extract_captures_name_before_marker),
-    ("extract_no_false_positive_on_plain_text", test_extract_no_false_positive_on_plain_text),
-    ("extract_multiple_mentions_same_text", test_extract_multiple_mentions_same_text),
+    (
+        "extract_finds_cto_of_pattern",
+        test_extract_finds_cto_of_pattern,
+    ),
+    (
+        "extract_finds_cto_at_pattern",
+        test_extract_finds_cto_at_pattern,
+    ),
+    (
+        "extract_captures_name_before_marker",
+        test_extract_captures_name_before_marker,
+    ),
+    (
+        "extract_no_false_positive_on_plain_text",
+        test_extract_no_false_positive_on_plain_text,
+    ),
+    (
+        "extract_multiple_mentions_same_text",
+        test_extract_multiple_mentions_same_text,
+    ),
     // Helpers
     ("slugify", test_slugify),
     ("truncate_short", test_truncate_short),
     ("truncate_long", test_truncate_long),
     // Fabrication guards
-    ("fabrication_guard_empty_email_no_verify", test_fabrication_guard_empty_email_no_verify),
-    ("fabrication_guard_mixed_email", test_fabrication_guard_mixed_email),
+    (
+        "fabrication_guard_empty_email_no_verify",
+        test_fabrication_guard_empty_email_no_verify,
+    ),
+    (
+        "fabrication_guard_mixed_email",
+        test_fabrication_guard_mixed_email,
+    ),
     // Queue — real behavioral tests
     ("queue_capacity_boundary", test_queue_capacity_math),
     ("queue_job_roundtrip", test_queue_job_serialization),
-    ("queue_all_tiers_have_price_and_hours", test_queue_tiers_complete),
-    ("queue_capacity_rejects_overflow", test_queue_capacity_overflow),
+    (
+        "queue_all_tiers_have_price_and_hours",
+        test_queue_tiers_complete,
+    ),
+    (
+        "queue_capacity_rejects_overflow",
+        test_queue_capacity_overflow,
+    ),
     ("queue_source_types_roundtrip", test_queue_all_source_types),
     ("queue_job_optional_fields", test_queue_job_optional_fields),
     // Web content — validates real output
@@ -1061,13 +1207,18 @@ fn run_all_tests() -> bool {
         }
     }
     println!("  ---");
-    println!("  {} passed, {} failed, {} total", passed, failed, TESTS.len());
+    println!(
+        "  {} passed, {} failed, {} total",
+        passed,
+        failed,
+        TESTS.len()
+    );
     failed == 0
 }
 
 #[tokio::main]
 async fn main() {
-    println!("=== whobelooking-test: CTO OSINT pipeline quality gate ===\n");
+    println!("=== whobelooking-test: v0.2.0 quality gate ===\n");
 
     // Stage 1: compilation success (we're already here)
     println!("Stage 1: compile OK");
@@ -1084,12 +1235,35 @@ async fn main() {
     println!("\nStage 3: TRIPLE SIMS (3 passes, all must match)");
     let ok = f60(|| async { run_all_tests() }).await;
 
-    // Stage 4: exit code
-    if ok {
+    if !ok {
+        eprintln!("\n=== whobelooking-test: TRIPLE SIMS FAILED ===");
+        std::process::exit(1);
+    }
+
+    // Stage 4: 14-point Rust industry standards gate
+    println!("\nStage 4: STANDARDS CHECK (14-point gate)");
+    let project_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let report = standards_check::f101(project_dir);
+    for check in &report.s85 {
+        let sym = if check.s81 { "pass" } else { "FAIL" };
+        println!("  [{}] {} — {}", sym, check.s80, check.s82);
+    }
+    println!("  ---");
+    println!("  {}/{} standards passed", report.passed(), report.total());
+    let standards_ok = report.failed() == 0;
+
+    // Stage 5: exit code
+    if standards_ok {
         println!("\n=== whobelooking-test: ALL STAGES PASSED ===");
         std::process::exit(0);
     } else {
-        eprintln!("\n=== whobelooking-test: TRIPLE SIMS FAILED ===");
-        std::process::exit(1);
+        eprintln!(
+            "\n=== whobelooking-test: STANDARDS CHECK FAILED ({} issues) ===",
+            report.failed()
+        );
+        // Don't fail the build for standards — report only for now
+        // Once all 14 pass, flip this to exit(1)
+        println!("\n=== whobelooking-test: ALL STAGES PASSED (standards advisory) ===");
+        std::process::exit(0);
     }
 }
