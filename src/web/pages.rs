@@ -604,7 +604,7 @@ select{cursor:pointer}
 </div>
 <button type="submit" class="btn">Submit Request</button>
 </form>
-<p class="note">Free to submit. You only pay when your report is ready.<br>Reviewed by a USCYBERCOM operator. 48-72 hour turnaround.</p>
+<p class="note">Free to submit. You only pay when your report is ready.<br>Reviewed by a USCYBERCOM operator. 2-3 business day turnaround.</p>
 <p class="note" style="margin-top:8px;font-size:0.6rem;color:#555">All API tokens should be scoped to <strong style="color:#9ca3af">read-only permissions</strong>. We perform read-only analytics operations only. We will never modify your DNS, configuration, firewall rules, or any other setting. Your infrastructure is never touched.</p>
 <p class="note" style="margin-top:8px;font-size:0.65rem;color:#9ca3af">Don't have your API credentials handy? No problem &mdash; submit without them. <strong style="color:#00ffcc">White glove setup is built into every report at no additional fee.</strong> We'll walk you through creating a read-only token on a quick call.</p>
 <p style="margin-top:1.5rem;text-align:center"><a href="/">&larr; whobelooking.org</a></p>
