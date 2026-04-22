@@ -570,7 +570,7 @@ select{cursor:pointer}
 .note{font-size:0.7rem;color:#555;margin-top:12px;text-align:center}
 </style></head><body><div class="box">
 <h1>Order a report.</h1>
-<form action="/order/checkout" method="POST">
+<form action="/order/checkout" method="POST" enctype="multipart/form-data">
 <label>Email</label>
 <input type="email" name="email" required placeholder="you@company.com">
 <label>Site URL</label>
@@ -589,6 +589,12 @@ select{cursor:pointer}
 <label>Cloudflare API Token <span style="color:#555">(read-only analytics scope)</span></label>
 <div style="position:relative"><input type="password" name="cf_token" id="cf_token" placeholder="Bearer token" autocomplete="off" style="padding-right:36px"><span onclick="toggleVis('cf_token',this)" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:14px;color:#555;user-select:none">&#x1F441;</span></div>
 </div>
+<div id="file-upload" style="display:none;margin-top:12px;padding:16px;background:rgba(0,217,255,0.03);border:1px solid rgba(0,217,255,0.1);border-radius:4px">
+<div style="font-size:0.7rem;color:#00ffcc;margin-bottom:10px;line-height:1.5">Upload your log file. Same vault treatment as credentials — encrypted in transit, processed, then deleted. We never keep your raw traffic data after the report is delivered.</div>
+<label>Log File</label>
+<input type="file" name="logfile" accept=".log,.txt,.csv,.json,.gz" style="font-size:0.8rem;color:#9ca3af;padding:8px 0">
+<div style="font-size:0.6rem;color:#555;margin-top:4px">Accepts: .log, .txt, .csv, .json, .gz &middot; Max 50MB</div>
+</div>
 <label>Tier</label>
 <div class="tier-grid">
 <label class="tier-opt selected" onclick="selectTier(this)"><input type="radio" name="tier" value="starter" checked><div class="tier-price">$150</div><div class="tier-name">Starter</div><div class="tier-ips">&lt;500 IPs</div></label>
@@ -599,15 +605,21 @@ select{cursor:pointer}
 <button type="submit" class="btn">Submit Request</button>
 </form>
 <p class="note">Free to submit. You only pay when your report is ready.<br>Reviewed by a USCYBERCOM operator. 48 hour turnaround.</p>
+<p class="note" style="margin-top:8px;font-size:0.6rem;color:#555">All API tokens should be scoped to <strong style="color:#9ca3af">read-only permissions</strong>. We perform read-only analytics operations only. We will never modify your DNS, configuration, firewall rules, or any other setting. Your infrastructure is never touched.</p>
+<p class="note" style="margin-top:8px;font-size:0.65rem;color:#9ca3af">Don't have your API credentials handy? No problem &mdash; submit without them. <strong style="color:#00ffcc">White glove setup is built into every report at no additional fee.</strong> We'll walk you through creating a read-only token on a quick call.</p>
 <p style="margin-top:1.5rem;text-align:center"><a href="/">&larr; whobelooking.org</a></p>
 </div>
 <script>
 function selectTier(el){document.querySelectorAll('.tier-opt').forEach(function(e){e.classList.remove('selected')});el.classList.add('selected');el.querySelector('input').checked=true;}
 function toggleVis(id,btn){var f=document.getElementById(id);if(f.type==='password'){f.type='text';btn.style.color='#00d9ff';}else{f.type='password';btn.style.color='#555';}}
 document.querySelector('select[name=source_type]').addEventListener('change',function(){
-  document.getElementById('cf-creds').style.display=this.value==='cloudflare'?'block':'none';
+  var isCF=this.value==='cloudflare';
+  document.getElementById('cf-creds').style.display=isCF?'block':'none';
+  document.getElementById('file-upload').style.display=isCF?'none':'block';
 });
-document.getElementById('cf-creds').style.display=document.querySelector('select[name=source_type]').value==='cloudflare'?'block':'none';
+var initSrc=document.querySelector('select[name=source_type]').value;
+document.getElementById('cf-creds').style.display=initSrc==='cloudflare'?'block':'none';
+document.getElementById('file-upload').style.display=initSrc==='cloudflare'?'none':'block';
 </script>
 </body></html>"#,
     )

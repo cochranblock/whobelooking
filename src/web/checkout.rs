@@ -2,99 +2,133 @@
 //! Order submission — credentials encrypted + emailed, never stored on disk.
 
 use crate::web::admin;
-use axum::Form;
-use axum::extract::Query;
+use axum::extract::{Multipart, Query};
 use axum::response::{Html, IntoResponse, Redirect};
 use serde::Deserialize;
 use whobelooking::crypto;
-
-#[derive(Deserialize)]
-pub struct OrderForm {
-    pub email: String,
-    pub site_url: String,
-    pub source_type: String,
-    pub tier: String,
-    // Optional credentials — only for Cloudflare
-    pub cf_zone: Option<String>,
-    pub cf_token: Option<String>,
-}
 
 #[derive(Deserialize)]
 pub struct ConfirmQuery {
     pub id: Option<String>,
 }
 
-/// Submit a request. Credentials encrypted and emailed to operator. Never stored on disk.
-pub async fn create_checkout(Form(form): Form<OrderForm>) -> axum::response::Response {
+#[derive(Default)]
+struct ParsedOrder {
+    email: String,
+    site_url: String,
+    source_type: String,
+    tier: String,
+    cf_zone: String,
+    cf_token: String,
+    log_data: Option<Vec<u8>>,
+    log_filename: Option<String>,
+}
+
+/// Submit a request. Credentials encrypted, files saved encrypted. Never plaintext on disk.
+pub async fn create_checkout(mut multipart: Multipart) -> axum::response::Response {
+    let mut order = ParsedOrder::default();
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "email" => order.email = field.text().await.unwrap_or_default(),
+            "site_url" => order.site_url = field.text().await.unwrap_or_default(),
+            "source_type" => order.source_type = field.text().await.unwrap_or_default(),
+            "tier" => order.tier = field.text().await.unwrap_or_default(),
+            "cf_zone" => order.cf_zone = field.text().await.unwrap_or_default(),
+            "cf_token" => order.cf_token = field.text().await.unwrap_or_default(),
+            "logfile" => {
+                order.log_filename = field.file_name().map(|s| s.to_string());
+                if let Ok(bytes) = field.bytes().await {
+                    if !bytes.is_empty() {
+                        order.log_data = Some(bytes.to_vec());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if order.email.is_empty() || order.site_url.is_empty() {
+        return Redirect::to("/order?error=missing").into_response();
+    }
+
     if !admin::has_capacity() {
         return Redirect::to("/order?error=capacity").into_response();
     }
 
     let id = uuid::Uuid::new_v4().to_string();
 
-    // Create order folder (no credentials in it)
     if !admin::create_order(
         &id,
-        &form.email,
-        &form.site_url,
-        &form.source_type,
-        &form.tier,
+        &order.email,
+        &order.site_url,
+        &order.source_type,
+        &order.tier,
     ) {
         return Redirect::to("/order?error=capacity").into_response();
     }
 
     tracing::info!(
-        "new order: {} from {} for {}",
+        "new order: {} from {} for {} ({})",
         id,
-        form.email,
-        form.site_url
+        order.email,
+        order.site_url,
+        order.source_type
     );
 
-    // If credentials provided, encrypt and email them
-    if let (Some(zone), Some(token)) = (&form.cf_zone, &form.cf_token) {
-        if !zone.is_empty() && !token.is_empty() {
-            let passphrase =
-                std::env::var("CRED_KEY").unwrap_or_else(|_| "whobelooking-default-key".into());
-            let key = crypto::key_from_passphrase(&passphrase);
-            let plaintext = format!("order:{}\nzone:{}\ntoken:{}", id, zone, token);
+    let passphrase =
+        std::env::var("CRED_KEY").unwrap_or_else(|_| "whobelooking-default-key".into());
+    let key = crypto::key_from_passphrase(&passphrase);
 
-            match crypto::encrypt(&plaintext, &key) {
-                Ok(blob) => {
-                    // Send encrypted blob via webhook (email relay)
-                    if let Ok(webhook) = std::env::var("CRED_WEBHOOK_URL") {
-                        let client = reqwest::Client::new();
-                        let payload = serde_json::json!({
-                            "order_id": id,
-                            "email": form.email,
-                            "site": form.site_url,
-                            "encrypted_credentials": blob,
-                        });
-                        tokio::spawn(async move {
-                            let _ = client
-                                .post(&webhook)
-                                .json(&payload)
-                                .timeout(std::time::Duration::from_secs(10))
-                                .send()
-                                .await;
-                        });
-                        tracing::info!("credentials encrypted and sent via webhook for {}", id);
-                    } else {
-                        // No webhook — log that credentials were encrypted but not sent
-                        tracing::warn!(
-                            "credentials encrypted for {} but CRED_WEBHOOK_URL not set",
-                            id
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("encryption failed for {}: {}", id, e);
-                }
+    // Encrypt credentials (Cloudflare) or log file and log it
+    if !order.cf_zone.is_empty() && !order.cf_token.is_empty() {
+        let plaintext = format!(
+            "order:{}\nzone:{}\ntoken:{}",
+            id, order.cf_zone, order.cf_token
+        );
+        match crypto::encrypt(&plaintext, &key) {
+            Ok(blob) => {
+                tracing::info!(
+                    "CF credentials encrypted for {} — blob: {}",
+                    id,
+                    &blob[..40.min(blob.len())]
+                );
             }
+            Err(e) => tracing::error!("encrypt failed for {}: {}", id, e),
+        }
+    }
+
+    if let Some(data) = &order.log_data {
+        let fname = order.log_filename.as_deref().unwrap_or("upload");
+        // Encrypt the log file and save to approved/{id}/
+        let plaintext_b64 = base64::engine::general_purpose::STANDARD.encode(data);
+        match crypto::encrypt(&plaintext_b64, &key) {
+            Ok(blob) => {
+                // Save encrypted log to the order folder
+                let order_dir = dirs::data_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("whobelooking")
+                    .join("orders")
+                    .join("pending")
+                    .join(&id);
+                let enc_path = order_dir.join("logfile.enc");
+                let _ = std::fs::write(&enc_path, &blob);
+                tracing::info!(
+                    "log file encrypted for {} — {} bytes from '{}' → logfile.enc",
+                    id,
+                    data.len(),
+                    fname
+                );
+            }
+            Err(e) => tracing::error!("log encrypt failed for {}: {}", id, e),
         }
     }
 
     Redirect::to(&format!("/order/confirmed?id={}", id)).into_response()
 }
+
+use base64::Engine;
 
 /// Confirmation page.
 pub async fn checkout_success(Query(q): Query<ConfirmQuery>) -> Html<String> {
