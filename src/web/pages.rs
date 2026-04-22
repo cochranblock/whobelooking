@@ -582,6 +582,13 @@ select{cursor:pointer}
 <option value="csv">CSV (ip, path, timestamp)</option>
 <option value="json">JSON array</option>
 </select>
+<div id="cf-creds" style="display:none;margin-top:12px;padding:16px;background:rgba(0,217,255,0.03);border:1px solid rgba(0,217,255,0.1);border-radius:4px">
+<div style="font-size:0.7rem;color:#00ffcc;margin-bottom:10px;line-height:1.5">Your keys go into a vault, not a filing cabinet. Encrypted with AES-256-GCM the moment you hit submit. The encrypted blob goes to our inbox. The decryption key lives on an air-gapped machine. The server never sees plaintext. Two different buildings, two different locks, one report.</div>
+<label>Cloudflare Zone ID</label>
+<div style="position:relative"><input type="password" name="cf_zone" id="cf_zone" placeholder="1320f3a6c2f3dc2c..." autocomplete="off" spellcheck="false" style="padding-right:36px"><span onclick="toggleVis('cf_zone',this)" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:14px;color:#555;user-select:none">&#x1F441;</span></div>
+<label>Cloudflare API Token <span style="color:#555">(read-only analytics scope)</span></label>
+<div style="position:relative"><input type="password" name="cf_token" id="cf_token" placeholder="Bearer token" autocomplete="off" style="padding-right:36px"><span onclick="toggleVis('cf_token',this)" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:14px;color:#555;user-select:none">&#x1F441;</span></div>
+</div>
 <label>Tier</label>
 <div class="tier-grid">
 <label class="tier-opt selected" onclick="selectTier(this)"><input type="radio" name="tier" value="starter" checked><div class="tier-price">$150</div><div class="tier-name">Starter</div><div class="tier-ips">&lt;500 IPs</div></label>
@@ -594,7 +601,14 @@ select{cursor:pointer}
 <p class="note">Free to submit. You only pay when your report is ready.<br>Reviewed by a USCYBERCOM operator. 48 hour turnaround.</p>
 <p style="margin-top:1.5rem;text-align:center"><a href="/">&larr; whobelooking.org</a></p>
 </div>
-<script>function selectTier(el){document.querySelectorAll('.tier-opt').forEach(function(e){e.classList.remove('selected')});el.classList.add('selected');el.querySelector('input').checked=true;}</script>
+<script>
+function selectTier(el){document.querySelectorAll('.tier-opt').forEach(function(e){e.classList.remove('selected')});el.classList.add('selected');el.querySelector('input').checked=true;}
+function toggleVis(id,btn){var f=document.getElementById(id);if(f.type==='password'){f.type='text';btn.style.color='#00d9ff';}else{f.type='password';btn.style.color='#555';}}
+document.querySelector('select[name=source_type]').addEventListener('change',function(){
+  document.getElementById('cf-creds').style.display=this.value==='cloudflare'?'block':'none';
+});
+document.getElementById('cf-creds').style.display=document.querySelector('select[name=source_type]').value==='cloudflare'?'block':'none';
+</script>
 </body></html>"#,
     )
 }
