@@ -1,4 +1,4 @@
-// Unlicense — cochranblock.org
+// All Rights Reserved — The Cochran Block, LLC
 // Contributors: GotEmCoach, KOVA, Claude Opus 4.6
 //! whobelooking — Two modes:
 //! 1. Visitor ID: Cloudflare → rDNS → /24 neighbor scan → company ID.
@@ -9,9 +9,37 @@ use clap::Parser;
 #[cfg(feature = "browser")]
 use clap::Subcommand;
 
+mod queue;
+#[cfg(feature = "serve")]
+mod web;
+
 #[derive(Parser)]
 #[command(name = "whobelooking", about = "Who's looking at your site? CF → rDNS → company ID.")]
 enum Cmd {
+    /// Start the web server (whobelooking.org)
+    #[cfg(feature = "serve")]
+    Serve {
+        /// Port to listen on
+        #[arg(short, long, default_value = "8082", env = "PORT")]
+        port: u16,
+    },
+    /// List all jobs in the queue
+    Queue,
+    /// Pop the next pending job
+    Pop,
+    /// Mark a job as complete
+    Done {
+        /// Job ID
+        id: String,
+        /// Path to report file
+        #[arg(short, long)]
+        report: Option<String>,
+    },
+    /// Mark a job as delivered
+    Deliver {
+        /// Job ID
+        id: String,
+    },
     /// Scout federal contract opportunities across SAM.gov, USASpending, SBIR
     Scout {
         /// NAICS codes to search (comma-separated)
@@ -159,8 +187,52 @@ enum CtosOp {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     let cmd = Cmd::parse();
     match cmd {
+        #[cfg(feature = "serve")]
+        Cmd::Serve { port } => {
+            let app = web::router::build();
+            let addr = format!("0.0.0.0:{}", port);
+            tracing::info!("whobelooking serving at http://{}", addr);
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            axum::serve(listener, app).await?;
+        }
+        Cmd::Queue => {
+            let jobs = queue::list_jobs()?;
+            if jobs.is_empty() {
+                println!("queue empty");
+            } else {
+                for j in &jobs {
+                    println!("{} {:?} {} {:.1}h {}", j.id, j.status, j.customer_email, j.estimated_hours, j.tier.label());
+                }
+            }
+            let hours = queue::hours_this_week();
+            println!("\n{:.1} of 12 hours committed this week", hours);
+        }
+        Cmd::Pop => {
+            match queue::pop_job()? {
+                Some(job) => {
+                    println!("popped: {} ({}) — {:?}", job.id, job.customer_email, job.source_type);
+                    println!("tier: {} ({:.1}h)", job.tier.label(), job.estimated_hours);
+                }
+                None => println!("no pending jobs"),
+            }
+        }
+        Cmd::Done { id, report } => {
+            queue::complete_job(&id, report)?;
+            println!("marked complete: {}", id);
+        }
+        Cmd::Deliver { id } => {
+            queue::deliver_job(&id)?;
+            println!("marked delivered: {}", id);
+        }
         Cmd::Scout { naics, keyword, sam_key, max_amount, min_amount } => {
             let codes: Vec<&str> = naics.split(',').map(|s| s.trim()).collect();
             scout::run(&codes, keyword.as_deref(), sam_key.as_deref(), min_amount, max_amount).await?;

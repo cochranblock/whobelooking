@@ -1,15 +1,15 @@
-# Unlicense — cochranblock.org
+# All Rights Reserved — The Cochran Block, LLC
 # Contributors: GotEmCoach, KOVA, Claude Opus 4.6
 
 [package]
 name = "whobelooking"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-description = "Who's looking? CF visitor ID + federal contract scout. SAM.gov + USASpending + SBIR load-balanced queries. Zero cloud. One binary."
-license = "Unlicense"
+description = "Visitor intelligence platform. Any IP source → rDNS → /24 scan → whois → company ID → enrichment flywheel → intelligence report. One binary. Zero cloud."
+license = "LicenseRef-Proprietary"
 repository = "https://github.com/cochranblock/whobelooking"
-keywords = ["analytics", "reverse-dns", "lead-generation", "cloudflare", "gov-contracts"]
-categories = ["command-line-utilities"]
+keywords = ["analytics", "reverse-dns", "lead-generation", "visitor-intelligence", "threat-detection"]
+categories = ["command-line-utilities", "web-programming"]
 
 [lib]
 name = "whobelooking"
@@ -35,12 +35,18 @@ hickory-resolver = "0.25"
 sled = "0.34"
 dirs = "5"
 zstd = "0.13"
+uuid = { version = "1", features = ["v4"] }
+axum = { version = "0.8", features = ["macros"], optional = true }
+tower-http = { version = "0.6", features = ["compression-zstd", "trace", "set-header"], optional = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chromiumoxide = { version = "0.9", features = ["fetcher", "rustls", "zip8"], optional = true }
 futures = { version = "0.3", optional = true }
 exopack = { git = "https://github.com/cochranblock/exopack", features = ["triple_sims"], optional = true }
 
 [features]
 default = []
+serve = ["dep:axum", "dep:tower-http"]
 browser = ["dep:chromiumoxide", "dep:futures"]
 tests = ["dep:exopack"]
 
