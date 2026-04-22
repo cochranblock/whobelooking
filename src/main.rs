@@ -11,6 +11,7 @@ use clap::Parser;
 #[cfg(feature = "browser")]
 use clap::Subcommand;
 
+mod crypto;
 mod queue;
 #[cfg(feature = "serve")]
 mod web;
@@ -98,6 +99,11 @@ enum Cmd {
     Deliver {
         /// Job ID
         id: String,
+    },
+    /// Decrypt a credential blob (from email) using your local key
+    Decrypt {
+        /// The base64 encrypted blob
+        blob: String,
     },
     /// Scout federal contract opportunities across SAM.gov, USASpending, SBIR
     Scout {
@@ -312,6 +318,18 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Deliver { id } => {
             queue::deliver_job(&id)?;
             println!("marked delivered: {}", id);
+        }
+        Cmd::Decrypt { blob } => {
+            let passphrase =
+                std::env::var("CRED_KEY").unwrap_or_else(|_| "whobelooking-default-key".into());
+            let key = crypto::key_from_passphrase(&passphrase);
+            match crypto::decrypt(&blob, &key) {
+                Ok(plaintext) => println!("{}", plaintext),
+                Err(e) => {
+                    eprintln!("decryption failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
         Cmd::Scout {
             naics,

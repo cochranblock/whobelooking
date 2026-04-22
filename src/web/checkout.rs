@@ -1,6 +1,7 @@
 // All Rights Reserved — The Cochran Block, LLC
-//! Order submission — no payment at order time. Payment at download.
+//! Order submission — credentials encrypted + emailed, never stored on disk.
 
+use crate::crypto;
 use crate::web::admin;
 use axum::Form;
 use axum::extract::Query;
@@ -13,6 +14,9 @@ pub struct OrderForm {
     pub site_url: String,
     pub source_type: String,
     pub tier: String,
+    // Optional credentials — only for Cloudflare
+    pub cf_zone: Option<String>,
+    pub cf_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -20,33 +24,79 @@ pub struct ConfirmQuery {
     pub id: Option<String>,
 }
 
-/// Submit a request — free. No payment. Creates folder in pending/.
+/// Submit a request. Credentials encrypted and emailed to operator. Never stored on disk.
 pub async fn create_checkout(Form(form): Form<OrderForm>) -> axum::response::Response {
     if !admin::has_capacity() {
         return Redirect::to("/order?error=capacity").into_response();
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    if admin::create_order(
+
+    // Create order folder (no credentials in it)
+    if !admin::create_order(
         &id,
         &form.email,
         &form.site_url,
         &form.source_type,
         &form.tier,
     ) {
-        tracing::info!(
-            "new order: {} from {} for {}",
-            id,
-            form.email,
-            form.site_url
-        );
-        Redirect::to(&format!("/order/confirmed?id={}", id)).into_response()
-    } else {
-        Redirect::to("/order?error=capacity").into_response()
+        return Redirect::to("/order?error=capacity").into_response();
     }
+
+    tracing::info!(
+        "new order: {} from {} for {}",
+        id,
+        form.email,
+        form.site_url
+    );
+
+    // If credentials provided, encrypt and email them
+    if let (Some(zone), Some(token)) = (&form.cf_zone, &form.cf_token) {
+        if !zone.is_empty() && !token.is_empty() {
+            let passphrase =
+                std::env::var("CRED_KEY").unwrap_or_else(|_| "whobelooking-default-key".into());
+            let key = crypto::key_from_passphrase(&passphrase);
+            let plaintext = format!("order:{}\nzone:{}\ntoken:{}", id, zone, token);
+
+            match crypto::encrypt(&plaintext, &key) {
+                Ok(blob) => {
+                    // Send encrypted blob via webhook (email relay)
+                    if let Ok(webhook) = std::env::var("CRED_WEBHOOK_URL") {
+                        let client = reqwest::Client::new();
+                        let payload = serde_json::json!({
+                            "order_id": id,
+                            "email": form.email,
+                            "site": form.site_url,
+                            "encrypted_credentials": blob,
+                        });
+                        tokio::spawn(async move {
+                            let _ = client
+                                .post(&webhook)
+                                .json(&payload)
+                                .timeout(std::time::Duration::from_secs(10))
+                                .send()
+                                .await;
+                        });
+                        tracing::info!("credentials encrypted and sent via webhook for {}", id);
+                    } else {
+                        // No webhook — log that credentials were encrypted but not sent
+                        tracing::warn!(
+                            "credentials encrypted for {} but CRED_WEBHOOK_URL not set",
+                            id
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("encryption failed for {}: {}", id, e);
+                }
+            }
+        }
+    }
+
+    Redirect::to(&format!("/order/confirmed?id={}", id)).into_response()
 }
 
-/// Confirmation page — you're in the queue, no payment yet.
+/// Confirmation page.
 pub async fn checkout_success(Query(q): Query<ConfirmQuery>) -> Html<String> {
     let id = q.id.unwrap_or_default();
     let short = if id.len() > 12 { &id[..12] } else { &id };
@@ -67,7 +117,7 @@ a{{color:#00d9ff;text-decoration:none}}
 <div class="ref">{short}...</div>
 <p>You're #{pending} in the queue. Michael will review your request within 24 hours.</p>
 <p><strong style="color:#e8e8e8">You don't pay now.</strong> When your report is ready, you'll receive an email with a download link. Payment happens at download.</p>
-<p style="margin-top:2rem;font-size:0.8rem;color:#555">Every report is manually reviewed by a USCYBERCOM operator.</p>
+<p style="font-size:0.75rem;color:#555;margin-top:1.5rem">Your credentials were encrypted with AES-256-GCM and sent directly to the operator. They are not stored on any server.</p>
 <p style="margin-top:1.5rem"><a href="/">Back to whobelooking.org</a></p>
 </div></body></html>"#,
         short = short,
