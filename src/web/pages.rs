@@ -774,74 +774,66 @@ pub async fn download_report(
             _ => "$150",
         };
 
-        // Create Stripe Checkout Session for payment
-        let stripe_key = std::env::var("STRIPE_SECRET_KEY").unwrap_or_default();
-        if !stripe_key.is_empty() {
-            let price_cents: u32 = match tier {
-                "growth" => 35000,
-                "scale" => 75000,
-                "custom" => 150000,
-                _ => 15000,
-            };
-            let client = reqwest::Client::new();
-            let params = [
-                ("payment_method_types[]", "card"),
-                ("mode", "payment"),
-                ("line_items[0][price_data][currency]", "usd"),
-                (
-                    "line_items[0][price_data][unit_amount]",
-                    &price_cents.to_string(),
-                ),
-                (
-                    "line_items[0][price_data][product_data][name]",
-                    "whobelooking Intelligence Report",
-                ),
-                ("line_items[0][quantity]", "1"),
-                (
-                    "success_url",
-                    &format!(
-                        "https://whobelooking.org/download/{}?session_id={{CHECKOUT_SESSION_ID}}",
-                        clean_id
-                    ),
-                ),
-                (
-                    "cancel_url",
-                    &format!("https://whobelooking.org/download/{}", clean_id),
-                ),
-            ];
-            if let Ok(resp) = client
-                .post("https://api.stripe.com/v1/checkout/sessions")
-                .header("Authorization", format!("Bearer {}", stripe_key))
-                .form(&params)
-                .send()
-                .await
-            {
-                if let Ok(body) = resp.json::<serde_json::Value>().await {
-                    if let Some(url) = body["url"].as_str() {
-                        return axum::response::Redirect::to(url).into_response();
-                    }
-                }
-            }
-        }
+        let pk = std::env::var("STRIPE_PUBLISHABLE_KEY").unwrap_or_default();
 
-        // Fallback: show payment gate page (no Stripe or Stripe failed)
         return Html(format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Download Report — whobelooking</title>
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<title>Your Report is Ready — whobelooking</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&family=Rajdhani:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<script src="https://js.stripe.com/v3/"></script>
 <style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:'JetBrains Mono',monospace;background:#050508;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}}
 .box{{max-width:480px;width:100%;text-align:center}}
-h1{{font-family:'Orbitron',sans-serif;font-size:1.4rem;color:#00d9ff;margin-bottom:1rem}}
-p{{font-size:0.85rem;color:#9ca3af;margin-bottom:1rem}}
-.price{{font-size:2rem;font-weight:800;color:#00ffcc;margin:1.5rem 0}}
-a.btn{{display:inline-block;padding:14px 32px;background:#00ffcc;color:#050508;font-family:'Orbitron',sans-serif;font-weight:700;font-size:0.9rem;text-decoration:none;border-radius:4px}}
-a.btn:hover{{background:#33ffd6}}
+h1{{font-family:'Orbitron',sans-serif;font-size:1.6rem;color:#00d9ff;margin-bottom:0.5rem}}
+h2{{font-family:'Rajdhani',sans-serif;font-size:1rem;color:#9ca3af;font-weight:400;margin-bottom:2rem}}
+.price{{font-size:3rem;font-weight:800;color:#00ffcc;margin:1rem 0}}
+.price-sub{{font-size:0.7rem;color:#555;margin-bottom:2rem}}
+button.btn{{display:block;width:100%;padding:16px;background:#00ffcc;color:#050508;font-family:'Orbitron',sans-serif;font-weight:700;font-size:1rem;border:none;border-radius:4px;cursor:pointer;transition:background 0.15s,transform 0.1s;letter-spacing:0.05em}}
+button.btn:hover{{background:#33ffd6;transform:translateY(-1px)}}
+button.btn:disabled{{background:#1a1a2e;color:#555;cursor:wait;transform:none}}
+#status{{font-size:0.75rem;color:#9ca3af;margin-top:1rem;min-height:20px}}
+.trust{{margin-top:2rem;padding-top:1.5rem;border-top:1px solid rgba(0,217,255,0.1);font-size:0.65rem;color:#555;line-height:1.6}}
+.trust strong{{color:#9ca3af}}
+a{{color:#00d9ff;text-decoration:none}}
 </style></head><body><div class="box">
 <h1>Your report is ready.</h1>
-<p>Visitor intelligence report prepared and reviewed.</p>
+<h2>Visitor intelligence &mdash; reviewed and signed off.</h2>
 <div class="price">{price}</div>
-<a href="/download/{clean_id}?paid=1" class="btn">Pay &amp; Download</a>
-<p style="margin-top:2rem;font-size:0.7rem;color:#555">Secure payment via Stripe. PDF delivered instantly after payment.</p>
-</div></body></html>"#)).into_response();
+<div class="price-sub">One-time payment. Instant download.</div>
+<button class="btn" id="pay-btn" onclick="startPayment()">Pay &amp; Download Report</button>
+<div id="status"></div>
+<div class="trust">
+<strong>Secure checkout powered by Stripe.</strong><br>
+Card data goes directly to Stripe &mdash; never touches our servers.<br>
+PDF delivered instantly after payment confirms.
+</div>
+<p style="margin-top:1.5rem"><a href="/">&larr; whobelooking.org</a></p>
+</div>
+<script>
+var stripe=Stripe('{pk}');
+function startPayment(){{
+  var btn=document.getElementById('pay-btn');
+  var status=document.getElementById('status');
+  btn.disabled=true;
+  btn.textContent='Creating secure checkout...';
+  fetch('/download/{clean_id}/session',{{method:'POST'}})
+    .then(function(r){{return r.json();}})
+    .then(function(d){{
+      if(d.id){{
+        status.textContent='Opening Stripe checkout...';
+        stripe.redirectToCheckout({{sessionId:d.id}});
+      }}else{{
+        status.textContent='Something went wrong. Please try again.';
+        btn.disabled=false;
+        btn.textContent='Pay & Download Report';
+      }}
+    }})
+    .catch(function(){{
+      status.textContent='Connection error. Please try again.';
+      btn.disabled=false;
+      btn.textContent='Pay & Download Report';
+    }});
+}}
+</script>
+</body></html>"#, price=price, pk=pk, clean_id=clean_id)).into_response();
     }
 
     // Paid — serve the PDF
@@ -865,6 +857,84 @@ a.btn:hover{{background:#33ffd6}}
                 .into_response()
         }
         Err(_) => (axum::http::StatusCode::NOT_FOUND, "report file error").into_response(),
+    }
+}
+
+/// Create a Stripe Checkout Session for a download. Returns JSON {id: "cs_..."}.
+pub async fn create_download_session(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let clean_id: String = id
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-')
+        .collect();
+
+    let order_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("whobelooking")
+        .join("orders");
+    let order_txt =
+        std::fs::read_to_string(order_dir.join("approved").join(&clean_id).join("order.txt"))
+            .unwrap_or_default();
+    let tier = order_txt
+        .lines()
+        .find(|l| l.starts_with("tier:"))
+        .map(|l| l.trim_start_matches("tier:").trim())
+        .unwrap_or("starter");
+
+    let price_cents: u32 = match tier {
+        "growth" => 35000,
+        "scale" => 75000,
+        "custom" => 150000,
+        _ => 15000,
+    };
+
+    let stripe_key = std::env::var("STRIPE_SECRET_KEY").unwrap_or_default();
+    if stripe_key.is_empty() {
+        return axum::Json(serde_json::json!({"error": "payments not configured"})).into_response();
+    }
+
+    let client = reqwest::Client::new();
+    let params = [
+        ("payment_method_types[]", "card"),
+        ("mode", "payment"),
+        ("line_items[0][price_data][currency]", "usd"),
+        (
+            "line_items[0][price_data][unit_amount]",
+            &price_cents.to_string(),
+        ),
+        (
+            "line_items[0][price_data][product_data][name]",
+            "whobelooking Visitor Intelligence Report",
+        ),
+        ("line_items[0][quantity]", "1"),
+        (
+            "success_url",
+            &format!(
+                "https://whobelooking.org/download/{}?session_id={{CHECKOUT_SESSION_ID}}",
+                clean_id
+            ),
+        ),
+        (
+            "cancel_url",
+            &format!("https://whobelooking.org/download/{}", clean_id),
+        ),
+    ];
+
+    match client
+        .post("https://api.stripe.com/v1/checkout/sessions")
+        .header("Authorization", format!("Bearer {}", stripe_key))
+        .form(&params)
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(body) => axum::Json(serde_json::json!({"id": body["id"]})).into_response(),
+            Err(e) => axum::Json(serde_json::json!({"error": format!("{}", e)})).into_response(),
+        },
+        Err(e) => axum::Json(serde_json::json!({"error": format!("{}", e)})).into_response(),
     }
 }
 
