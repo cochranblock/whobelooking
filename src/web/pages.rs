@@ -22,21 +22,21 @@ pub async fn index() -> Html<String> {
 <meta property="og:title" content="whobelooking — Visitor Intelligence">
 <meta property="og:description" content="Microsoft had a 3-hour meeting about us. We caught them. Want to know who's meeting about you?">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700;800&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700;800&family=Orbitron:wght@400;500;600;700&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root {{
-  --bg: #1a1a1a;
-  --surface: #222;
-  --surface2: #2d2a2e;
-  --text: #e0ddd8;
-  --muted: #8a8680;
-  --amber: #ffd866;
-  --red: #ff6188;
-  --green: #a9dc76;
-  --blue: #78dce8;
-  --purple: #ab9df2;
+  --bg: #050508;
+  --surface: #0d0d14;
+  --surface2: #14141f;
+  --text: #e8e8e8;
+  --muted: #9ca3af;
+  --amber: #00d9ff;
+  --red: #ff6b35;
+  --green: #00ffcc;
+  --blue: #9d4edd;
+  --purple: rgba(0, 217, 255, 0.35);
   --mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-  --serif: 'Instrument Serif', Georgia, serif;
+  --serif: 'Orbitron', sans-serif;
 }}
 *, *::before, *::after {{ margin:0; padding:0; box-sizing:border-box; }}
 html {{ scroll-behavior: smooth; }}
@@ -83,7 +83,7 @@ body::before {{
   font-family: var(--serif);
   font-size: clamp(2.5rem, 7vw, 4rem);
   font-weight: 400;
-  font-style: italic;
+  
   color: var(--amber);
   line-height: 1.1;
   margin-bottom: 1.5rem;
@@ -122,7 +122,7 @@ body::before {{
 .proof-headline {{
   font-family: var(--serif);
   font-size: 1.5rem;
-  font-style: italic;
+  
   color: var(--text);
   margin-bottom: 1rem;
   line-height: 1.3;
@@ -171,7 +171,7 @@ body::before {{
   animation: fadeIn 0.6s 1.4s forwards;
 }}
 .terminal-bar {{
-  background: #1a1a1a;
+  background: #050508;
   padding: 8px 14px;
   display: flex;
   align-items: center;
@@ -211,7 +211,7 @@ body::before {{
   font-family: var(--serif);
   font-size: 1.8rem;
   font-weight: 400;
-  font-style: italic;
+  
   color: var(--text);
   margin-bottom: 1.5rem;
   line-height: 1.2;
@@ -258,7 +258,7 @@ body::before {{
 .capacity-track {{
   width: 100%;
   height: 6px;
-  background: #2a2a2a;
+  background: rgba(0, 217, 255, 0.15);
   border-radius: 3px;
   overflow: hidden;
   margin: 0.8rem 0;
@@ -278,8 +278,8 @@ body::before {{
   gap: 3rem;
   margin: 2rem 0;
   padding: 1.5rem 0;
-  border-top: 1px solid #2a2a2a;
-  border-bottom: 1px solid #2a2a2a;
+  border-top: 1px solid rgba(0, 217, 255, 0.15);
+  border-bottom: 1px solid rgba(0, 217, 255, 0.15);
 }}
 .enrichment-item {{ }}
 .enrichment-num {{
@@ -306,7 +306,7 @@ body::before {{
 .cta h2 {{
   font-family: var(--serif);
   font-size: 1.5rem;
-  font-style: italic;
+  
   color: var(--text);
   margin-bottom: 1rem;
 }}
@@ -340,7 +340,7 @@ body::before {{
 .footer {{
   margin-top: 4rem;
   padding-top: 1.5rem;
-  border-top: 1px solid #2a2a2a;
+  border-top: 1px solid rgba(0, 217, 255, 0.15);
   font-size: 0.55rem;
   color: #555;
   text-align: center;
@@ -357,7 +357,7 @@ body::before {{
 }}
 
 /* Mobile */
-@media (max-width: 600px) {{
+@media (orientation: portrait) {{
   .page {{ padding: 2rem 1rem; }}
   .proof-stat {{ gap: 1rem; }}
   .pricing {{ grid-template-columns: 1fr 1fr; }}
@@ -545,12 +545,12 @@ pub async fn order_form() -> Html<&'static str> {
     Html(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Order — whobelooking</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Instrument+Serif:ital@1&display=swap" rel="stylesheet">
-<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'JetBrains Mono',monospace;background:#1a1a1a;color:#e0ddd8;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}
-.box{max-width:480px;width:100%}h1{font-family:'Instrument Serif',serif;font-style:italic;font-size:2rem;color:#ffd866;font-weight:400;margin-bottom:1.5rem}
-p{margin-bottom:1rem;font-size:0.85rem;color:#8a8680;line-height:1.6}a{color:#ffd866;text-decoration:none;border-bottom:1px solid rgba(255,216,102,0.3)}a:hover{border-color:#ffd866}
-strong{color:#e0ddd8}
-ul{margin:1rem 0 1.5rem 1.2rem;font-size:0.85rem;color:#8a8680}li{margin-bottom:0.4rem}
-.btn{display:inline-block;padding:10px 28px;background:#ffd866;color:#1a1a1a;font-family:inherit;font-weight:700;font-size:0.85rem;text-decoration:none;border:none;margin-top:1rem;letter-spacing:0.05em}
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'JetBrains Mono',monospace;background:#050508;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}
+.box{max-width:480px;width:100%}h1{font-family:'Instrument Serif',serif;font-style:italic;font-size:2rem;color:#00d9ff;font-weight:400;margin-bottom:1.5rem}
+p{margin-bottom:1rem;font-size:0.85rem;color:#9ca3af;line-height:1.6}a{color:#00d9ff;text-decoration:none;border-bottom:1px solid rgba(255,216,102,0.3)}a:hover{border-color:#00d9ff}
+strong{color:#e8e8e8}
+ul{margin:1rem 0 1.5rem 1.2rem;font-size:0.85rem;color:#9ca3af}li{margin-bottom:0.4rem}
+.btn{display:inline-block;padding:10px 28px;background:#00d9ff;color:#050508;font-family:inherit;font-weight:700;font-size:0.85rem;text-decoration:none;border:none;margin-top:1rem;letter-spacing:0.05em}
 </style></head><body><div class="box">
 <h1>Request a report.</h1>
 <p>Email <strong><a href="mailto:mcochran@cochranblock.org?subject=whobelooking%20report%20request">mcochran@cochranblock.org</a></strong> with:</p>
@@ -574,15 +574,15 @@ pub async fn queue_status() -> Html<String> {
     Html(format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Capacity — whobelooking</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&family=Instrument+Serif:ital@1&display=swap" rel="stylesheet">
-<style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:'JetBrains Mono',monospace;background:#1a1a1a;color:#e0ddd8;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}}
-.box{{max-width:480px;width:100%}}h1{{font-family:'Instrument Serif',serif;font-style:italic;font-size:2rem;color:#ffd866;font-weight:400;margin-bottom:1.5rem}}
-.track{{width:100%;height:6px;background:#2a2a2a;border-radius:3px;overflow:hidden;margin:1rem 0}}
-.fill{{height:100%;border-radius:3px;background:linear-gradient(90deg,#a9dc76,#ffd866)}}
-.label{{font-size:0.7rem;color:#8a8680;margin-bottom:2rem}}
+<style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:'JetBrains Mono',monospace;background:#050508;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}}
+.box{{max-width:480px;width:100%}}h1{{font-family:'Instrument Serif',serif;font-style:italic;font-size:2rem;color:#00d9ff;font-weight:400;margin-bottom:1.5rem}}
+.track{{width:100%;height:6px;background:rgba(0, 217, 255, 0.15);border-radius:3px;overflow:hidden;margin:1rem 0}}
+.fill{{height:100%;border-radius:3px;background:linear-gradient(90deg,#00ffcc,#00d9ff)}}
+.label{{font-size:0.7rem;color:#9ca3af;margin-bottom:2rem}}
 .stat{{margin-bottom:0.8rem}}
-.stat-num{{font-size:1.5rem;font-weight:800;color:#a9dc76;margin-right:0.5rem}}
+.stat-num{{font-size:1.5rem;font-weight:800;color:#00ffcc;margin-right:0.5rem}}
 .stat-label{{font-size:0.6rem;letter-spacing:0.15em;text-transform:uppercase;color:#555}}
-p{{font-size:0.8rem;color:#8a8680;margin-top:1.5rem}}a{{color:#ffd866;text-decoration:none;border-bottom:1px solid rgba(255,216,102,0.3)}}
+p{{font-size:0.8rem;color:#9ca3af;margin-top:1.5rem}}a{{color:#00d9ff;text-decoration:none;border-bottom:1px solid rgba(255,216,102,0.3)}}
 </style></head><body><div class="box">
 <h1>Capacity.</h1>
 <div class="track"><div class="fill" style="width:{capacity_pct}%"></div></div>
@@ -603,9 +603,9 @@ pub async fn not_found(uri: axum::http::Uri) -> (axum::http::StatusCode, Html<&'
     (axum::http::StatusCode::NOT_FOUND,
     Html(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>404 — whobelooking</title>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@1&display=swap" rel="stylesheet">
-<style>*{margin:0;padding:0}body{font-family:'JetBrains Mono',monospace;background:#1a1a1a;color:#e0ddd8;display:flex;align-items:center;justify-content:center;height:100vh}
-a{color:#ffd866;text-decoration:none}</style></head><body><div style="text-align:center">
-<h1 style="font-family:'Instrument Serif',serif;font-style:italic;color:#ffd866;font-size:4rem;font-weight:400">404</h1>
+<style>*{margin:0;padding:0}body{font-family:'JetBrains Mono',monospace;background:#050508;color:#e8e8e8;display:flex;align-items:center;justify-content:center;height:100vh}
+a{color:#00d9ff;text-decoration:none}</style></head><body><div style="text-align:center">
+<h1 style="font-family:'Instrument Serif',serif;font-style:italic;color:#00d9ff;font-size:4rem;font-weight:400">404</h1>
 <p style="color:#555;margin-top:0.5rem"><a href="/">whobelooking.org</a></p>
 </div></body></html>"#))
 }

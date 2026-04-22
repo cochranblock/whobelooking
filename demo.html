@@ -5,22 +5,22 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>whobelooking — Live Demo</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700;800&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root {
-  --bg: #0d0d0d;
-  --surface: #161616;
-  --surface2: #1e1e1e;
-  --border: #2a2a2a;
-  --text: #e0ddd8;
-  --muted: #6a6660;
-  --amber: #ffd866;
-  --red: #ff6188;
-  --green: #a9dc76;
-  --blue: #78dce8;
-  --purple: #ab9df2;
+  --bg: #050508;
+  --surface: #0d0d14;
+  --surface2: #14141f;
+  --border: rgba(0, 217, 255, 0.15);
+  --text: #e8e8e8;
+  --muted: #9ca3af;
+  --accent: #00d9ff;
+  --orange: #ff6b35;
+  --teal: #00ffcc;
+  --purple: #9d4edd;
+  --glow: rgba(0, 217, 255, 0.35);
   --mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-  --serif: 'Instrument Serif', Georgia, serif;
+  --display: 'Orbitron', sans-serif; --body: 'Rajdhani', sans-serif;
 }
 *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
 body { background:var(--bg); color:var(--text); font-family:var(--mono); font-size:13px; line-height:1.5; overflow-x:hidden; }
@@ -40,12 +40,12 @@ body::after {
   grid-column:1/-1; background:var(--surface); border-bottom:1px solid var(--border);
   display:flex; align-items:center; padding:0 16px; gap:16px;
 }
-.topbar-logo { font-weight:800; color:var(--amber); font-size:14px; letter-spacing:0.05em; }
+.topbar-logo { font-weight:800; color:var(--accent); font-size:14px; letter-spacing:0.05em; }
 .topbar-sep { width:1px; height:20px; background:var(--border); }
 .topbar-client { color:var(--muted); font-size:11px; }
 .topbar-status { margin-left:auto; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; }
-.topbar-status .dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--green); margin-right:6px; animation:pulse 2s infinite; }
-.topbar-day { color:var(--amber); font-size:11px; font-weight:700; margin-left:16px; }
+.topbar-status .dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--teal); margin-right:6px; animation:pulse 2s infinite; }
+.topbar-day { color:var(--accent); font-size:11px; font-weight:700; margin-left:16px; }
 
 /* Sidebar — timeline */
 .sidebar {
@@ -55,14 +55,14 @@ body::after {
 .sidebar-title { font-size:9px; letter-spacing:0.2em; text-transform:uppercase; color:var(--muted); margin-bottom:12px; }
 .day-entry { padding:8px 10px; margin-bottom:4px; border-radius:4px; cursor:pointer; transition:background 0.15s; font-size:11px; }
 .day-entry:hover { background:var(--surface2); }
-.day-entry.active { background:var(--surface2); border-left:2px solid var(--amber); }
-.day-entry .day-label { color:var(--amber); font-weight:700; font-size:10px; }
+.day-entry.active { background:var(--surface2); border-left:2px solid var(--accent); }
+.day-entry .day-label { color:var(--accent); font-weight:700; font-size:10px; }
 .day-entry .day-desc { color:var(--muted); font-size:10px; margin-top:2px; }
-.day-entry .day-stat { color:var(--blue); font-size:10px; margin-top:2px; }
+.day-entry .day-stat { color:var(--purple); font-size:10px; margin-top:2px; }
 
 /* Main feed */
 .feed { padding:20px; overflow-y:auto; }
-.feed-header { font-size:10px; letter-spacing:0.2em; text-transform:uppercase; color:var(--red); margin-bottom:16px; }
+.feed-header { font-size:10px; letter-spacing:0.2em; text-transform:uppercase; color:var(--orange); margin-bottom:16px; }
 
 /* Event cards */
 .event {
@@ -71,25 +71,25 @@ body::after {
   opacity:0; transform:translateY(8px);
   animation:cardIn 0.4s forwards;
 }
-.event.threat { border-left:3px solid var(--red); }
-.event.institutional { border-left:3px solid var(--amber); }
-.event.organic { border-left:3px solid var(--green); }
-.event.linkedin { border-left:3px solid var(--blue); }
+.event.threat { border-left:3px solid var(--orange); }
+.event.institutional { border-left:3px solid var(--accent); }
+.event.organic { border-left:3px solid var(--teal); }
+.event.linkedin { border-left:3px solid var(--purple); }
 .event-time { font-size:9px; color:var(--muted); letter-spacing:0.1em; margin-bottom:6px; }
 .event-title { font-size:12px; color:var(--text); font-weight:600; margin-bottom:4px; }
 .event-body { font-size:11px; color:var(--muted); line-height:1.5; }
 .event-body strong { color:var(--text); }
-.event-body .org { color:var(--amber); }
-.event-body .page { color:var(--blue); }
-.event-body .blocked { color:var(--red); font-weight:700; }
+.event-body .org { color:var(--accent); }
+.event-body .page { color:var(--purple); }
+.event-body .blocked { color:var(--orange); font-weight:700; }
 .event-body .ip { color:#555; }
 
 /* Tag badges */
 .tag { display:inline-block; font-size:8px; padding:2px 6px; border-radius:2px; font-weight:700; letter-spacing:0.05em; margin-right:4px; }
-.tag-msft { background:var(--amber); color:var(--bg); }
-.tag-google { background:var(--blue); color:var(--bg); }
-.tag-threat { background:var(--red); color:var(--bg); }
-.tag-organic { background:var(--green); color:var(--bg); }
+.tag-msft { background:var(--accent); color:var(--bg); }
+.tag-google { background:var(--purple); color:var(--bg); }
+.tag-threat { background:var(--orange); color:var(--bg); }
+.tag-organic { background:var(--teal); color:var(--bg); }
 .tag-ashburn { background:var(--purple); color:var(--bg); }
 .tag-brisbane { background:#fc9867; color:var(--bg); }
 
@@ -97,7 +97,7 @@ body::after {
 .panel { background:var(--surface); border-left:1px solid var(--border); padding:16px; overflow-y:auto; }
 .panel-title { font-size:9px; letter-spacing:0.2em; text-transform:uppercase; color:var(--muted); margin-bottom:16px; }
 .stat-block { margin-bottom:20px; }
-.stat-num { font-size:28px; font-weight:800; color:var(--amber); font-variant-numeric:tabular-nums; }
+.stat-num { font-size:28px; font-weight:800; color:var(--accent); font-variant-numeric:tabular-nums; }
 .stat-label { font-size:9px; letter-spacing:0.12em; text-transform:uppercase; color:var(--muted); }
 .stat-sub { font-size:10px; color:#444; margin-top:2px; }
 
@@ -110,7 +110,7 @@ body::after {
 /* Enrichment counter */
 .enrichment { margin-top:20px; padding-top:16px; border-top:1px solid var(--border); }
 .enrich-row { display:flex; justify-content:space-between; margin-bottom:8px; font-size:11px; }
-.enrich-val { color:var(--green); font-weight:700; }
+.enrich-val { color:var(--teal); font-weight:700; }
 
 /* Company roster */
 .roster { margin-top:16px; }
@@ -128,7 +128,7 @@ body::after {
 }
 .demo-cta a {
   display:inline-block; padding:12px 32px;
-  background:var(--amber); color:var(--bg);
+  background:var(--accent); color:var(--bg);
   font-family:var(--mono); font-weight:700; font-size:13px;
   text-decoration:none; letter-spacing:0.05em;
   transition:transform 0.1s;
@@ -141,7 +141,7 @@ body::after {
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
 /* Mobile */
-@media(max-width:900px) {
+@media(orientation:portrait) {
   .shell { grid-template-columns:1fr; grid-template-rows:40px auto; }
   .sidebar, .panel { display:none; }
 }
@@ -189,7 +189,7 @@ body::after {
 
     <div class="gauge">
       <div class="gauge-label">Confidence</div>
-      <div class="gauge-track"><div class="gauge-fill" id="conf-fill" style="width:0%;background:var(--green)"></div></div>
+      <div class="gauge-track"><div class="gauge-fill" id="conf-fill" style="width:0%;background:var(--teal)"></div></div>
     </div>
 
     <div class="panel-title" style="margin-top:24px">Companies Detected</div>
@@ -353,7 +353,7 @@ function showDay(idx) {
       roster.innerHTML = '';
       var sorted = Object.entries(companies).sort(function(a,b){return b[1]-a[1]});
       sorted.forEach(function(pair) {
-        var color = pair[0].includes('Microsoft') ? 'var(--amber)' : pair[0].includes('Google') ? 'var(--blue)' : pair[0].includes('Two Six') ? 'var(--purple)' : pair[0].includes('Domino') ? '#fc9867' : 'var(--green)';
+        var color = pair[0].includes('Microsoft') ? 'var(--accent)' : pair[0].includes('Google') ? 'var(--purple)' : pair[0].includes('Two Six') ? 'var(--purple)' : pair[0].includes('Domino') ? '#fc9867' : 'var(--teal)';
         roster.innerHTML += '<div class="roster-item"><div class="roster-dot" style="background:'+color+'"></div><span class="roster-name">'+pair[0]+'</span><span class="roster-hits">'+pair[1]+' hits</span></div>';
       });
 
