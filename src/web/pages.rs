@@ -586,9 +586,9 @@ select{cursor:pointer}
 <label class="tier-opt" onclick="selectTier(this)"><input type="radio" name="tier" value="scale"><div class="tier-price">$750</div><div class="tier-name">Scale</div><div class="tier-ips">2K-10K IPs</div></label>
 <label class="tier-opt" onclick="selectTier(this)"><input type="radio" name="tier" value="custom"><div class="tier-price">$1,500+</div><div class="tier-name">Custom</div><div class="tier-ips">10K+ IPs</div></label>
 </div>
-<button type="submit" class="btn">Pay &amp; Join Queue</button>
+<button type="submit" class="btn">Submit Request</button>
 </form>
-<p class="note">Secure checkout via Stripe. Report delivered within 48 hours.<br>Reviewed by a USCYBERCOM operator.</p>
+<p class="note">Free to submit. You only pay when your report is ready.<br>Reviewed by a USCYBERCOM operator. 48 hour turnaround.</p>
 <p style="margin-top:1.5rem;text-align:center"><a href="/">&larr; whobelooking.org</a></p>
 </div>
 <script>function selectTier(el){document.querySelectorAll('.tier-opt').forEach(function(e){e.classList.remove('selected')});el.classList.add('selected');el.querySelector('input').checked=true;}</script>
@@ -712,6 +712,39 @@ pub async fn download_report(
             _ => "$150",
         };
 
+        // Create Stripe Checkout Session for payment
+        let stripe_key = std::env::var("STRIPE_SECRET_KEY").unwrap_or_default();
+        if !stripe_key.is_empty() {
+            let price_cents: u32 = match tier {
+                "growth" => 35000,
+                "scale" => 75000,
+                "custom" => 150000,
+                _ => 15000,
+            };
+            let client = reqwest::Client::new();
+            let params = [
+                ("payment_method_types[]", "card"),
+                ("mode", "payment"),
+                ("line_items[0][price_data][currency]", "usd"),
+                ("line_items[0][price_data][unit_amount]", &price_cents.to_string()),
+                ("line_items[0][price_data][product_data][name]", "whobelooking Intelligence Report"),
+                ("line_items[0][quantity]", "1"),
+                ("success_url", &format!("https://whobelooking.org/download/{}?paid=1", clean_id)),
+                ("cancel_url", &format!("https://whobelooking.org/download/{}", clean_id)),
+            ];
+            if let Ok(resp) = client.post("https://api.stripe.com/v1/checkout/sessions")
+                .header("Authorization", format!("Bearer {}", stripe_key))
+                .form(&params).send().await
+            {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(url) = body["url"].as_str() {
+                        return axum::response::Redirect::to(url).into_response();
+                    }
+                }
+            }
+        }
+
+        // Fallback: show payment gate page (no Stripe or Stripe failed)
         return Html(format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Download Report — whobelooking</title>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
