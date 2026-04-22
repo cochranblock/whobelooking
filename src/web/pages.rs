@@ -482,7 +482,7 @@ body::before {{
 <div class="cta">
   <h2>Find out who's watching.</h2>
   <p>Email your site URL, source type, and credentials. You'll get a confirmation within 24 hours.</p>
-  <a href="mailto:mcochran@cochranblock.org?subject=whobelooking%20report%20request" class="btn">Request a Report</a>
+  <a href="/order" class="btn">Request a Report</a>
   <a href="/sample" class="btn btn-ghost">View Sample</a>
 </div>
 

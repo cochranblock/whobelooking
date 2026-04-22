@@ -558,8 +558,8 @@ fn test_demo_no_full_ips() -> Result<(), String> {
 }
 
 fn test_demo_has_cta() -> Result<(), String> {
-    if !DEMO.contains("mcochran@cochranblock.org") {
-        return Err("demo must have email CTA".into());
+    if !DEMO.contains("/order") {
+        return Err("demo CTA must link to /order".into());
     }
     if !DEMO.contains("$150") {
         return Err("demo must show starting price".into());
