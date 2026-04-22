@@ -26,6 +26,7 @@ fn orders_dir() -> std::path::PathBuf {
     let _ = std::fs::create_dir_all(dir.join("pending"));
     let _ = std::fs::create_dir_all(dir.join("approved"));
     let _ = std::fs::create_dir_all(dir.join("rejected"));
+    let _ = std::fs::create_dir_all(dir.join("ready"));
     dir
 }
 
@@ -67,7 +68,7 @@ pub async fn dashboard(Query(q): Query<AdminQuery>) -> Html<String> {
     let base = orders_dir();
     let mut rows = String::new();
 
-    for folder in ["pending", "approved", "rejected"] {
+    for folder in ["pending", "approved", "rejected", "ready"] {
         let dir = base.join(folder);
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {

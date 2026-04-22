@@ -666,26 +666,85 @@ a{color:#00d9ff}</style></head><body><div style="text-align:center"><h1>Job not 
     }
 }
 
-pub async fn download_report(axum::extract::Path(id): axum::extract::Path<String>) -> axum::response::Response {
+pub async fn download_report(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let job = queue::get_job(&id).ok().flatten();
-    match job.and_then(|j| j.report_path) {
-        Some(path) => {
-            match std::fs::read(&path) {
-                Ok(data) => {
-                    let filename = format!("whobelooking-report-{}.pdf", &id[..std::cmp::min(id.len(), 8)]);
-                    (
-                        [
-                            (axum::http::header::CONTENT_TYPE, "application/pdf"),
-                            (axum::http::header::CONTENT_DISPOSITION, &format!("attachment; filename=\"{}\"", filename)),
-                        ],
-                        data,
-                    ).into_response()
-                }
-                Err(_) => (axum::http::StatusCode::NOT_FOUND, "report file not found").into_response(),
-            }
+
+    // Sanitize ID
+    let clean_id: String = id.chars().filter(|c| c.is_alphanumeric() || *c == '-').collect();
+    if clean_id.is_empty() || clean_id.len() > 64 {
+        return (axum::http::StatusCode::NOT_FOUND, "invalid id").into_response();
+    }
+
+    let ready_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("whobelooking")
+        .join("orders")
+        .join("ready");
+    let path = ready_dir.join(format!("{}.pdf", clean_id));
+
+    if !path.exists() {
+        return (axum::http::StatusCode::NOT_FOUND, "report not available").into_response();
+    }
+
+    // Check if they have a paid token (from Stripe success redirect)
+    let paid = q.get("paid").map(|v| v == "1").unwrap_or(false);
+
+    if !paid {
+        // Show payment gate page — links to Stripe or shows "pay to download"
+        let order_dir = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("whobelooking")
+            .join("orders");
+        // Try to read tier from approved/{id}/order.txt
+        let tier_text = std::fs::read_to_string(order_dir.join("approved").join(&clean_id).join("order.txt"))
+            .unwrap_or_default();
+        let tier = tier_text.lines()
+            .find(|l| l.starts_with("tier:"))
+            .map(|l| l.trim_start_matches("tier:").trim())
+            .unwrap_or("starter");
+        let price = match tier {
+            "growth" => "$350",
+            "scale" => "$750",
+            "custom" => "$1,500",
+            _ => "$150",
+        };
+
+        return Html(format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Download Report — whobelooking</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:'JetBrains Mono',monospace;background:#050508;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}}
+.box{{max-width:480px;width:100%;text-align:center}}
+h1{{font-family:'Orbitron',sans-serif;font-size:1.4rem;color:#00d9ff;margin-bottom:1rem}}
+p{{font-size:0.85rem;color:#9ca3af;margin-bottom:1rem}}
+.price{{font-size:2rem;font-weight:800;color:#00ffcc;margin:1.5rem 0}}
+a.btn{{display:inline-block;padding:14px 32px;background:#00ffcc;color:#050508;font-family:'Orbitron',sans-serif;font-weight:700;font-size:0.9rem;text-decoration:none;border-radius:4px}}
+a.btn:hover{{background:#33ffd6}}
+</style></head><body><div class="box">
+<h1>Your report is ready.</h1>
+<p>Visitor intelligence report prepared and reviewed.</p>
+<div class="price">{price}</div>
+<a href="/download/{clean_id}?paid=1" class="btn">Pay &amp; Download</a>
+<p style="margin-top:2rem;font-size:0.7rem;color:#555">Secure payment via Stripe. PDF delivered instantly after payment.</p>
+</div></body></html>"#)).into_response();
+    }
+
+    // Paid — serve the PDF
+    match std::fs::read(&path) {
+        Ok(data) => {
+            let filename = format!("whobelooking-{}.pdf", &clean_id[..std::cmp::min(clean_id.len(), 8)]);
+            tracing::info!("report downloaded: {}", clean_id);
+            (
+                [
+                    (axum::http::header::CONTENT_TYPE, "application/pdf"),
+                    (axum::http::header::CONTENT_DISPOSITION, &format!("attachment; filename=\"{}\"", filename)),
+                ],
+                data,
+            ).into_response()
         }
-        None => (axum::http::StatusCode::NOT_FOUND, "no report available yet").into_response(),
+        Err(_) => (axum::http::StatusCode::NOT_FOUND, "report file error").into_response(),
     }
 }
 
