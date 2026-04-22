@@ -36,7 +36,7 @@ sled = "0.34"
 dirs = "5"
 zstd = "0.13"
 uuid = { version = "1", features = ["v4"] }
-axum = { version = "0.8", features = ["macros"], optional = true }
+axum = { version = "0.8", features = ["macros", "multipart"], optional = true }
 tower-http = { version = "0.6", features = ["compression-zstd", "trace", "set-header"], optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

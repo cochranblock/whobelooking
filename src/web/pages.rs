@@ -623,6 +623,72 @@ p{{font-size:0.8rem;color:#9ca3af;margin-top:1.5rem}}a{{color:#00d9ff;text-decor
 </div></body></html>"#))
 }
 
+pub async fn job_status(axum::extract::Path(id): axum::extract::Path<String>) -> Html<String> {
+    let job = queue::get_job(&id).ok().flatten();
+    match job {
+        Some(j) => {
+            let (status_text, status_color, download) = match j.status {
+                queue::JobStatus::Paid => ("Payment received. Queued for analysis.", "#00d9ff", String::new()),
+                queue::JobStatus::Pending => ("In the queue. Analysis starting soon.", "#9d4edd", String::new()),
+                queue::JobStatus::InProgress => ("Analysis in progress. Your report is being prepared.", "#ff6b35", String::new()),
+                queue::JobStatus::Complete => ("Report complete.", "#00ffcc",
+                    format!(r#"<a href="/download/{}" style="display:inline-block;padding:12px 28px;background:#00ffcc;color:#050508;font-family:'Orbitron',sans-serif;font-weight:700;font-size:0.85rem;text-decoration:none;border-radius:4px;margin-top:1rem">Download Report</a>"#, j.id)),
+                queue::JobStatus::Delivered => ("Report delivered.", "#555",
+                    format!(r#"<a href="/download/{}" style="display:inline-block;padding:12px 28px;background:#555;color:#e8e8e8;font-family:'Orbitron',sans-serif;font-weight:700;font-size:0.85rem;text-decoration:none;border-radius:4px;margin-top:1rem">Download Report</a>"#, j.id)),
+            };
+            Html(format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Status — whobelooking</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:'JetBrains Mono',monospace;background:#050508;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}}
+.box{{max-width:500px;width:100%;text-align:center}}
+h1{{font-family:'Orbitron',sans-serif;font-size:1.4rem;color:{status_color};margin-bottom:1rem}}
+.ref{{font-size:0.7rem;color:#555;margin-bottom:1.5rem}}
+p{{font-size:0.85rem;color:#9ca3af;margin-bottom:1rem}}
+a.back{{color:#00d9ff;text-decoration:none;font-size:0.8rem}}
+</style></head><body><div class="box">
+<h1>{status_text}</h1>
+<div class="ref">{short_id}</div>
+<p>{tier} &middot; {hours:.1} hours estimated</p>
+{download}
+<p style="margin-top:2rem"><a class="back" href="/">&larr; whobelooking.org</a></p>
+</div></body></html>"#,
+                status_color = status_color,
+                status_text = status_text,
+                short_id = &j.id[..std::cmp::min(j.id.len(), 12)],
+                tier = j.tier.label(),
+                hours = j.estimated_hours,
+                download = download,
+            ))
+        }
+        None => Html(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>Not Found</title>
+<style>body{font-family:monospace;background:#050508;color:#ff6b35;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+a{color:#00d9ff}</style></head><body><div style="text-align:center"><h1>Job not found</h1><p><a href="/">whobelooking.org</a></p></div></body></html>"#.into()),
+    }
+}
+
+pub async fn download_report(axum::extract::Path(id): axum::extract::Path<String>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let job = queue::get_job(&id).ok().flatten();
+    match job.and_then(|j| j.report_path) {
+        Some(path) => {
+            match std::fs::read(&path) {
+                Ok(data) => {
+                    let filename = format!("whobelooking-report-{}.pdf", &id[..std::cmp::min(id.len(), 8)]);
+                    (
+                        [
+                            (axum::http::header::CONTENT_TYPE, "application/pdf"),
+                            (axum::http::header::CONTENT_DISPOSITION, &format!("attachment; filename=\"{}\"", filename)),
+                        ],
+                        data,
+                    ).into_response()
+                }
+                Err(_) => (axum::http::StatusCode::NOT_FOUND, "report file not found").into_response(),
+            }
+        }
+        None => (axum::http::StatusCode::NOT_FOUND, "no report available yet").into_response(),
+    }
+}
+
 pub async fn health() -> &'static str {
     "ok"
 }
