@@ -3,7 +3,180 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>whobelooking — Live Demo</title>
+<title>whobelooking — Visitor Intelligence Platform | Who's Looking at Your Site?</title>
+<meta name="description" content="Visitor intelligence platform. We tell you which companies are silently evaluating your site, which pages they read, and what it means. Cloudflare, access logs, any IP source. Starting at $150. Reviewed by a USCYBERCOM operator.">
+<meta name="keywords" content="visitor intelligence, IP attribution, company identification, reverse DNS, whois, threat detection, Cloudflare analytics, website visitors, corporate traffic, OSINT, cybersecurity">
+<meta name="author" content="Michael Cochran, The Cochran Block, LLC">
+<meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">
+
+<!-- Open Graph -->
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://whobelooking.org/">
+<meta property="og:title" content="whobelooking — Who's Looking at Your Site?">
+<meta property="og:description" content="We caught Microsoft evaluating us across 14 IPs over 8 days. Total marketing spend: $0. Want to know who's looking at yours? Starting at $150.">
+<meta property="og:site_name" content="whobelooking">
+<meta property="og:locale" content="en_US">
+
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="whobelooking — Visitor Intelligence">
+<meta name="twitter:description" content="Which companies are silently evaluating your site? We tell you. $150.">
+
+<!-- Canonical -->
+<link rel="canonical" href="https://whobelooking.org/">
+
+<!-- JSON-LD Structured Data -->
+<script type="application/ld+json">
+[
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "whobelooking",
+    "applicationCategory": "SecurityApplication",
+    "operatingSystem": "Linux, macOS",
+    "description": "Visitor intelligence platform that identifies which companies are visiting your website using reverse DNS, /24 neighbor scanning, RDAP whois lookups, and enrichment caching. Accepts any IP source: Cloudflare, access logs, CSV, JSON. Reports reviewed by a USCYBERCOM operator.",
+    "url": "https://whobelooking.org",
+    "author": {
+      "@type": "Organization",
+      "name": "The Cochran Block, LLC",
+      "url": "https://cochranblock.org",
+      "founder": {
+        "@type": "Person",
+        "name": "Michael Cochran",
+        "jobTitle": "Founder & Operator",
+        "description": "Army 17C Cyber Operations, USCYBERCOM J38, 13 years defense and enterprise",
+        "url": "https://www.linkedin.com/in/cochranblock"
+      }
+    },
+    "offers": [
+      {
+        "@type": "Offer",
+        "name": "Starter Report",
+        "description": "Visitor intelligence report for sites with under 500 unique IPs per week",
+        "price": "150.00",
+        "priceCurrency": "USD"
+      },
+      {
+        "@type": "Offer",
+        "name": "Growth Report",
+        "description": "Visitor intelligence report for sites with 500-2,000 unique IPs per week",
+        "price": "350.00",
+        "priceCurrency": "USD"
+      },
+      {
+        "@type": "Offer",
+        "name": "Scale Report",
+        "description": "Visitor intelligence report for sites with 2,000-10,000 unique IPs per week",
+        "price": "750.00",
+        "priceCurrency": "USD"
+      },
+      {
+        "@type": "Offer",
+        "name": "Custom Report",
+        "description": "Visitor intelligence report for high-traffic sites with 10,000+ unique IPs per week",
+        "price": "1500.00",
+        "priceCurrency": "USD"
+      }
+    ]
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {
+        "@type": "Question",
+        "name": "What is whobelooking?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "whobelooking is a visitor intelligence platform that tells you which companies are silently evaluating your website. It uses reverse DNS, /24 neighbor scanning, RDAP whois lookups, and an enrichment cache to identify corporate visitors by IP. Every report is manually reviewed by a USCYBERCOM operator. It accepts any IP source: Cloudflare, access logs, CSV, or JSON."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How does whobelooking work?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "You provide traffic data (Cloudflare credentials, server access logs, or CSV). whobelooking runs each IP through reverse DNS, /24 network neighbor scanning, RDAP whois lookups, and company identification. Results are cached in an enrichment database that gets smarter with every report. A USCYBERCOM operator reviews the output and delivers a PDF intelligence report with company identifications, behavioral analysis, threat detection, and recommendations."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How much does whobelooking cost?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Pricing scales with traffic volume. Starter: $150 for sites with under 500 unique IPs/week. Growth: $350 for 500-2,000 IPs. Scale: $750 for 2,000-10,000 IPs. Custom: $1,500+ for 10,000+ IPs. Every report is manually reviewed. Government purchase cards accepted (all tiers under $10K micro-purchase threshold)."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "What is the enrichment flywheel?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Every report caches IP-to-company mappings in the enrichment database. When whobelooking resolves that 74.179.x.x belongs to Microsoft, that mapping helps every future customer. The more reports run, the more IPs are resolved, the faster and more accurate every report becomes. Early customers build the database and get early adopter pricing."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Can whobelooking detect threats?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Yes. whobelooking identifies attack probes (such as attempts to access .env files, .aws/credentials, .git/config, or other sensitive paths), attributes them to specific organizations via whois, and can recommend Cloudflare firewall blocks. In one real case, a targeted attack from Spain probing AI developer environments was detected, attributed, and the entire /24 was blocked in under 10 minutes."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "What data sources does whobelooking accept?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "whobelooking is platform-agnostic. It accepts: Cloudflare zone credentials (Zone ID + read-only API token), server access logs (nginx, Apache, Caddy), CSV files (ip, path, timestamp columns), and JSON arrays. Vercel and Netlify API integrations are planned."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Who reviews the reports?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Every report is manually reviewed by Michael Cochran — Army 17C (Cyber Operations), USCYBERCOM J38 JMOC-E development lead, 13 years defense and enterprise experience. Automation is gated behind a creator certification process: the AI analysis must match the creator's manual results at 90%+ accuracy before being allowed to run unsupervised."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Is whobelooking related to KNOXAI?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "whobelooking is one of seven products in The Cochran Block portfolio, all built on the same zero-cloud Rust architecture. KNOXAI is the AI model certification platform. whobelooking provides visitor intelligence. Both share the same enrichment pipeline, the same Diamond Rust Binary build discipline, and the same operator. The enrichment cache feeds into KNOXAI's threat detection capabilities."
+        }
+      }
+    ]
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    "name": "The Cochran Block, LLC",
+    "alternateName": "whobelooking",
+    "url": "https://whobelooking.org",
+    "description": "Visitor intelligence and AI model certification. Veteran-owned. Zero-cloud Rust architecture.",
+    "foundingDate": "2026",
+    "founder": {
+      "@type": "Person",
+      "name": "Michael Cochran"
+    },
+    "address": {
+      "@type": "PostalAddress",
+      "addressLocality": "Dundalk",
+      "addressRegion": "MD",
+      "postalCode": "21222",
+      "addressCountry": "US"
+    },
+    "sameAs": [
+      "https://cochranblock.org",
+      "https://knox.cochranblock.org",
+      "https://www.linkedin.com/in/cochranblock"
+    ]
+  }
+]
+</script>
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>

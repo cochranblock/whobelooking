@@ -627,6 +627,10 @@ pub async fn health() -> &'static str {
     "ok"
 }
 
+pub async fn robots() -> &'static str {
+    "User-agent: *\nAllow: /\n\nUser-agent: GPTBot\nAllow: /\n\nUser-agent: ChatGPT-User\nAllow: /\n\nUser-agent: Google-Extended\nAllow: /\n\nUser-agent: Applebot-Extended\nAllow: /\n\nUser-agent: anthropic-ai\nAllow: /\n\nSitemap: https://whobelooking.org/sitemap.xml"
+}
+
 pub async fn not_found(uri: axum::http::Uri) -> (axum::http::StatusCode, Html<&'static str>) {
     let _ = uri; // consumed for type matching
     (axum::http::StatusCode::NOT_FOUND,
