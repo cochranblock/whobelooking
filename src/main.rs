@@ -1,8 +1,10 @@
 // All Rights Reserved — The Cochran Block, LLC
 // Contributors: GotEmCoach, KOVA, Claude Opus 4.6
-//! whobelooking — Two modes:
-//! 1. Visitor ID: Cloudflare → rDNS → /24 neighbor scan → company ID.
-//! 2. Contract Scout: SAM.gov + USASpending + SBIR load-balanced queries → sled cache → report.
+//! whobelooking — Visitor intelligence platform.
+//!
+//! - Visitor ID: Cloudflare → rDNS → /24 neighbor scan → company ID.
+//! - Contract Scout: SAM.gov + USASpending + SBIR load-balanced queries → sled cache → report.
+//!
 //! One binary. Zero cloud.
 
 use clap::Parser;
@@ -878,8 +880,8 @@ mod scout {
 
         println!("\n  LOOT TABLE — OPEN BIDS ({} found)", rpt.bids.len());
         println!(
-            "  {:<6} {:<10} {:<12} {:<48} {}",
-            "Match", "Source", "Deadline", "Title", "Agency"
+            "  {:<6} {:<10} {:<12} {:<48} Agency",
+            "Match", "Source", "Deadline", "Title"
         );
         println!("  {}", "-".repeat(115));
         for (score, b) in &scored_bids {
@@ -915,10 +917,7 @@ mod scout {
             "\n  SCOREBOARD — WHO'S WINNING ({} awards)",
             sorted_awards.len()
         );
-        println!(
-            "  {:<12} {:<12} {:<38} {}",
-            "Amount", "NAICS", "Winner", "Agency"
-        );
+        println!("  {:<12} {:<12} {:<38} Agency", "Amount", "NAICS", "Winner");
         println!("  {}", "-".repeat(105));
         let mut your_range = 0u32;
         for a in &sorted_awards {
@@ -960,10 +959,7 @@ mod scout {
             "\n  RADAR — PIPELINE SIGNALS ({} detected)",
             rpt.signals.len()
         );
-        println!(
-            "  {:<8} {:<12} {:<58} {}",
-            "Source", "Date", "Title", "Agency"
-        );
+        println!("  {:<8} {:<12} {:<58} Agency", "Source", "Date", "Title");
         println!("  {}", "-".repeat(105));
         for s in rpt.signals.iter().take(30) {
             let title = if s.title.len() > 56 {
@@ -987,7 +983,7 @@ mod scout {
             "\n  MARKET RATES — WHAT THEY CHARGE ({} benchmarks)",
             rpt.rates.len()
         );
-        println!("  {:<10} {:<38} {}", "$/hr", "Labor Category", "Vendor");
+        println!("  {:<10} {:<38} Vendor", "$/hr", "Labor Category");
         println!("  {}", "-".repeat(75));
         for r in &rpt.rates {
             let cat = if r.labor_category.len() > 36 {
@@ -1560,7 +1556,7 @@ mod cf {
     ) -> anyhow::Result<Vec<Visitor>> {
         let date = date
             .map(|d| d.to_string())
-            .unwrap_or_else(|| chrono_free_today());
+            .unwrap_or_else(chrono_free_today);
 
         let query = format!(
             r#"{{ viewer {{ zones(filter: {{zoneTag: "{}"}}) {{ httpRequestsAdaptiveGroups(limit: 200, filter: {{date: "{}", clientCountryName: "{}"}}, orderBy: [count_DESC]) {{ count dimensions {{ clientIP }} }} }} }} }}"#,
@@ -1756,7 +1752,7 @@ mod report {
         eprintln!("running rDNS on {} IPs...", ips.len());
         let rdns_results = dns::rdns_batch(&ips).await;
 
-        println!("{:<6} {:<42} {:<55} {}", "Hits", "IP", "rDNS", "Neighbors");
+        println!("{:<6} {:<42} {:<55} Neighbors", "Hits", "IP", "rDNS");
         println!("{}", "=".repeat(130));
 
         for (v, (_ip, rdns)) in visitors.iter().zip(rdns_results.iter()) {

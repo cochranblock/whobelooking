@@ -32,7 +32,8 @@ fn decompress(data: &[u8]) -> Vec<u8> {
     zstd::decode_all(data).unwrap_or_else(|_| data.to_vec())
 }
 
-/// Create a new job in the queue.
+/// Create a new job in the queue. Reserved for Phase 2 sled-backed persistence.
+#[allow(dead_code)] // Phase 2: filesystem orders migrate to sled
 pub fn create_job(email: &str, source_type: SourceType, tier: Tier) -> anyhow::Result<String> {
     let db = open_db();
     let id = uuid::Uuid::new_v4().to_string();
@@ -104,10 +105,10 @@ pub fn pop_job() -> anyhow::Result<Option<Job>> {
         let (_, v) = item?;
         let raw = decompress(&v);
         if let Ok(job) = serde_json::from_slice::<Job>(&raw) {
-            if job.status == JobStatus::Paid || job.status == JobStatus::Pending {
-                if oldest.is_none() || job.created_at < oldest.as_ref().unwrap().created_at {
-                    oldest = Some(job);
-                }
+            if (job.status == JobStatus::Paid || job.status == JobStatus::Pending)
+                && (oldest.is_none() || job.created_at < oldest.as_ref().unwrap().created_at)
+            {
+                oldest = Some(job);
             }
         }
     }

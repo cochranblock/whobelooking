@@ -158,14 +158,3 @@ Upload report: <code>cp report.pdf approved/{{id}}/report.pdf</code>
         rows = rows,
     ))
 }
-
-// Remove upload/done/deliver handlers — filesystem handles it
-pub async fn mark_done() -> &'static str {
-    "use filesystem"
-}
-pub async fn mark_delivered() -> &'static str {
-    "use filesystem"
-}
-pub async fn upload_report() -> &'static str {
-    "use filesystem"
-}
