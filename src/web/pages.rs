@@ -689,8 +689,33 @@ pub async fn download_report(
         return (axum::http::StatusCode::NOT_FOUND, "report not available").into_response();
     }
 
-    // Check if they have a paid token (from Stripe success redirect)
-    let paid = q.get("paid").map(|v| v == "1").unwrap_or(false);
+    // Verify payment via Stripe session ID — not a guessable param
+    let session_id = q.get("session_id").cloned().unwrap_or_default();
+    let paid = if !session_id.is_empty() {
+        // Verify the session is actually paid by checking with Stripe
+        let stripe_key = std::env::var("STRIPE_SECRET_KEY").unwrap_or_default();
+        if !stripe_key.is_empty() {
+            let client = reqwest::Client::new();
+            let url = format!("https://api.stripe.com/v1/checkout/sessions/{}", session_id);
+            match client.get(&url)
+                .header("Authorization", format!("Bearer {}", stripe_key))
+                .send().await
+            {
+                Ok(resp) => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(body) => body["payment_status"].as_str() == Some("paid"),
+                        Err(_) => false,
+                    }
+                }
+                Err(_) => false,
+            }
+        } else {
+            // Dev mode — no Stripe key, allow download
+            q.get("paid").map(|v| v == "1").unwrap_or(false)
+        }
+    } else {
+        false
+    };
 
     if !paid {
         // Show payment gate page — links to Stripe or shows "pay to download"
@@ -729,7 +754,7 @@ pub async fn download_report(
                 ("line_items[0][price_data][unit_amount]", &price_cents.to_string()),
                 ("line_items[0][price_data][product_data][name]", "whobelooking Intelligence Report"),
                 ("line_items[0][quantity]", "1"),
-                ("success_url", &format!("https://whobelooking.org/download/{}?paid=1", clean_id)),
+                ("success_url", &format!("https://whobelooking.org/download/{}?session_id={{CHECKOUT_SESSION_ID}}", clean_id)),
                 ("cancel_url", &format!("https://whobelooking.org/download/{}", clean_id)),
             ];
             if let Ok(resp) = client.post("https://api.stripe.com/v1/checkout/sessions")
