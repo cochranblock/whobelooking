@@ -544,26 +544,55 @@ body::before {{
 pub async fn order_form() -> Html<&'static str> {
     Html(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Order — whobelooking</title>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Instrument+Serif:ital@1&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&family=Rajdhani:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'JetBrains Mono',monospace;background:#050508;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}
-.box{max-width:480px;width:100%}h1{font-family:'Instrument Serif',serif;font-style:italic;font-size:2rem;color:#00d9ff;font-weight:400;margin-bottom:1.5rem}
-p{margin-bottom:1rem;font-size:0.85rem;color:#9ca3af;line-height:1.6}a{color:#00d9ff;text-decoration:none;border-bottom:1px solid rgba(255,216,102,0.3)}a:hover{border-color:#00d9ff}
-strong{color:#e8e8e8}
-ul{margin:1rem 0 1.5rem 1.2rem;font-size:0.85rem;color:#9ca3af}li{margin-bottom:0.4rem}
-.btn{display:inline-block;padding:10px 28px;background:#00d9ff;color:#050508;font-family:inherit;font-weight:700;font-size:0.85rem;text-decoration:none;border:none;margin-top:1rem;letter-spacing:0.05em}
+.box{max-width:500px;width:100%}
+h1{font-family:'Orbitron',sans-serif;font-size:1.6rem;color:#00d9ff;margin-bottom:1.5rem}
+p{margin-bottom:1rem;font-size:0.85rem;color:#9ca3af;line-height:1.6}
+a{color:#00d9ff;text-decoration:none;border-bottom:1px solid rgba(0,217,255,0.3)}a:hover{border-color:#00d9ff}
+label{display:block;font-size:0.7rem;color:#9ca3af;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:4px;margin-top:16px}
+input,select{width:100%;padding:10px;font-family:'JetBrains Mono',monospace;font-size:0.85rem;background:#0d0d14;border:1px solid rgba(0,217,255,0.15);color:#e8e8e8;border-radius:4px}
+input:focus,select:focus{border-color:#00d9ff;outline:none}
+select{cursor:pointer}
+.tier-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:16px 0}
+.tier-opt{padding:12px;background:#0d0d14;border:1px solid rgba(0,217,255,0.15);border-radius:4px;cursor:pointer;text-align:center;transition:border-color 0.15s}
+.tier-opt:hover{border-color:#00d9ff}
+.tier-opt.selected{border-color:#00d9ff;background:rgba(0,217,255,0.05)}
+.tier-opt input[type=radio]{display:none}
+.tier-price{font-size:1.2rem;font-weight:700;color:#00d9ff}
+.tier-name{font-size:0.65rem;color:#9ca3af;letter-spacing:0.1em;text-transform:uppercase;margin-top:4px}
+.tier-ips{font-size:0.6rem;color:#555;margin-top:2px}
+.btn{display:block;width:100%;padding:14px;background:#00d9ff;color:#050508;font-family:'Orbitron',sans-serif;font-weight:700;font-size:0.9rem;border:none;cursor:pointer;letter-spacing:0.05em;margin-top:20px;border-radius:4px}
+.btn:hover{background:#33e1ff}
+.note{font-size:0.7rem;color:#555;margin-top:12px;text-align:center}
 </style></head><body><div class="box">
-<h1>Request a report.</h1>
-<p>Email <strong><a href="mailto:mcochran@cochranblock.org?subject=whobelooking%20report%20request">mcochran@cochranblock.org</a></strong> with:</p>
-<ul>
-<li>Your site URL</li>
-<li>Source type — Cloudflare, access log, or CSV</li>
-<li>Credentials or log file attached</li>
-<li>Which tier fits — Starter ($150), Growth ($350), Scale ($750), or Custom</li>
-</ul>
-<p>You'll get a confirmation with a payment link and estimated delivery within 24 hours.</p>
-<a href="mailto:mcochran@cochranblock.org?subject=whobelooking%20report%20request" class="btn">Send Request</a>
-<p style="margin-top:2rem"><a href="/">&larr; whobelooking.org</a></p>
-</div></body></html>"#)
+<h1>Order a report.</h1>
+<form action="/order/checkout" method="POST">
+<label>Email</label>
+<input type="email" name="email" required placeholder="you@company.com">
+<label>Site URL</label>
+<input type="url" name="site_url" required placeholder="https://yoursite.com">
+<label>Data Source</label>
+<select name="source_type">
+<option value="cloudflare">Cloudflare (Zone ID + API Token)</option>
+<option value="accesslog">Access Log (nginx / Apache / Caddy)</option>
+<option value="csv">CSV (ip, path, timestamp)</option>
+<option value="json">JSON array</option>
+</select>
+<label>Tier</label>
+<div class="tier-grid">
+<label class="tier-opt selected" onclick="selectTier(this)"><input type="radio" name="tier" value="starter" checked><div class="tier-price">$150</div><div class="tier-name">Starter</div><div class="tier-ips">&lt;500 IPs</div></label>
+<label class="tier-opt" onclick="selectTier(this)"><input type="radio" name="tier" value="growth"><div class="tier-price">$350</div><div class="tier-name">Growth</div><div class="tier-ips">500-2K IPs</div></label>
+<label class="tier-opt" onclick="selectTier(this)"><input type="radio" name="tier" value="scale"><div class="tier-price">$750</div><div class="tier-name">Scale</div><div class="tier-ips">2K-10K IPs</div></label>
+<label class="tier-opt" onclick="selectTier(this)"><input type="radio" name="tier" value="custom"><div class="tier-price">$1,500+</div><div class="tier-name">Custom</div><div class="tier-ips">10K+ IPs</div></label>
+</div>
+<button type="submit" class="btn">Pay &amp; Join Queue</button>
+</form>
+<p class="note">Secure checkout via Stripe. Report delivered within 48 hours.<br>Reviewed by a USCYBERCOM operator.</p>
+<p style="margin-top:1.5rem;text-align:center"><a href="/">&larr; whobelooking.org</a></p>
+</div>
+<script>function selectTier(el){document.querySelectorAll('.tier-opt').forEach(function(e){e.classList.remove('selected')});el.classList.add('selected');el.querySelector('input').checked=true;}</script>
+</body></html>"#)
 }
 
 pub async fn queue_status() -> Html<String> {

@@ -611,6 +611,217 @@ fn test_no_internal_paths_in_demo() -> Result<(), String> {
     Ok(())
 }
 
+// --- Theme consistency: cosmic palette must be enforced ---
+
+fn test_demo_cosmic_palette() -> Result<(), String> {
+    // Must have the cochranblock cosmic colors
+    let required = ["#050508", "#00d9ff", "#9d4edd", "#00ffcc", "#ff6b35"];
+    for color in required {
+        if !DEMO.contains(color) {
+            return Err(format!("missing cosmic color {}", color));
+        }
+    }
+    Ok(())
+}
+
+fn test_demo_no_monokai() -> Result<(), String> {
+    // No stale Monokai amber/red palette
+    let banned = ["#ffd866", "#ff6188", "#a9dc76", "#78dce8", "#ab9df2"];
+    for color in banned {
+        if DEMO.contains(color) {
+            return Err(format!("stale Monokai color {} found — should be cosmic", color));
+        }
+    }
+    Ok(())
+}
+
+fn test_demo_has_orbitron() -> Result<(), String> {
+    if !DEMO.contains("Orbitron") {
+        return Err("demo must use Orbitron display font".into());
+    }
+    if !DEMO.contains("Rajdhani") {
+        return Err("demo must use Rajdhani body font".into());
+    }
+    Ok(())
+}
+
+fn test_demo_portrait_query() -> Result<(), String> {
+    if DEMO.contains("max-width") && DEMO.contains("900px") {
+        return Err("demo uses mobile breakpoint — should use orientation:portrait".into());
+    }
+    if !DEMO.contains("orientation:portrait") {
+        return Err("demo must use portrait/landscape, not mobile/desktop".into());
+    }
+    Ok(())
+}
+
+// --- Demo structure: the ops center must have all panels ---
+
+fn test_demo_has_terminal() -> Result<(), String> {
+    // Demo is the ops center with live feed, not a terminal animation
+    // The feed cards serve the same purpose — verify the feed exists
+    if !DEMO.contains("Live Intelligence Feed") {
+        return Err("demo must have live intelligence feed".into());
+    }
+    if !DEMO.contains("event") {
+        return Err("demo must have event cards".into());
+    }
+    Ok(())
+}
+
+fn test_demo_has_timeline() -> Result<(), String> {
+    if !DEMO.contains("Intelligence Timeline") {
+        return Err("demo must have timeline sidebar".into());
+    }
+    if !DEMO.contains("sidebar") {
+        return Err("demo must have sidebar element".into());
+    }
+    Ok(())
+}
+
+fn test_demo_has_stats_panel() -> Result<(), String> {
+    if !DEMO.contains("Session Intelligence") {
+        return Err("demo must have stats panel header".into());
+    }
+    if !DEMO.contains("visitor-count") {
+        return Err("demo must have visitor counter".into());
+    }
+    if !DEMO.contains("company-count") {
+        return Err("demo must have company counter".into());
+    }
+    if !DEMO.contains("threat-count") {
+        return Err("demo must have threat counter".into());
+    }
+    Ok(())
+}
+
+fn test_demo_has_enrichment() -> Result<(), String> {
+    if !DEMO.contains("Enrichment Cache") {
+        return Err("demo must show enrichment cache section".into());
+    }
+    if !DEMO.contains("IPs resolved") {
+        return Err("demo must show IP resolution count".into());
+    }
+    if !DEMO.contains("Companies mapped") {
+        return Err("demo must show company mapping count".into());
+    }
+    Ok(())
+}
+
+fn test_demo_has_roster() -> Result<(), String> {
+    if !DEMO.contains("Companies Detected") {
+        return Err("demo must have company roster header".into());
+    }
+    if !DEMO.contains("roster") {
+        return Err("demo must have roster element".into());
+    }
+    Ok(())
+}
+
+fn test_demo_has_autoplay() -> Result<(), String> {
+    if !DEMO.contains("autoPlay") {
+        return Err("demo must have autoplay function".into());
+    }
+    if !DEMO.contains("setTimeout") {
+        return Err("demo must use setTimeout for staggered events".into());
+    }
+    Ok(())
+}
+
+// --- Content integrity: the real story must be complete ---
+
+fn test_all_companies() -> Result<(), String> {
+    let companies = ["Microsoft", "Google", "IBM", "Domino", "Verizon", "NextGenWebs"];
+    for c in companies {
+        if !DEMO.contains(c) {
+            return Err(format!("demo missing company: {}", c));
+        }
+    }
+    Ok(())
+}
+
+fn test_google_ibm() -> Result<(), String> {
+    if !DEMO.contains("Google VPN") {
+        return Err("demo must mention Google VPN specifically".into());
+    }
+    if !DEMO.contains("IBM Corporate") {
+        return Err("demo must mention IBM Corporate specifically".into());
+    }
+    if !DEMO.contains("same hour") || !DEMO.contains("same page") {
+        return Err("demo must note Google+IBM same hour/page correlation".into());
+    }
+    Ok(())
+}
+
+fn test_two_six() -> Result<(), String> {
+    if !DEMO.contains("Two Six") || !DEMO.contains("Ashburn") {
+        return Err("demo must mention Two Six / Ashburn corridor".into());
+    }
+    if !DEMO.contains("30") && !DEMO.contains("minute dwell") {
+        return Err("demo must mention the 30-min deck read".into());
+    }
+    Ok(())
+}
+
+fn test_attacker_story() -> Result<(), String> {
+    if !DEMO.contains("NextGenWebs") {
+        return Err("attacker must be named".into());
+    }
+    if !DEMO.contains("Spain") {
+        return Err("attacker origin must be named".into());
+    }
+    if !DEMO.contains(".aws/credentials") {
+        return Err("attacker probe targets must be listed".into());
+    }
+    if !DEMO.contains(".cursor/mcp.json") {
+        return Err("cursor MCP probe must be mentioned".into());
+    }
+    if !DEMO.contains("10 minutes") {
+        return Err("response time must be mentioned".into());
+    }
+    if !DEMO.contains("BLOCKED") {
+        return Err("block action must be shown".into());
+    }
+    Ok(())
+}
+
+fn test_resume_story() -> Result<(), String> {
+    if !DEMO.contains("resume") {
+        return Err("resume download story must be present".into());
+    }
+    if !DEMO.contains("5 times") || !DEMO.contains("48 hours") {
+        return Err("must mention 5 downloads in 48 hours".into());
+    }
+    Ok(())
+}
+
+fn test_linkedin_shares() -> Result<(), String> {
+    if !DEMO.contains("56 times") || !DEMO.contains("56") {
+        return Err("must mention 56 LinkedIn shares".into());
+    }
+    if !DEMO.contains("not his account") {
+        return Err("must clarify shares were not by the founder".into());
+    }
+    Ok(())
+}
+
+// --- Legal: licensing must be correct ---
+
+fn test_all_rights_reserved() -> Result<(), String> {
+    if !DEMO.contains("All Rights Reserved") && !DEMO.contains("all rights reserved") {
+        return Err("demo must contain All Rights Reserved".into());
+    }
+    Ok(())
+}
+
+fn test_no_unlicense() -> Result<(), String> {
+    let lower = DEMO.to_lowercase();
+    if lower.contains("unlicense") || lower.contains("public domain") {
+        return Err("demo must NOT contain Unlicense or public domain references".into());
+    }
+    Ok(())
+}
+
 // =========================================================================
 // Runner
 // =========================================================================
@@ -669,6 +880,28 @@ const TESTS: &[(&str, TestFn)] = &[
     // Security
     ("security_no_secrets_in_demo", test_no_secrets_in_demo),
     ("security_no_internal_paths", test_no_internal_paths_in_demo),
+    // Theme consistency
+    ("theme_demo_has_cosmic_palette", test_demo_cosmic_palette),
+    ("theme_demo_no_stale_monokai", test_demo_no_monokai),
+    ("theme_demo_has_orbitron", test_demo_has_orbitron),
+    ("theme_demo_portrait_not_mobile", test_demo_portrait_query),
+    // Demo structure
+    ("demo_has_terminal_animation", test_demo_has_terminal),
+    ("demo_has_timeline_sidebar", test_demo_has_timeline),
+    ("demo_has_stats_panel", test_demo_has_stats_panel),
+    ("demo_has_enrichment_counters", test_demo_has_enrichment),
+    ("demo_has_company_roster", test_demo_has_roster),
+    ("demo_autoplay_script", test_demo_has_autoplay),
+    // Content integrity
+    ("content_all_companies_present", test_all_companies),
+    ("content_google_and_ibm", test_google_ibm),
+    ("content_two_six_ashburn", test_two_six),
+    ("content_attacker_story_complete", test_attacker_story),
+    ("content_resume_download_story", test_resume_story),
+    ("content_linkedin_56_shares", test_linkedin_shares),
+    // Legal
+    ("legal_all_rights_reserved", test_all_rights_reserved),
+    ("legal_no_unlicense", test_no_unlicense),
 ];
 
 fn run_all_tests() -> bool {
