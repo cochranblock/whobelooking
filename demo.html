@@ -280,7 +280,7 @@ var days = [
         body: '<span class="ip">88.151.x.x</span> &rarr; NextGenWebs S.L. (Spain)<br>Probed: <span class="blocked">/.aws/credentials</span>, <span class="blocked">/.cursor/mcp.json</span>, <span class="blocked">/.env</span>, <span class="blocked">/.env.local</span><br>Not a script kiddie — <code>.cursor/mcp.json</code> targets AI developer environments specifically.' },
       { time: "7:10 AM ET", type: "threat", tag: "tag-threat", tagText: "BLOCKED",
         title: "Entire /24 blocked at Cloudflare edge",
-        body: 'Detected &rarr; identified (whois) &rarr; blocked via CF API &rarr; <strong>10 minutes, zero damage.</strong><br>Second IP from same /24 (<span class="ip">88.151.x.x</span>) also probing: /.openai/config.json, /secrets.json, /serviceAccountKey.json<br><span class="blocked">88.151.32.0/24 walled. Both attackers dead.</span>' },
+        body: 'Detected &rarr; identified (whois) &rarr; blocked via CF API &rarr; <strong>10 minutes, zero damage.</strong><br>Second IP from same /24 (<span class="ip">88.151.x.x</span>) also probing: /.openai/config.json, /secrets.json, /serviceAccountKey.json<br><span class="blocked">88.151.x.0/24 walled. Both attackers dead.</span>' },
       { time: "12:17 PM ET", type: "institutional", tag: "tag-msft", tagText: "MSFT",
         title: "Microsoft checks /verify — twice",
         body: '<span class="ip">157.55.x.x</span> &rarr; <span class="org">Microsoft Corporation</span><br>Hit <span class="page">/verify</span> twice — checking if certificate verification works.<br>Also: <span class="ip">52.167.x.x</span> reading <span class="page">/deck</span>. <span class="ip">40.77.x.x</span> on homepage.<br><strong>Day 8. Still evaluating. 14 IPs total across 4 network ranges.</strong>' },

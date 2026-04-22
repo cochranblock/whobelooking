@@ -42,13 +42,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chromiumoxide = { version = "0.9", features = ["fetcher", "rustls", "zip8"], optional = true }
 futures = { version = "0.3", optional = true }
+regex-lite = { version = "0.1", optional = true }
 exopack = { git = "ssh://git@github.com/cochranblock/exopack", features = ["triple_sims"], optional = true }
 
 [features]
 default = []
 serve = ["dep:axum", "dep:tower-http"]
 browser = ["dep:chromiumoxide", "dep:futures"]
-tests = ["dep:exopack"]
+tests = ["dep:exopack", "dep:regex-lite"]
 
 [profile.release]
 opt-level = "z"
