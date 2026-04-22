@@ -1,12 +1,12 @@
 // All Rights Reserved — The Cochran Block, LLC
 //! Order submission — credentials encrypted + emailed, never stored on disk.
 
-use crate::crypto;
 use crate::web::admin;
 use axum::Form;
 use axum::extract::Query;
 use axum::response::{Html, IntoResponse, Redirect};
 use serde::Deserialize;
+use whobelooking::crypto;
 
 #[derive(Deserialize)]
 pub struct OrderForm {

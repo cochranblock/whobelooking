@@ -11,7 +11,7 @@ use clap::Parser;
 #[cfg(feature = "browser")]
 use clap::Subcommand;
 
-mod crypto;
+use whobelooking::crypto;
 mod queue;
 #[cfg(feature = "serve")]
 mod web;

@@ -519,3 +519,6 @@ pub mod queue_types {
         pub notes: Option<String>,
     }
 }
+
+#[path = "crypto.rs"]
+pub mod crypto;
