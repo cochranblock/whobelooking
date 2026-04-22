@@ -4,6 +4,12 @@
 use axum::response::Html;
 use crate::queue;
 
+const DEMO_HTML: &str = include_str!("../../demo.html");
+
+pub async fn demo() -> Html<&'static str> {
+    Html(DEMO_HTML)
+}
+
 pub async fn index() -> Html<String> {
     let hours = queue::hours_this_week();
     let (ips, companies) = queue::enrichment_stats();
@@ -494,16 +500,16 @@ body::before {{
 <script>
 (function() {{
   var lines = [
-    ['74.179.68.15', 'Microsoft Corporation', '53 hits', '/deck, /arch, /apply'],
-    ['216.252.222.133', 'Google VPN (Corp)', '4 hits', '/onboarding'],
-    ['180.150.104.211', 'Aussie Broadband (BNE)', '27 hits', '/apply, /deck'],
-    ['135.232.20.19', 'Microsoft Cloud (RIPE)', '22 hits', '/apply, /dcaa, /vre'],
+    ['74.179.x.x', 'Microsoft Corporation', '53 hits', '/deck, /arch, /apply'],
+    ['216.252.x.x', 'Google VPN (Corp)', '4 hits', '/onboarding'],
+    ['180.150.x.x', 'Aussie Broadband (BNE)', '27 hits', '/apply, /deck'],
+    ['135.232.x.x', 'Microsoft Cloud (RIPE)', '22 hits', '/apply, /dcaa, /vre'],
     ['2600:4040:b3b1', 'Verizon Biz (Ashburn)', '1 hit', '/deck [30min dwell]'],
-    ['88.151.34.46', 'NextGenWebs (Spain)', '24 hits', '/.env, /.aws/creds'],
-    ['9.169.121.184', 'IBM Corporate', '392 hits', '/onboarding'],
-    ['67.173.131.11', 'Comcast IL (residential)', '34 hits', '/operators, /deck'],
-    ['174.208.227.162', 'Verizon Wireless (phone)', '16 hits', '/, /govdocs'],
-    ['52.167.144.145', 'Microsoft (resume.pdf)', '1 hit', '/assets/resume.pdf'],
+    ['88.151.x.x', 'NextGenWebs (Spain)', '24 hits', '/.env, /.aws/creds'],
+    ['9.169.x.x', 'IBM Corporate', '392 hits', '/onboarding'],
+    ['67.173.x.x', 'Comcast IL (residential)', '34 hits', '/operators, /deck'],
+    ['174.208.x.x', 'Verizon Wireless (phone)', '16 hits', '/, /govdocs'],
+    ['52.167.x.x', 'Microsoft (resume.pdf)', '1 hit', '/assets/resume.pdf'],
   ];
   var term = document.getElementById('term');
   var i = 0;
@@ -592,12 +598,14 @@ pub async fn health() -> &'static str {
     "ok"
 }
 
-pub async fn not_found() -> Html<&'static str> {
+pub async fn not_found(uri: axum::http::Uri) -> (axum::http::StatusCode, Html<&'static str>) {
+    let _ = uri; // consumed for type matching
+    (axum::http::StatusCode::NOT_FOUND,
     Html(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>404 — whobelooking</title>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@1&display=swap" rel="stylesheet">
 <style>*{margin:0;padding:0}body{font-family:'JetBrains Mono',monospace;background:#1a1a1a;color:#e0ddd8;display:flex;align-items:center;justify-content:center;height:100vh}
 a{color:#ffd866;text-decoration:none}</style></head><body><div style="text-align:center">
 <h1 style="font-family:'Instrument Serif',serif;font-style:italic;color:#ffd866;font-size:4rem;font-weight:400">404</h1>
 <p style="color:#555;margin-top:0.5rem"><a href="/">whobelooking.org</a></p>
-</div></body></html>"#)
+</div></body></html>"#))
 }

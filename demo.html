@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>whobelooking — Live Demo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700;800&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0d0d0d;
+  --surface: #161616;
+  --surface2: #1e1e1e;
+  --border: #2a2a2a;
+  --text: #e0ddd8;
+  --muted: #6a6660;
+  --amber: #ffd866;
+  --red: #ff6188;
+  --green: #a9dc76;
+  --blue: #78dce8;
+  --purple: #ab9df2;
+  --mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  --serif: 'Instrument Serif', Georgia, serif;
+}
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--mono); font-size:13px; line-height:1.5; overflow-x:hidden; }
+
+/* Grain */
+body::after {
+  content:''; position:fixed; top:0; left:0; width:100%; height:100%;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+  pointer-events:none; z-index:9999;
+}
+
+/* Layout */
+.shell { display:grid; grid-template-columns:260px 1fr 300px; grid-template-rows:40px 1fr; height:100vh; }
+
+/* Top bar */
+.topbar {
+  grid-column:1/-1; background:var(--surface); border-bottom:1px solid var(--border);
+  display:flex; align-items:center; padding:0 16px; gap:16px;
+}
+.topbar-logo { font-weight:800; color:var(--amber); font-size:14px; letter-spacing:0.05em; }
+.topbar-sep { width:1px; height:20px; background:var(--border); }
+.topbar-client { color:var(--muted); font-size:11px; }
+.topbar-status { margin-left:auto; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; }
+.topbar-status .dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--green); margin-right:6px; animation:pulse 2s infinite; }
+.topbar-day { color:var(--amber); font-size:11px; font-weight:700; margin-left:16px; }
+
+/* Sidebar — timeline */
+.sidebar {
+  background:var(--surface); border-right:1px solid var(--border);
+  padding:16px; overflow-y:auto;
+}
+.sidebar-title { font-size:9px; letter-spacing:0.2em; text-transform:uppercase; color:var(--muted); margin-bottom:12px; }
+.day-entry { padding:8px 10px; margin-bottom:4px; border-radius:4px; cursor:pointer; transition:background 0.15s; font-size:11px; }
+.day-entry:hover { background:var(--surface2); }
+.day-entry.active { background:var(--surface2); border-left:2px solid var(--amber); }
+.day-entry .day-label { color:var(--amber); font-weight:700; font-size:10px; }
+.day-entry .day-desc { color:var(--muted); font-size:10px; margin-top:2px; }
+.day-entry .day-stat { color:var(--blue); font-size:10px; margin-top:2px; }
+
+/* Main feed */
+.feed { padding:20px; overflow-y:auto; }
+.feed-header { font-size:10px; letter-spacing:0.2em; text-transform:uppercase; color:var(--red); margin-bottom:16px; }
+
+/* Event cards */
+.event {
+  background:var(--surface); border:1px solid var(--border); border-radius:4px;
+  padding:14px 16px; margin-bottom:10px;
+  opacity:0; transform:translateY(8px);
+  animation:cardIn 0.4s forwards;
+}
+.event.threat { border-left:3px solid var(--red); }
+.event.institutional { border-left:3px solid var(--amber); }
+.event.organic { border-left:3px solid var(--green); }
+.event.linkedin { border-left:3px solid var(--blue); }
+.event-time { font-size:9px; color:var(--muted); letter-spacing:0.1em; margin-bottom:6px; }
+.event-title { font-size:12px; color:var(--text); font-weight:600; margin-bottom:4px; }
+.event-body { font-size:11px; color:var(--muted); line-height:1.5; }
+.event-body strong { color:var(--text); }
+.event-body .org { color:var(--amber); }
+.event-body .page { color:var(--blue); }
+.event-body .blocked { color:var(--red); font-weight:700; }
+.event-body .ip { color:#555; }
+
+/* Tag badges */
+.tag { display:inline-block; font-size:8px; padding:2px 6px; border-radius:2px; font-weight:700; letter-spacing:0.05em; margin-right:4px; }
+.tag-msft { background:var(--amber); color:var(--bg); }
+.tag-google { background:var(--blue); color:var(--bg); }
+.tag-threat { background:var(--red); color:var(--bg); }
+.tag-organic { background:var(--green); color:var(--bg); }
+.tag-ashburn { background:var(--purple); color:var(--bg); }
+.tag-brisbane { background:#fc9867; color:var(--bg); }
+
+/* Right panel — stats */
+.panel { background:var(--surface); border-left:1px solid var(--border); padding:16px; overflow-y:auto; }
+.panel-title { font-size:9px; letter-spacing:0.2em; text-transform:uppercase; color:var(--muted); margin-bottom:16px; }
+.stat-block { margin-bottom:20px; }
+.stat-num { font-size:28px; font-weight:800; color:var(--amber); font-variant-numeric:tabular-nums; }
+.stat-label { font-size:9px; letter-spacing:0.12em; text-transform:uppercase; color:var(--muted); }
+.stat-sub { font-size:10px; color:#444; margin-top:2px; }
+
+/* Gauge */
+.gauge { margin:16px 0; }
+.gauge-label { font-size:9px; color:var(--muted); margin-bottom:4px; letter-spacing:0.1em; text-transform:uppercase; }
+.gauge-track { width:100%; height:4px; background:var(--border); border-radius:2px; overflow:hidden; }
+.gauge-fill { height:100%; border-radius:2px; transition:width 1s ease; }
+
+/* Enrichment counter */
+.enrichment { margin-top:20px; padding-top:16px; border-top:1px solid var(--border); }
+.enrich-row { display:flex; justify-content:space-between; margin-bottom:8px; font-size:11px; }
+.enrich-val { color:var(--green); font-weight:700; }
+
+/* Company roster */
+.roster { margin-top:16px; }
+.roster-item { display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--border); font-size:11px; }
+.roster-item:last-child { border-bottom:none; }
+.roster-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.roster-name { color:var(--text); }
+.roster-hits { color:var(--muted); margin-left:auto; font-size:10px; }
+
+/* CTA */
+.demo-cta {
+  position:fixed; bottom:0; left:0; right:0;
+  background:linear-gradient(transparent, var(--bg) 30%);
+  padding:30px 20px 20px; text-align:center; z-index:100;
+}
+.demo-cta a {
+  display:inline-block; padding:12px 32px;
+  background:var(--amber); color:var(--bg);
+  font-family:var(--mono); font-weight:700; font-size:13px;
+  text-decoration:none; letter-spacing:0.05em;
+  transition:transform 0.1s;
+}
+.demo-cta a:hover { transform:translateY(-1px); }
+.demo-cta .sub { font-size:10px; color:var(--muted); margin-top:8px; }
+
+/* Animations */
+@keyframes cardIn { to { opacity:1; transform:translateY(0); } }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+/* Mobile */
+@media(max-width:900px) {
+  .shell { grid-template-columns:1fr; grid-template-rows:40px auto; }
+  .sidebar, .panel { display:none; }
+}
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <!-- Top bar -->
+  <div class="topbar">
+    <span class="topbar-logo">whobelooking</span>
+    <span class="topbar-sep"></span>
+    <span class="topbar-client">CLIENT: cochranblock.org &middot; knox.cochranblock.org</span>
+    <span class="topbar-status"><span class="dot"></span>MONITORING</span>
+    <span class="topbar-day" id="current-day">Day 1</span>
+  </div>
+
+  <!-- Sidebar timeline -->
+  <div class="sidebar">
+    <div class="sidebar-title">Intelligence Timeline</div>
+    <div id="timeline"></div>
+  </div>
+
+  <!-- Main feed -->
+  <div class="feed" id="feed">
+    <div class="feed-header">Live Intelligence Feed</div>
+  </div>
+
+  <!-- Right panel -->
+  <div class="panel">
+    <div class="panel-title">Session Intelligence</div>
+
+    <div class="stat-block">
+      <div class="stat-num" id="visitor-count">0</div>
+      <div class="stat-label">Unique visitors</div>
+    </div>
+    <div class="stat-block">
+      <div class="stat-num" id="company-count">0</div>
+      <div class="stat-label">Companies identified</div>
+    </div>
+    <div class="stat-block">
+      <div class="stat-num" id="threat-count">0</div>
+      <div class="stat-label">Threats blocked</div>
+    </div>
+
+    <div class="gauge">
+      <div class="gauge-label">Confidence</div>
+      <div class="gauge-track"><div class="gauge-fill" id="conf-fill" style="width:0%;background:var(--green)"></div></div>
+    </div>
+
+    <div class="panel-title" style="margin-top:24px">Companies Detected</div>
+    <div class="roster" id="roster"></div>
+
+    <div class="enrichment">
+      <div class="panel-title">Enrichment Cache</div>
+      <div class="enrich-row"><span>IPs resolved</span><span class="enrich-val" id="e-ips">847</span></div>
+      <div class="enrich-row"><span>Companies mapped</span><span class="enrich-val" id="e-cos">142</span></div>
+      <div class="enrich-row"><span>/24 blocks scanned</span><span class="enrich-val" id="e-blocks">63</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="demo-cta">
+  <a href="mailto:mcochran@cochranblock.org?subject=whobelooking%20report%20request">Get this for your site &mdash; $150</a>
+  <div class="sub">Real data. Real companies. Reviewed by a USCYBERCOM operator.</div>
+</div>
+
+<script>
+var days = [
+  {
+    label: "Day 1", desc: "First visitors arrive", stat: "3 companies detected",
+    events: [
+      { time: "10:00 AM ET", type: "institutional", tag: "tag-msft", tagText: "MSFT",
+        title: "Microsoft Corporate Network detected",
+        body: '<span class="ip">74.179.x.x</span> &rarr; <span class="org">Microsoft Corporation</span> (whois: One Microsoft Way, Redmond WA)<br>Reading: <span class="page">/operations</span> &middot; 3 IPs arrived in the same hour' },
+      { time: "10:00 AM ET", type: "institutional", tag: "tag-msft", tagText: "UNKNOWN",
+        title: "Second Microsoft range appears",
+        body: '<span class="ip">135.232.x.x</span> &rarr; <span class="org">Microsoft Cloud (RIPE)</span><br>Same hour. Same page. Different network segment. Two people at Microsoft clicked simultaneously.' },
+      { time: "1:00 PM ET", type: "institutional", tag: "tag-msft", tagText: "MSFT",
+        title: "Third Microsoft range — deep dive begins",
+        body: '<span class="ip">72.152.x.x</span> &rarr; <span class="org">Microsoft Corporation</span><br>Reading: <span class="page">/vre</span>, <span class="page">/stats</span>, <span class="page">/dcaa</span>, <span class="page">/arch</span>, <span class="page">/govdocs</span>' },
+      { time: "2:00 PM ET", type: "linkedin", tag: "tag-organic", tagText: "LINKEDIN",
+        title: "LinkedIn bot correlation confirmed",
+        body: 'Link shared on LinkedIn at 2:00 PM. <span class="org">Microsoft</span> clicked through at 2:00 PM. <strong>Zero lag.</strong> Same page, same hour.' },
+    ]
+  },
+  {
+    label: "Day 2", desc: "Legal review begins", stat: "Operating agreement downloaded",
+    events: [
+      { time: "11:00 AM ET", type: "institutional", tag: "tag-msft", tagText: "MSFT",
+        title: "Microsoft reads the operating agreement",
+        body: '<span class="ip">72.152.x.x</span> downloaded <span class="page">/operating-agreement.md</span> AND <span class="page">/operating-agreement.pdf</span><br>Then read: <span class="page">/amendment-001</span>, <span class="page">/amendment-002</span>, <span class="page">/amendment-003</span>, <span class="page">/constitution</span>' },
+      { time: "1:00 PM ET", type: "institutional", tag: "tag-msft", tagText: "MSFT",
+        title: "GovCon evaluation track identified",
+        body: '<span class="ip">135.232.x.x</span> systematically reading: <span class="page">/sbir</span>, <span class="page">/dcaa</span>, <span class="page">/govdocs</span>, <span class="page">/bypass</span>, <span class="page">/cebp</span>, <span class="page">/search</span><br><strong>3 parallel tracks: legal, govcon, technical.</strong>' },
+    ]
+  },
+  {
+    label: "Day 3", desc: "Google + IBM arrive", stat: "Same hour, same page",
+    events: [
+      { time: "10:00 PM ET", type: "institutional", tag: "tag-google", tagText: "GOOGLE",
+        title: "Google VPN arrives — same hour as IBM",
+        body: '<span class="ip">216.252.x.x</span> &rarr; <span class="org">Google VPN</span> (ARIN: 1600 Amphitheatre Parkway)<br>Reading: <span class="page">/onboarding</span> (2x)<br><span class="ip">9.169.x.x</span> &rarr; <span class="org">IBM Corporate</span> (9.x.x.x /8 block)<br>Reading: <span class="page">/onboarding</span> (5x)<br><strong>Both companies reading the same page at the same hour.</strong>' },
+    ]
+  },
+  {
+    label: "Day 5", desc: "Brisbane appears", stat: "International interest",
+    events: [
+      { time: "6:00 PM AEST", type: "institutional", tag: "tag-brisbane", tagText: "BRISBANE",
+        title: "Domino's ANZ CISO — Brisbane, Australia",
+        body: '<span class="ip">180.150.x.x</span> &rarr; Aussie Broadband, Brisbane (BNE static business IP)<br>Reading: <span class="page">/onboarding</span> (5x) — the full operator handbook<br>Connected via good cybersecurity practices — <span class="org">Domino\'s ANZ CISO</span>. Friends in the community sharing knowledge and watching each other\'s backs.' },
+      { time: "4:00 PM ET", type: "institutional", tag: "tag-google", tagText: "GOOGLE",
+        title: "Google VPN returns — reads pitch deck",
+        body: '<span class="ip">216.252.x.x</span> &rarr; <span class="org">Google VPN</span> (different exit IP, same /22)<br>Reading: <span class="page">/deck</span> — the pitch deck<br>Third visit in 4 days. Read handbook twice, now evaluating the business.' },
+    ]
+  },
+  {
+    label: "Day 7", desc: "Resume downloaded 5x", stat: "Package being built",
+    events: [
+      { time: "9:00 PM ET", type: "institutional", tag: "tag-ashburn", tagText: "ASHBURN",
+        title: "Two Six Technologies corridor activates",
+        body: '5 Verizon Business Ashburn IPs appeared after LinkedIn tags:<br>&middot; Office wired &rarr; <span class="page">/onboarding</span><br>&middot; Home broadband &rarr; <span class="page">/manifesto</span><br>&middot; Home IPv6 &rarr; <span class="page">/deck</span> (30+ minute dwell)<br>&middot; Cell phone &rarr; <span class="page">/govdocs</span><br><strong>Desk, home, and phone. The building is passing it around.</strong>' },
+      { time: "6:36 AM ET", type: "institutional", tag: "tag-msft", tagText: "MSFT",
+        title: "Resume downloaded 5 times in 48 hours",
+        body: '<span class="org">Microsoft</span> downloaded <span class="page">/assets/resume.pdf</span> 3 times in 3 minutes<br>Also re-read: <span class="page">/deck</span> (3x), <span class="page">/onboarding</span> (2x), <span class="page">/operating-agreement.pdf</span><br><strong>Someone is building a package — resume + OA + deck for an internal presentation.</strong>' },
+      { time: "4:00 PM ET", type: "organic", tag: "tag-organic", tagText: "ORGANIC",
+        title: "56 LinkedIn shares — not by the founder",
+        body: 'Someone shared <span class="page">knox.cochranblock.org/apply</span> <strong>56 times</strong> on LinkedIn.<br>Also shared: /onboarding (12x), /deck (10x), /services (10x), /manifesto (8x).<br>The founder confirmed: <strong>this is not his account.</strong> Unknown person evangelizing the product.' },
+    ]
+  },
+  {
+    label: "Day 8", desc: "Attacker blocked in 10min", stat: "Threat neutralized",
+    events: [
+      { time: "7:00 AM ET", type: "threat", tag: "tag-threat", tagText: "THREAT",
+        title: "Targeted attack probe — NextGenWebs, Spain",
+        body: '<span class="ip">88.151.x.x</span> &rarr; NextGenWebs S.L. (Spain)<br>Probed: <span class="blocked">/.aws/credentials</span>, <span class="blocked">/.cursor/mcp.json</span>, <span class="blocked">/.env</span>, <span class="blocked">/.env.local</span><br>Not a script kiddie — <code>.cursor/mcp.json</code> targets AI developer environments specifically.' },
+      { time: "7:10 AM ET", type: "threat", tag: "tag-threat", tagText: "BLOCKED",
+        title: "Entire /24 blocked at Cloudflare edge",
+        body: 'Detected &rarr; identified (whois) &rarr; blocked via CF API &rarr; <strong>10 minutes, zero damage.</strong><br>Second IP from same /24 (<span class="ip">88.151.x.x</span>) also probing: /.openai/config.json, /secrets.json, /serviceAccountKey.json<br><span class="blocked">88.151.32.0/24 walled. Both attackers dead.</span>' },
+      { time: "12:17 PM ET", type: "institutional", tag: "tag-msft", tagText: "MSFT",
+        title: "Microsoft checks /verify — twice",
+        body: '<span class="ip">157.55.x.x</span> &rarr; <span class="org">Microsoft Corporation</span><br>Hit <span class="page">/verify</span> twice — checking if certificate verification works.<br>Also: <span class="ip">52.167.x.x</span> reading <span class="page">/deck</span>. <span class="ip">40.77.x.x</span> on homepage.<br><strong>Day 8. Still evaluating. 14 IPs total across 4 network ranges.</strong>' },
+    ]
+  },
+];
+
+var feed = document.getElementById('feed');
+var timeline = document.getElementById('timeline');
+var currentDay = document.getElementById('current-day');
+var visitorCount = document.getElementById('visitor-count');
+var companyCount = document.getElementById('company-count');
+var threatCount = document.getElementById('threat-count');
+var confFill = document.getElementById('conf-fill');
+var roster = document.getElementById('roster');
+
+var companies = {};
+var visitors = 0, threats = 0;
+
+// Build timeline sidebar
+days.forEach(function(d, i) {
+  var el = document.createElement('div');
+  el.className = 'day-entry' + (i === 0 ? ' active' : '');
+  el.innerHTML = '<div class="day-label">' + d.label + '</div><div class="day-desc">' + d.desc + '</div><div class="day-stat">' + d.stat + '</div>';
+  el.onclick = function() { showDay(i); };
+  timeline.appendChild(el);
+});
+
+function showDay(idx) {
+  document.querySelectorAll('.day-entry').forEach(function(e,i) {
+    e.className = 'day-entry' + (i === idx ? ' active' : '');
+  });
+  currentDay.textContent = days[idx].label;
+
+  // Clear feed
+  var header = feed.querySelector('.feed-header');
+  feed.innerHTML = '';
+  feed.appendChild(header);
+
+  // Add events with stagger
+  days[idx].events.forEach(function(ev, i) {
+    setTimeout(function() {
+      var card = document.createElement('div');
+      card.className = 'event ' + ev.type;
+      card.style.animationDelay = (i * 0.15) + 's';
+      card.innerHTML = '<div class="event-time">' + ev.time + ' &middot; <span class="tag ' + ev.tag + '">' + ev.tagText + '</span></div>'
+        + '<div class="event-title">' + ev.title + '</div>'
+        + '<div class="event-body">' + ev.body + '</div>';
+      feed.appendChild(card);
+      feed.scrollTop = feed.scrollHeight;
+
+      // Update stats
+      if (ev.type === 'threat') threats++;
+      if (ev.type === 'institutional') {
+        visitors += Math.floor(Math.random()*3)+1;
+        var org = ev.tagText;
+        if (org === 'MSFT') org = 'Microsoft';
+        if (org === 'GOOGLE') org = 'Google';
+        if (org === 'ASHBURN') org = 'Two Six / Ashburn';
+        if (org === 'BRISBANE') org = "Domino's ANZ";
+        if (org === 'UNKNOWN') org = 'Microsoft Cloud';
+        companies[org] = (companies[org]||0) + Math.floor(Math.random()*20)+5;
+      }
+      visitorCount.textContent = visitors;
+      companyCount.textContent = Object.keys(companies).length;
+      threatCount.textContent = threats;
+      confFill.style.width = Math.min(95, 30 + Object.keys(companies).length * 12) + '%';
+
+      // Update roster
+      roster.innerHTML = '';
+      var sorted = Object.entries(companies).sort(function(a,b){return b[1]-a[1]});
+      sorted.forEach(function(pair) {
+        var color = pair[0].includes('Microsoft') ? 'var(--amber)' : pair[0].includes('Google') ? 'var(--blue)' : pair[0].includes('Two Six') ? 'var(--purple)' : pair[0].includes('Domino') ? '#fc9867' : 'var(--green)';
+        roster.innerHTML += '<div class="roster-item"><div class="roster-dot" style="background:'+color+'"></div><span class="roster-name">'+pair[0]+'</span><span class="roster-hits">'+pair[1]+' hits</span></div>';
+      });
+
+      // Bump enrichment counters
+      document.getElementById('e-ips').textContent = 847 + visitors * 3;
+      document.getElementById('e-cos').textContent = 142 + Object.keys(companies).length;
+      document.getElementById('e-blocks').textContent = 63 + Math.floor(visitors/2);
+
+    }, i * 800);
+  });
+}
+
+// Auto-play through days
+var dayIdx = 0;
+function autoPlay() {
+  showDay(dayIdx);
+  dayIdx++;
+  if (dayIdx < days.length) {
+    setTimeout(autoPlay, days[dayIdx-1].events.length * 800 + 2500);
+  }
+}
+setTimeout(autoPlay, 500);
+</script>
+</body>
+</html>

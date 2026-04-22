@@ -11,7 +11,8 @@ use super::pages;
 
 pub fn build() -> Router {
     Router::new()
-        .route("/", get(pages::index))
+        .route("/", get(pages::demo))
+        .route("/about", get(pages::index))
         .route("/order", get(pages::order_form))
         .route("/queue", get(pages::queue_status))
         .route("/health", get(pages::health))
