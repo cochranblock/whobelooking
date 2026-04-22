@@ -1,6 +1,6 @@
-// Unlicense — cochranblock.org
+// All Rights Reserved — The Cochran Block, LLC
 // Contributors: GotEmCoach, KOVA, Claude Opus 4.6
-//! whobelooking-test — TRIPLE SIMS quality gate for the CTO OSINT pipeline.
+//! whobelooking-test — TRIPLE SIMS quality gate for whobelooking v0.2.0.
 //!
 //! Tests: cross-verification, source dedup, fake-vs-real email detection,
 //! normalization, pattern extraction.
@@ -14,6 +14,9 @@ use exopack::triple_sims::f60;
 use whobelooking::ctos::{
     extract_cto_from_text, extract_first_email, norm, norm_company, slugify,
     truncate, verify, CtoMention,
+};
+use whobelooking::queue_types::{
+    has_capacity, Job, JobStatus, SourceType, Tier, HOURS_PER_WEEK,
 };
 
 fn mk(source: &str, url: &str, name: &str, company: &str) -> CtoMention {
@@ -382,6 +385,149 @@ fn test_fabrication_guard_mixed_email() -> Result<(), String> {
     Ok(())
 }
 
+// --- Queue system tests ---
+
+fn test_queue_tier_pricing() -> Result<(), String> {
+    // Verify pricing matches the plan: $150, $350, $750, $1500
+    let cases = [
+        (Tier::Starter, 15000u32),
+        (Tier::Growth, 35000),
+        (Tier::Scale, 75000),
+        (Tier::Custom, 150000),
+    ];
+    for (tier, expected) in cases {
+        let got = tier.price_cents();
+        if got != expected {
+            return Err(format!("{:?}: expected {} cents, got {}", tier, expected, got));
+        }
+    }
+    Ok(())
+}
+
+fn test_queue_tier_hours() -> Result<(), String> {
+    // Verify hours match the plan: 1.5, 3.0, 6.0, 8.0
+    let cases = [
+        (Tier::Starter, 1.5f32),
+        (Tier::Growth, 3.0),
+        (Tier::Scale, 6.0),
+        (Tier::Custom, 8.0),
+    ];
+    for (tier, expected) in cases {
+        let got = tier.estimated_hours();
+        if (got - expected).abs() > 0.01 {
+            return Err(format!("{:?}: expected {} hrs, got {}", tier, expected, got));
+        }
+    }
+    Ok(())
+}
+
+fn test_queue_tier_labels() -> Result<(), String> {
+    // Labels must exist and be non-empty
+    for tier in [Tier::Starter, Tier::Growth, Tier::Scale, Tier::Custom] {
+        let label = tier.label();
+        if label.is_empty() {
+            return Err(format!("{:?} has empty label", tier));
+        }
+    }
+    Ok(())
+}
+
+fn test_queue_capacity_math() -> Result<(), String> {
+    // 12 hours per week. Verify capacity checks.
+    if HOURS_PER_WEEK != 12.0 {
+        return Err(format!("HOURS_PER_WEEK should be 12.0, got {}", HOURS_PER_WEEK));
+    }
+    // 0 committed + Starter (1.5) = should fit
+    if !has_capacity(0.0, &Tier::Starter) {
+        return Err("0h committed + Starter should have capacity".into());
+    }
+    // 10.5 committed + Starter (1.5) = exactly 12, should fit
+    if !has_capacity(10.5, &Tier::Starter) {
+        return Err("10.5h + 1.5h = 12h should fit".into());
+    }
+    // 11 committed + Starter (1.5) = 12.5, over capacity
+    if has_capacity(11.0, &Tier::Starter) {
+        return Err("11h + 1.5h = 12.5h should NOT fit".into());
+    }
+    // 6 committed + Custom (8) = 14, over capacity
+    if has_capacity(6.0, &Tier::Custom) {
+        return Err("6h + 8h = 14h should NOT fit".into());
+    }
+    // 4 committed + Scale (6) = 10, should fit
+    if !has_capacity(4.0, &Tier::Scale) {
+        return Err("4h + 6h = 10h should fit".into());
+    }
+    Ok(())
+}
+
+fn test_queue_job_status_lifecycle() -> Result<(), String> {
+    // Verify all statuses exist and are distinct
+    let statuses = [
+        JobStatus::Paid,
+        JobStatus::Pending,
+        JobStatus::InProgress,
+        JobStatus::Complete,
+        JobStatus::Delivered,
+    ];
+    for i in 0..statuses.len() {
+        for j in (i + 1)..statuses.len() {
+            if statuses[i] == statuses[j] {
+                return Err(format!("{:?} == {:?} — statuses must be distinct", statuses[i], statuses[j]));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn test_queue_job_serialization() -> Result<(), String> {
+    // Verify Job round-trips through serde_json
+    let job = Job {
+        id: "test-123".into(),
+        customer_email: "test@example.com".into(),
+        source_type: SourceType::Cloudflare {
+            zone: "abc".into(),
+            token: "xyz".into(),
+        },
+        tier: Tier::Starter,
+        status: JobStatus::Paid,
+        estimated_hours: 1.5,
+        created_at: 1234567890,
+        started_at: None,
+        completed_at: None,
+        report_path: None,
+        notes: None,
+    };
+    let json = serde_json::to_vec(&job).map_err(|e| format!("serialize: {}", e))?;
+    let back: Job = serde_json::from_slice(&json).map_err(|e| format!("deserialize: {}", e))?;
+    if back.id != "test-123" {
+        return Err(format!("id mismatch: {}", back.id));
+    }
+    if back.customer_email != "test@example.com" {
+        return Err(format!("email mismatch: {}", back.customer_email));
+    }
+    if back.tier != Tier::Starter {
+        return Err(format!("tier mismatch: {:?}", back.tier));
+    }
+    if back.status != JobStatus::Paid {
+        return Err(format!("status mismatch: {:?}", back.status));
+    }
+    if (back.estimated_hours - 1.5).abs() > 0.01 {
+        return Err(format!("hours mismatch: {}", back.estimated_hours));
+    }
+    // Test AccessLog source type too
+    let job2 = Job {
+        source_type: SourceType::AccessLog,
+        ..back
+    };
+    let json2 = serde_json::to_vec(&job2).map_err(|e| format!("serialize2: {}", e))?;
+    let back2: Job = serde_json::from_slice(&json2).map_err(|e| format!("deserialize2: {}", e))?;
+    match back2.source_type {
+        SourceType::AccessLog => {}
+        other => return Err(format!("expected AccessLog, got {:?}", other)),
+    }
+    Ok(())
+}
+
 // =========================================================================
 // Runner
 // =========================================================================
@@ -423,6 +569,13 @@ const TESTS: &[(&str, TestFn)] = &[
     // Fabrication guards
     ("fabrication_guard_empty_email_no_verify", test_fabrication_guard_empty_email_no_verify),
     ("fabrication_guard_mixed_email", test_fabrication_guard_mixed_email),
+    // Queue system
+    ("queue_tier_pricing", test_queue_tier_pricing),
+    ("queue_tier_hours", test_queue_tier_hours),
+    ("queue_tier_labels", test_queue_tier_labels),
+    ("queue_capacity_math", test_queue_capacity_math),
+    ("queue_job_status_lifecycle", test_queue_job_status_lifecycle),
+    ("queue_job_serialization", test_queue_job_serialization),
 ];
 
 fn run_all_tests() -> bool {

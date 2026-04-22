@@ -1,4 +1,4 @@
-// Unlicense — cochranblock.org
+// All Rights Reserved — The Cochran Block, LLC
 // Contributors: GotEmCoach, KOVA, Claude Opus 4.6
 //! whobelooking library — pure logic exposed for the main binary and the
 //! test binary. Sled I/O and source pullers stay in src/main.rs; everything
@@ -362,5 +362,85 @@ pub mod ctos {
         }
         out.sort_by(|a, b| b.sources.len().cmp(&a.sources.len()));
         out
+    }
+}
+
+/// Queue types — deterministic, no I/O, safe to test in isolation.
+pub mod queue_types {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum JobStatus {
+        Paid,
+        Pending,
+        InProgress,
+        Complete,
+        Delivered,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum Tier {
+        Starter,
+        Growth,
+        Scale,
+        Custom,
+    }
+
+    impl Tier {
+        pub fn estimated_hours(&self) -> f32 {
+            match self {
+                Tier::Starter => 1.5,
+                Tier::Growth => 3.0,
+                Tier::Scale => 6.0,
+                Tier::Custom => 8.0,
+            }
+        }
+
+        pub fn price_cents(&self) -> u32 {
+            match self {
+                Tier::Starter => 15000,
+                Tier::Growth => 35000,
+                Tier::Scale => 75000,
+                Tier::Custom => 150000,
+            }
+        }
+
+        pub fn label(&self) -> &'static str {
+            match self {
+                Tier::Starter => "Starter (<500 IPs)",
+                Tier::Growth => "Growth (500-2K IPs)",
+                Tier::Scale => "Scale (2K-10K IPs)",
+                Tier::Custom => "Custom (10K+ IPs)",
+            }
+        }
+    }
+
+    pub const HOURS_PER_WEEK: f32 = 12.0;
+
+    pub fn has_capacity(committed_hours: f32, tier: &Tier) -> bool {
+        committed_hours + tier.estimated_hours() <= HOURS_PER_WEEK
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub enum SourceType {
+        Cloudflare { zone: String, token: String },
+        AccessLog,
+        Csv,
+        Json,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct Job {
+        pub id: String,
+        pub customer_email: String,
+        pub source_type: SourceType,
+        pub tier: Tier,
+        pub status: JobStatus,
+        pub estimated_hours: f32,
+        pub created_at: u64,
+        pub started_at: Option<u64>,
+        pub completed_at: Option<u64>,
+        pub report_path: Option<String>,
+        pub notes: Option<String>,
     }
 }

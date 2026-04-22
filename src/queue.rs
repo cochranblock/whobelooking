@@ -1,78 +1,7 @@
 // All Rights Reserved — The Cochran Block, LLC
 //! Job queue backed by sled. Capacity-limited. Manual review by default.
 
-use serde::{Deserialize, Serialize};
-
-const HOURS_PER_WEEK: f32 = 12.0;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum JobStatus {
-    Paid,
-    Pending,
-    InProgress,
-    Complete,
-    Delivered,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Tier {
-    Starter,
-    Growth,
-    Scale,
-    Custom,
-}
-
-impl Tier {
-    pub fn estimated_hours(&self) -> f32 {
-        match self {
-            Tier::Starter => 1.5,
-            Tier::Growth => 3.0,
-            Tier::Scale => 6.0,
-            Tier::Custom => 8.0,
-        }
-    }
-
-    pub fn price_cents(&self) -> u32 {
-        match self {
-            Tier::Starter => 15000,  // $150
-            Tier::Growth => 35000,   // $350
-            Tier::Scale => 75000,    // $750
-            Tier::Custom => 150000,  // $1,500
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            Tier::Starter => "Starter (<500 IPs)",
-            Tier::Growth => "Growth (500-2K IPs)",
-            Tier::Scale => "Scale (2K-10K IPs)",
-            Tier::Custom => "Custom (10K+ IPs)",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SourceType {
-    Cloudflare { zone: String, token: String },
-    AccessLog,
-    Csv,
-    Json,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Job {
-    pub id: String,
-    pub customer_email: String,
-    pub source_type: SourceType,
-    pub tier: Tier,
-    pub status: JobStatus,
-    pub estimated_hours: f32,
-    pub created_at: u64,
-    pub started_at: Option<u64>,
-    pub completed_at: Option<u64>,
-    pub report_path: Option<String>,
-    pub notes: Option<String>,
-}
+pub use whobelooking::queue_types::*;
 
 fn open_db() -> sled::Db {
     let dir = dirs::data_dir()
@@ -123,7 +52,6 @@ pub fn create_job(email: &str, source_type: SourceType, tier: Tier) -> anyhow::R
     let data = serde_json::to_vec(&job)?;
     db.insert(format!("queue:job:{}", id).as_bytes(), compress(&data))?;
 
-    // Increment week counter
     let week_key = format!("queue:week:{}", iso_week());
     let current: f32 = db
         .get(week_key.as_bytes())?
@@ -248,11 +176,6 @@ pub fn hours_this_week() -> f32 {
             s.parse().unwrap_or(0.0)
         })
         .unwrap_or(0.0)
-}
-
-/// Check if capacity is available.
-pub fn has_capacity(tier: &Tier) -> bool {
-    hours_this_week() + tier.estimated_hours() <= HOURS_PER_WEEK
 }
 
 /// Enrichment cache stats.
