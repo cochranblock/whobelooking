@@ -13,6 +13,51 @@ mod queue;
 #[cfg(feature = "serve")]
 mod web;
 
+// Gemini Man pattern — atomic binary replacement via PID lockfile.
+fn pid_path() -> std::path::PathBuf {
+    let base = dirs::data_local_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    let dir = base.join("whobelooking");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("pid")
+}
+
+fn read_old_pid() -> Option<u32> {
+    std::fs::read_to_string(pid_path())
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+fn write_pid() {
+    let _ = std::fs::write(pid_path(), std::process::id().to_string());
+}
+
+fn kill_old(pid: u32) {
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let _ = Command::new("kill").arg("-TERM").arg(pid.to_string()).output();
+        tracing::info!("sent SIGTERM to old PID {}", pid);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let alive = Command::new("kill")
+                .arg("-0").arg(pid.to_string()).output()
+                .map(|o| o.status.success()).unwrap_or(false);
+            if !alive {
+                tracing::info!("old PID {} exited cleanly", pid);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        let _ = Command::new("kill").arg("-KILL").arg(pid.to_string()).output();
+        tracing::warn!("sent SIGKILL to old PID {} (didn't exit in 5s)", pid);
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "whobelooking", about = "Who's looking at your site? CF → rDNS → company ID.")]
 enum Cmd {
@@ -198,11 +243,24 @@ async fn main() -> anyhow::Result<()> {
     match cmd {
         #[cfg(feature = "serve")]
         Cmd::Serve { port } => {
+            // Gemini Man: kill old process, take over
+            if let Some(old) = read_old_pid().filter(|&p| p != std::process::id()) {
+                kill_old(old);
+            }
+            write_pid();
+
             let app = web::router::build();
             let addr = format!("0.0.0.0:{}", port);
             tracing::info!("whobelooking serving at http://{}", addr);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
-            axum::serve(listener, app).await?;
+
+            let shutdown = async {
+                tokio::signal::ctrl_c().await.ok();
+                tracing::info!("shutting down");
+            };
+            axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown)
+                .await?;
         }
         Cmd::Queue => {
             let jobs = queue::list_jobs()?;
