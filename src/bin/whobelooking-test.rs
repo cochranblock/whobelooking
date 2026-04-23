@@ -1104,32 +1104,34 @@ fn test_crypto_large() -> Result<(), String> {
 // --- Order form content ---
 
 fn test_order_vault() -> Result<(), String> {
-    // The order page HTML is in pages.rs as a static string — we can't include_str it
-    // but we can verify the demo (which links to /order) mentions the vault
-    // The actual check: the vault text must be in the binary
-    let vault_text = "vault, not a filing cabinet";
-    // This string is compiled into the binary via pages.rs
-    // If someone removes it, this test fails
-    if !vault_text.contains("vault") {
-        return Err("vault metaphor text missing".into());
+    // Order form must emphasize white glove setup call
+    let html = include_str!("../web/pages.rs");
+    if !html.contains("10-minute setup call") {
+        return Err("order form missing white glove setup call mention".into());
     }
     Ok(())
 }
 
 fn test_order_eye() -> Result<(), String> {
-    let toggle = "toggleVis";
-    if toggle.is_empty() {
-        return Err("eye toggle function missing".into());
+    // Order form must NOT ask for credentials upfront — white glove handles it
+    let html = include_str!("../web/pages.rs");
+    if html.contains("toggleVis") || html.contains("cf_zone") || html.contains("cf_token") {
+        return Err(
+            "order form still contains credential fields — should be white glove only".into(),
+        );
     }
     Ok(())
 }
 
 fn test_order_cf_fields() -> Result<(), String> {
-    let fields = ["cf_zone", "cf_token"];
-    for f in fields {
-        if f.is_empty() {
-            return Err(format!("credential field {} missing", f));
-        }
+    // Order form must clearly state no payment at submission
+    let html = include_str!("../web/pages.rs");
+    if !html.contains("No payment now") && !html.contains("No payment until download") {
+        return Err("order form missing no-payment-at-submit messaging".into());
+    }
+    // Must mention supported platforms
+    if !html.contains("Cloudflare") || !html.contains("CloudFront") {
+        return Err("order form missing supported platform list".into());
     }
     Ok(())
 }
@@ -1293,9 +1295,9 @@ const TESTS: &[(&str, TestFn)] = &[
     ("crypto_empty_plaintext", test_crypto_empty),
     ("crypto_large_payload", test_crypto_large),
     // Order form content
-    ("order_has_vault_metaphor", test_order_vault),
-    ("order_has_eye_toggle", test_order_eye),
-    ("order_has_cf_fields", test_order_cf_fields),
+    ("order_has_white_glove_call", test_order_vault),
+    ("order_no_credential_fields", test_order_eye),
+    ("order_no_payment_and_platforms", test_order_cf_fields),
 ];
 
 fn run_all_tests() -> bool {
