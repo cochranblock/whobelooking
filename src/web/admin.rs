@@ -44,7 +44,14 @@ pub fn has_capacity() -> bool {
     pending_count() < MAX_PENDING
 }
 
-pub fn create_order(id: &str, email: &str, site_url: &str, source_type: &str, tier: &str) -> bool {
+pub fn create_order(
+    id: &str,
+    email: &str,
+    site_url: &str,
+    source_type: &str,
+    tier: &str,
+    client_ip: &str,
+) -> bool {
     if !has_capacity() {
         return false;
     }
@@ -53,7 +60,7 @@ pub fn create_order(id: &str, email: &str, site_url: &str, source_type: &str, ti
         return false;
     }
     let content = format!(
-        "id: {}\nemail: {}\nsite: {}\nsource: {}\ntier: {}\ncreated: {}\n",
+        "id: {}\nemail: {}\nsite: {}\nsource: {}\ntier: {}\ncreated: {}\nclient_ip: {}\n",
         id,
         email,
         site_url,
@@ -62,7 +69,8 @@ pub fn create_order(id: &str, email: &str, site_url: &str, source_type: &str, ti
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs()
+            .as_secs(),
+        client_ip,
     );
     std::fs::write(dir.join("order.txt"), content).is_ok()
 }
@@ -157,4 +165,72 @@ Upload report: <code>cp report.pdf approved/{{id}}/report.pdf</code>
         max = MAX_PENDING,
         rows = rows,
     ))
+}
+
+#[derive(Deserialize)]
+pub struct VisitsQuery {
+    pub token: Option<String>,
+    /// days ago (0 = today, 1 = yesterday, etc.)
+    pub days_ago: Option<u64>,
+}
+
+/// /admin/visits — plain-text dump of today's (or -d days_ago) visit log.
+/// Groups rows by IP with per-path breakdown, session span, and totals.
+pub async fn visits(Query(q): Query<VisitsQuery>) -> axum::response::Response {
+    let expected = std::env::var("ADMIN_TOKEN").unwrap_or_else(|_| "changeme".into());
+    if q.token.as_deref() != Some(&expected) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            [("content-type", "text/plain")],
+            "unauthorized\n",
+        )
+            .into_response();
+    }
+    use axum::response::IntoResponse;
+
+    let days_ago = q.days_ago.unwrap_or(0);
+    let today = super::visits::today();
+    let d = today.saturating_sub(days_ago);
+    let rows = super::visits::list_for_date(d);
+
+    let mut by_ip: std::collections::HashMap<String, Vec<(String, u64, u64, u64)>> =
+        std::collections::HashMap::new();
+    for (ip, path, c, f, l) in rows {
+        by_ip.entry(ip).or_default().push((path, c, f, l));
+    }
+
+    let mut ranked: Vec<_> = by_ip
+        .into_iter()
+        .map(|(ip, mut paths)| {
+            paths.sort_by_key(|p| std::cmp::Reverse(p.1));
+            let total: u64 = paths.iter().map(|p| p.1).sum();
+            let first = paths.iter().map(|p| p.2).min().unwrap_or(0);
+            let last = paths.iter().map(|p| p.3).max().unwrap_or(0);
+            (ip, total, first, last, paths)
+        })
+        .collect();
+    ranked.sort_by_key(|r| std::cmp::Reverse(r.1));
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# whobelooking visits — date_days={} (today-{}) — {} unique IPs\n\n",
+        d,
+        days_ago,
+        ranked.len()
+    ));
+    for (ip, total, first, last, paths) in &ranked {
+        let span_s = last.saturating_sub(*first);
+        out.push_str(&format!(
+            "{:>5}  {}  span={}s  ({} paths)\n",
+            total,
+            ip,
+            span_s,
+            paths.len()
+        ));
+        for (p, c, _, _) in paths.iter().take(10) {
+            out.push_str(&format!("        {:>4}x  {}\n", c, p));
+        }
+    }
+
+    ([("content-type", "text/plain; charset=utf-8")], out).into_response()
 }

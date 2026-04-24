@@ -5,3 +5,4 @@ pub mod admin;
 pub mod checkout;
 pub mod pages;
 pub mod router;
+pub mod visits;

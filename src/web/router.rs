@@ -28,7 +28,9 @@ pub fn build() -> Router {
         .route("/robots.txt", get(pages::robots))
         // Admin (token-gated)
         .route("/admin", get(admin::dashboard))
+        .route("/admin/visits", get(admin::visits))
         .fallback(pages::not_found)
         .layer(CompressionLayer::new().zstd(true))
+        .layer(axum::middleware::from_fn(super::visits::log_middleware))
         .layer(TraceLayer::new_for_http())
 }

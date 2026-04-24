@@ -3,6 +3,7 @@
 
 use crate::web::admin;
 use axum::extract::{Multipart, Query};
+use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse, Redirect};
 use serde::Deserialize;
 use whobelooking::crypto;
@@ -25,7 +26,11 @@ struct ParsedOrder {
 }
 
 /// Submit a request. Credentials encrypted, files saved encrypted. Never plaintext on disk.
-pub async fn create_checkout(mut multipart: Multipart) -> axum::response::Response {
+pub async fn create_checkout(
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> axum::response::Response {
+    let client_ip = super::visits::client_ip(&headers);
     let mut order = ParsedOrder::default();
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -65,16 +70,18 @@ pub async fn create_checkout(mut multipart: Multipart) -> axum::response::Respon
         &order.site_url,
         &order.source_type,
         &order.tier,
+        &client_ip,
     ) {
         return Redirect::to("/order?error=capacity").into_response();
     }
 
     tracing::info!(
-        "new order: {} from {} for {} ({})",
+        "new order: {} from {} for {} ({}) ip={}",
         id,
         order.email,
         order.site_url,
-        order.source_type
+        order.source_type,
+        client_ip,
     );
 
     let passphrase =
