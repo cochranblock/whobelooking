@@ -12,6 +12,7 @@ use clap::Parser;
 use clap::Subcommand;
 
 use whobelooking::crypto;
+mod logs;
 mod queue;
 #[cfg(feature = "serve")]
 mod web;
@@ -252,18 +253,15 @@ enum CtosOp {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Keep _log_guard alive for the process lifetime — drops flush the appender.
+    let _log_guard = logs::init("whobelooking").ok();
 
     let cmd = Cmd::parse();
     match cmd {
         #[cfg(feature = "serve")]
         Cmd::Serve { port } => {
-            // Gemini Man: kill old process, take over
+            // Gemini Man: snapshot current log, kill old process, take over.
+            logs::snapshot_pre_restart("whobelooking");
             if let Some(old) = read_old_pid().filter(|&p| p != std::process::id()) {
                 kill_old(old);
             }
