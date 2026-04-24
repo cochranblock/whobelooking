@@ -1386,6 +1386,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kova-ipc"
+version = "0.1.0"
+source = "git+https://github.com/cochranblock/kova-ipc.git?branch=main#fbd9be1820132f57340c33c324996df915f19a6c"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2934,6 +2945,7 @@ dependencies = [
  "exopack",
  "futures",
  "hickory-resolver",
+ "kova-ipc",
  "rand",
  "regex-lite",
  "reqwest 0.12.28",

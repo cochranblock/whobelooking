@@ -12,6 +12,8 @@ use clap::Parser;
 use clap::Subcommand;
 
 use whobelooking::crypto;
+#[cfg(feature = "serve")]
+mod ipc;
 mod logs;
 mod queue;
 #[cfg(feature = "serve")]
@@ -88,6 +90,17 @@ enum Cmd {
     Queue,
     /// Pop the next pending job
     Pop,
+    /// Show today's visits (or N days ago) — IP/path/count/timing.
+    Visits {
+        /// 0 = today, 1 = yesterday, etc.
+        #[arg(short, long, default_value = "0")]
+        days_ago: u64,
+        /// Output format: text (grouped by IP, default) or json.
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+    /// Probe whether the IPC socket is alive (returns server PID).
+    Ping,
     /// Export the captured-paths corpus from the visits tree (input for the surface-scan WASM).
     Corpus {
         /// Output format: text (one path per line, default), json (with hit counts).
@@ -281,6 +294,8 @@ async fn main() -> anyhow::Result<()> {
                 kill_old(old);
             }
             write_pid();
+            // IPC dispatcher — operator data over Unix socket. No HTTP /admin.
+            ipc::spawn().await?;
 
             let app = web::router::build();
             let addr = format!("0.0.0.0:{}", port);
@@ -296,6 +311,13 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         }
         Cmd::Queue => {
+            // Try IPC first (server running) → fall back to direct sled (server down).
+            #[cfg(feature = "serve")]
+            let jobs: Vec<crate::queue::Job> = match ipc::call("queue", serde_json::json!({})).await {
+                Ok(v) => serde_json::from_value(v).unwrap_or_default(),
+                Err(_) => queue::list_jobs()?,
+            };
+            #[cfg(not(feature = "serve"))]
             let jobs = queue::list_jobs()?;
             if jobs.is_empty() {
                 println!("queue empty");
@@ -324,26 +346,95 @@ async fn main() -> anyhow::Result<()> {
             }
             None => println!("no pending jobs"),
         },
-        Cmd::Corpus { format, output, min_hits, attack_only } => {
+        Cmd::Ping => {
             #[cfg(feature = "serve")]
             {
-                let corpus = web::visits::corpus_paths(min_hits, attack_only);
-                let rendered = match format.as_str() {
-                    "json" => serde_json::to_string_pretty(&corpus)?,
-                    _ => corpus.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join("\n"),
-                };
-                match output {
-                    Some(path) => {
-                        std::fs::write(&path, &rendered)?;
-                        eprintln!("wrote {} paths to {}", corpus.len(), path);
-                    }
-                    None => println!("{}", rendered),
+                match ipc::call("ping", serde_json::json!({})).await {
+                    Ok(v) => println!("{}", serde_json::to_string_pretty(&v)?),
+                    Err(e) => anyhow::bail!("ipc unreachable: {}", e),
                 }
             }
             #[cfg(not(feature = "serve"))]
-            {
-                let _ = (format, output, min_hits, attack_only);
-                anyhow::bail!("corpus export requires --features serve (uses the visits sled tree)");
+            anyhow::bail!("ping requires --features serve");
+        }
+        Cmd::Visits { days_ago, format } => {
+            #[cfg(feature = "serve")]
+            let val: serde_json::Value = match ipc::call("visits", serde_json::json!({"days_ago": days_ago})).await {
+                Ok(v) => v,
+                Err(_) => {
+                    let today = web::visits::today();
+                    let d = today.saturating_sub(days_ago);
+                    let rows = web::visits::list_for_date(d);
+                    serde_json::json!({
+                        "date_days": d,
+                        "today_minus": days_ago,
+                        "rows": rows.iter().map(|(ip,p,c,f,l)|
+                            serde_json::json!({"ip":ip,"path":p,"count":c,"first":f,"last":l})
+                        ).collect::<Vec<_>>(),
+                    })
+                }
+            };
+            #[cfg(not(feature = "serve"))]
+            let val: serde_json::Value = { let _ = (days_ago, &format); anyhow::bail!("visits requires --features serve"); };
+
+            match format.as_str() {
+                "json" => println!("{}", serde_json::to_string_pretty(&val)?),
+                _ => {
+                    let rows = val.get("rows").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                    let mut by_ip: std::collections::HashMap<String, Vec<(String,u64,u64,u64)>> = std::collections::HashMap::new();
+                    for r in &rows {
+                        let ip = r["ip"].as_str().unwrap_or("").to_string();
+                        let p = r["path"].as_str().unwrap_or("").to_string();
+                        let c = r["count"].as_u64().unwrap_or(0);
+                        let f = r["first"].as_u64().unwrap_or(0);
+                        let l = r["last"].as_u64().unwrap_or(0);
+                        by_ip.entry(ip).or_default().push((p, c, f, l));
+                    }
+                    let mut ranked: Vec<_> = by_ip.into_iter().map(|(ip, mut paths)| {
+                        paths.sort_by_key(|t| std::cmp::Reverse(t.1));
+                        let total: u64 = paths.iter().map(|t| t.1).sum();
+                        let first = paths.iter().map(|t| t.2).min().unwrap_or(0);
+                        let last = paths.iter().map(|t| t.3).max().unwrap_or(0);
+                        (ip, total, first, last, paths)
+                    }).collect();
+                    ranked.sort_by_key(|r| std::cmp::Reverse(r.1));
+                    println!("# whobelooking visits — today-{} — {} unique IPs", days_ago, ranked.len());
+                    for (ip, total, first, last, paths) in &ranked {
+                        let span = last.saturating_sub(*first);
+                        println!("{:>5}  {}  span={}s  ({} paths)", total, ip, span, paths.len());
+                        for (p, c, _, _) in paths.iter().take(8) {
+                            println!("        {:>4}x  {}", c, p);
+                        }
+                    }
+                }
+            }
+        }
+        Cmd::Corpus { format, output, min_hits, attack_only } => {
+            // IPC first → fall back to direct sled if server isn't running.
+            #[cfg(feature = "serve")]
+            let corpus: Vec<(String, u64)> = match ipc::call(
+                "corpus",
+                serde_json::json!({"min_hits": min_hits, "attack_only": attack_only}),
+            ).await {
+                Ok(v) => serde_json::from_value(v).unwrap_or_default(),
+                Err(_) => web::visits::corpus_paths(min_hits, attack_only),
+            };
+            #[cfg(not(feature = "serve"))]
+            let corpus: Vec<(String, u64)> = {
+                let _ = (min_hits, attack_only);
+                anyhow::bail!("corpus export requires --features serve");
+            };
+
+            let rendered = match format.as_str() {
+                "json" => serde_json::to_string_pretty(&corpus)?,
+                _ => corpus.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join("\n"),
+            };
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, &rendered)?;
+                    eprintln!("wrote {} paths to {}", corpus.len(), path);
+                }
+                None => println!("{}", rendered),
             }
         }
         Cmd::Done { id, report } => {
