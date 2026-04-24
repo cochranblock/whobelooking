@@ -88,6 +88,21 @@ enum Cmd {
     Queue,
     /// Pop the next pending job
     Pop,
+    /// Export the captured-paths corpus from the visits tree (input for the surface-scan WASM).
+    Corpus {
+        /// Output format: text (one path per line, default), json (with hit counts).
+        #[arg(short, long, default_value = "text")]
+        format: String,
+        /// Output file. Defaults to stdout.
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Minimum hit count to include (filters one-off oddities).
+        #[arg(long, default_value = "1")]
+        min_hits: u64,
+        /// Include only paths that look like attack/probe candidates (skip plain /, /robots.txt, /favicon.ico).
+        #[arg(long)]
+        attack_only: bool,
+    },
     /// Mark a job as complete
     Done {
         /// Job ID
@@ -309,6 +324,28 @@ async fn main() -> anyhow::Result<()> {
             }
             None => println!("no pending jobs"),
         },
+        Cmd::Corpus { format, output, min_hits, attack_only } => {
+            #[cfg(feature = "serve")]
+            {
+                let corpus = web::visits::corpus_paths(min_hits, attack_only);
+                let rendered = match format.as_str() {
+                    "json" => serde_json::to_string_pretty(&corpus)?,
+                    _ => corpus.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join("\n"),
+                };
+                match output {
+                    Some(path) => {
+                        std::fs::write(&path, &rendered)?;
+                        eprintln!("wrote {} paths to {}", corpus.len(), path);
+                    }
+                    None => println!("{}", rendered),
+                }
+            }
+            #[cfg(not(feature = "serve"))]
+            {
+                let _ = (format, output, min_hits, attack_only);
+                anyhow::bail!("corpus export requires --features serve (uses the visits sled tree)");
+            }
+        }
         Cmd::Done { id, report } => {
             queue::complete_job(&id, report)?;
             println!("marked complete: {}", id);

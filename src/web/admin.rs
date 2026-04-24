@@ -234,3 +234,45 @@ pub async fn visits(Query(q): Query<VisitsQuery>) -> axum::response::Response {
 
     ([("content-type", "text/plain; charset=utf-8")], out).into_response()
 }
+
+#[derive(Deserialize)]
+pub struct CorpusQuery {
+    pub token: Option<String>,
+    /// "text" (one path per line, default) or "json" (path → hits map).
+    pub format: Option<String>,
+    /// Drop paths with fewer than N total hits.
+    pub min_hits: Option<u64>,
+    /// Skip always-present paths (/, /robots.txt, /favicon.ico, etc.).
+    pub attack_only: Option<bool>,
+}
+
+/// /admin/corpus — dump the captured-paths corpus from the visits sled tree.
+/// Source data for the surface-area-scan WASM client. Token-gated.
+pub async fn corpus(Query(q): Query<CorpusQuery>) -> axum::response::Response {
+    let expected = std::env::var("ADMIN_TOKEN").unwrap_or_else(|_| "changeme".into());
+    if q.token.as_deref() != Some(&expected) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            [("content-type", "text/plain")],
+            "unauthorized\n",
+        )
+            .into_response();
+    }
+    use axum::response::IntoResponse;
+
+    let min_hits = q.min_hits.unwrap_or(1);
+    let attack_only = q.attack_only.unwrap_or(false);
+    let paths = super::visits::corpus_paths(min_hits, attack_only);
+
+    match q.format.as_deref() {
+        Some("json") => (
+            [("content-type", "application/json; charset=utf-8")],
+            serde_json::to_string_pretty(&paths).unwrap_or_default(),
+        )
+            .into_response(),
+        _ => {
+            let body: String = paths.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join("\n");
+            ([("content-type", "text/plain; charset=utf-8")], body).into_response()
+        }
+    }
+}

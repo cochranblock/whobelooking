@@ -124,3 +124,55 @@ pub fn list_for_date(date_days: u64) -> Vec<VisitRow> {
 pub fn today() -> u64 {
     today_days()
 }
+
+/// Skip-list of paths that are NOT useful for surface-area scanning
+/// (every site has these; they tell you nothing about exposure).
+const BORING_PATHS: &[&str] = &[
+    "/",
+    "/robots.txt",
+    "/favicon.ico",
+    "/favicon.png",
+    "/sitemap.xml",
+    "/apple-touch-icon.png",
+    "/apple-touch-icon-precomposed.png",
+    "/cdn-cgi/rum",
+    "/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js",
+    "/cdn-cgi/l/email-protection",
+    "/admin",
+    "/admin/visits",
+];
+
+fn is_boring(path: &str) -> bool {
+    BORING_PATHS.contains(&path)
+}
+
+/// Aggregate every distinct path ever observed across the visits tree, with
+/// total hit counts. Sorted by hits descending. This is the surface-area-scan
+/// corpus: paths attackers (and other bots) have probed for. Filters:
+///   - `min_hits`: drop paths with fewer hits (de-noise)
+///   - `attack_only`: skip BORING_PATHS (always-present paths)
+pub fn corpus_paths(min_hits: u64, attack_only: bool) -> Vec<(String, u64)> {
+    let mut totals: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for kv in tree().iter().flatten() {
+        let k = String::from_utf8_lossy(&kv.0);
+        let v = String::from_utf8_lossy(&kv.1);
+        // key format: {date}|{ip}|{path}
+        let parts: Vec<&str> = k.splitn(3, '|').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let path = parts[2].to_string();
+        if attack_only && is_boring(&path) {
+            continue;
+        }
+        let count: u64 = v
+            .splitn(3, '|')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        *totals.entry(path).or_insert(0) += count;
+    }
+    let mut out: Vec<(String, u64)> = totals.into_iter().filter(|(_, n)| *n >= min_hits).collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
