@@ -11,7 +11,7 @@ resolver = "2"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
-license = "LicenseRef-Proprietary"
+license = "Unlicense"
 repository = "https://github.com/cochranblock/whobelooking"
 authors = ["GotEmCoach", "KOVA", "Claude Opus 4.7"]
 
@@ -31,7 +31,7 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Visitor intelligence platform. Any IP source → rDNS → /24 scan → whois → company ID → enrichment flywheel → intelligence report. One binary. Zero cloud."
-license = "LicenseRef-Proprietary"
+license = "Unlicense"
 repository = "https://github.com/cochranblock/whobelooking"
 keywords = ["analytics", "reverse-dns", "lead-generation", "visitor-intelligence", "threat-detection"]
 categories = ["command-line-utilities", "web-programming"]
