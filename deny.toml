@@ -9,11 +9,6 @@ db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
 ignore = [
-    # tracing-appender 0.2.5 pulls time 0.3.45 (<0.3.47 fix). The advisory is
-    # a stack-exhaustion DoS via malicious RFC 2822 input; tracing-appender
-    # only uses time for filename ISO timestamps (no untrusted RFC 2822
-    # parsing). Revisit when tracing-appender ships a release that bumps time.
-    { id = "RUSTSEC-2026-0009", reason = "time crate only used for ISO log filenames, no RFC 2822 parsing path is reachable" },
     # `instant 0.1.x` is unmaintained — pulled in via sled 0.34 → parking_lot
     # 0.11. No safe upgrade exists (sled hasn't shipped a release that drops
     # parking_lot 0.11). Native-only build, no `wasm-bindgen` consumers.
