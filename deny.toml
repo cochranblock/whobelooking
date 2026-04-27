@@ -1,0 +1,68 @@
+# cargo-deny config — KOVA P16 standards gate, 14-point check.
+# All Rights Reserved — The Cochran Block, LLC
+
+[graph]
+all-features = true
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = [
+    # tracing-appender 0.2.5 pulls time 0.3.45 (<0.3.47 fix). The advisory is
+    # a stack-exhaustion DoS via malicious RFC 2822 input; tracing-appender
+    # only uses time for filename ISO timestamps (no untrusted RFC 2822
+    # parsing). Revisit when tracing-appender ships a release that bumps time.
+    { id = "RUSTSEC-2026-0009", reason = "time crate only used for ISO log filenames, no RFC 2822 parsing path is reachable" },
+    # `instant 0.1.x` is unmaintained — pulled in via sled 0.34 → parking_lot
+    # 0.11. No safe upgrade exists (sled hasn't shipped a release that drops
+    # parking_lot 0.11). Native-only build, no `wasm-bindgen` consumers.
+    # Revisit when sled bumps to a parking_lot >= 0.12.
+    { id = "RUSTSEC-2024-0384", reason = "instant pulled by sled→parking_lot 0.11; native-only, no upgrade path" },
+    # `fxhash` is unmaintained — pulled in via sled 0.34. Same upstream
+    # blocker as RUSTSEC-2024-0384; revisit when sled cuts a new release.
+    { id = "RUSTSEC-2025-0057", reason = "fxhash pulled by sled, no upgrade path until sled bumps" },
+    # bincode team permanently ceased development (doxxing incident). kova and
+    # cochranblock share this dep. Migrate the whole stack to postcard when
+    # scheduling a cross-repo dep audit session.
+    { id = "RUSTSEC-2025-0141", reason = "bincode abandoned upstream; postcard migration scheduled across all projects" },
+]
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+    "0BSD",
+    "CC0-1.0",
+    # `Unlicense` is a public-domain dedication used by some no-deps crates
+    # (regex-syntax, encoding_rs_io, …); functionally equivalent to CC0-1.0.
+    "Unlicense",
+    # whobelooking + exopack + kova-ipc are private project crates.
+    "LicenseRef-Proprietary",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+[bans]
+multiple-versions = "allow"   # workspace deps frequently differ; revisit when curated
+wildcards = "warn"
+highlight = "all"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "allow"   # exopack + kova-ipc come from private GitHub remotes
+allow-git = [
+    "https://github.com/cochranblock/exopack",
+    "ssh://git@github.com/cochranblock/exopack",
+    "https://github.com/cochranblock/kova-ipc",
+    "https://github.com/cochranblock/kova-ipc.git",
+]

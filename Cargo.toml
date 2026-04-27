@@ -1,6 +1,30 @@
 # All Rights Reserved — The Cochran Block, LLC
 # Contributors: GotEmCoach, KOVA, Claude Opus 4.6
 
+[workspace]
+members = [".", "crates/wbl-detect"]
+resolver = "2"
+
+# Shared metadata so future workspace members inherit edition / msrv / license
+# without copy-paste drift. Use `[package] *.workspace = true` in member crates.
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85"
+license = "LicenseRef-Proprietary"
+repository = "https://github.com/cochranblock/whobelooking"
+authors = ["GotEmCoach", "KOVA", "Claude Opus 4.7"]
+
+# Shared deps — bump in one place, every crate inherits. Use `dep.workspace = true`
+# in member Cargo.tomls. Add a new entry here before adding it to a crate so the
+# workspace stays the source of truth.
+[workspace.dependencies]
+anyhow = "1"
+regex-lite = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
 [package]
 name = "whobelooking"
 version = "0.2.0"
@@ -30,12 +54,14 @@ clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+kova-ipc = { git = "https://github.com/cochranblock/kova-ipc.git", branch = "main" }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 hickory-resolver = "0.25"
 sled = "0.34"
 dirs = "5"
 zstd = "0.13"
+bincode = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 aes-gcm = "0.10"
 blake3 = "1"
@@ -45,16 +71,19 @@ axum = { version = "0.8", features = ["macros", "multipart"], optional = true }
 tower-http = { version = "0.6", features = ["compression-zstd", "trace", "set-header"], optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 chromiumoxide = { version = "0.9", features = ["fetcher", "rustls", "zip8"], optional = true }
 futures = { version = "0.3", optional = true }
-regex-lite = { version = "0.1", optional = true }
+regex-lite = "0.1"
+fd-lock = "4"
+wbl-detect = { path = "crates/wbl-detect" }
 exopack = { git = "ssh://git@github.com/cochranblock/exopack", features = ["triple_sims", "standards_check"], optional = true }
 
 [features]
 default = []
 serve = ["dep:axum", "dep:tower-http"]
 browser = ["dep:chromiumoxide", "dep:futures"]
-tests = ["dep:exopack", "dep:regex-lite"]
+tests = ["dep:exopack"]
 standards = ["dep:exopack"]
 
 [profile.release]

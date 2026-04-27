@@ -44,8 +44,8 @@ pub mod ctos {
     pub fn now_secs() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
     }
 
     /// Cheap ISO date — civil-calendar reconstruction from epoch days.
@@ -522,3 +522,247 @@ pub mod queue_types {
 
 #[path = "crypto.rs"]
 pub mod crypto;
+
+#[path = "orders.rs"]
+pub mod orders;
+
+/// CIDR membership test for IPv4 and IPv6 prefixes.  No allocation, no
+/// dependencies — used by the RDAP cache to coalesce per-/24 lookups.
+pub mod cidr {
+    /// Parse `"a.b.c.d/N"` or `"prefix/N"` (IPv6) and return `(prefix_bytes, prefix_len)`.
+    /// IPv4 prefixes return 4 bytes; IPv6 returns 16 bytes.
+    pub fn parse(cidr: &str) -> Option<(Vec<u8>, u8)> {
+        let (addr, len) = cidr.split_once('/')?;
+        let len: u8 = len.parse().ok()?;
+        if let Ok(v4) = addr.parse::<std::net::Ipv4Addr>() {
+            if len > 32 {
+                return None;
+            }
+            return Some((v4.octets().to_vec(), len));
+        }
+        if let Ok(v6) = addr.parse::<std::net::Ipv6Addr>() {
+            if len > 128 {
+                return None;
+            }
+            return Some((v6.octets().to_vec(), len));
+        }
+        None
+    }
+
+    /// Does `ip` fall inside `cidr`?  Returns false on any parse failure or
+    /// family mismatch (v4 IP vs v6 CIDR or vice versa).
+    pub fn contains(cidr: &str, ip: &str) -> bool {
+        let Some((prefix, len)) = parse(cidr) else {
+            return false;
+        };
+        let ip_bytes: Vec<u8> = if let Ok(v4) = ip.parse::<std::net::Ipv4Addr>() {
+            v4.octets().to_vec()
+        } else if let Ok(v6) = ip.parse::<std::net::Ipv6Addr>() {
+            v6.octets().to_vec()
+        } else {
+            return false;
+        };
+        if ip_bytes.len() != prefix.len() {
+            return false;
+        }
+        let full_bytes = (len / 8) as usize;
+        let tail_bits = (len % 8) as usize;
+        if ip_bytes[..full_bytes] != prefix[..full_bytes] {
+            return false;
+        }
+        if tail_bits == 0 {
+            return true;
+        }
+        let mask: u8 = 0xFFu8 << (8 - tail_bits);
+        (ip_bytes[full_bytes] & mask) == (prefix[full_bytes] & mask)
+    }
+}
+
+/// IP redaction + project-level operator ignore-list.
+/// Pure functions — safe to call from test binary.
+pub mod redact {
+    /// Operator IP prefixes to drop entirely from any visitor report.
+    /// Mirrors `feedback_ignore_list_operator_ip.md` in this project's memory.
+    pub const OPERATOR_IPV4_PREFIXES: &[&str] = &["173.69.182."];
+    pub const OPERATOR_IPV6_PREFIXES: &[&str] = &[];
+
+    pub fn is_operator(ip: &str) -> bool {
+        if ip.contains(':') {
+            OPERATOR_IPV6_PREFIXES.iter().any(|p| ip.starts_with(p))
+        } else {
+            OPERATOR_IPV4_PREFIXES.iter().any(|p| ip.starts_with(p))
+        }
+    }
+
+    /// IPv4 → first two octets + ".x.x"; IPv6 → first two hextets + "::x:x".
+    /// Anything that doesn't parse as either is returned unchanged.
+    pub fn redact(ip: &str) -> String {
+        if let Some((a, rest)) = ip.split_once('.') {
+            if let Some((b, _)) = rest.split_once('.') {
+                if a.parse::<u8>().is_ok() && b.parse::<u8>().is_ok() {
+                    return format!("{}.{}.x.x", a, b);
+                }
+            }
+        }
+        if ip.contains(':') {
+            // Walk from the left, take up to 2 leading hextets, stop at `::`.
+            let mut leading: Vec<&str> = Vec::new();
+            for part in ip.split(':') {
+                if part.is_empty() {
+                    break;
+                }
+                leading.push(part);
+                if leading.len() == 2 {
+                    break;
+                }
+            }
+            if !leading.is_empty() {
+                return format!("{}::x:x", leading.join(":"));
+            }
+        }
+        ip.to_string()
+    }
+
+    /// Pure threat classification — derived from the union of paths + user agents
+    /// observed for one IP. Returns `&'static str` so callers can stash it in a struct.
+    ///
+    /// Order matters: most-specific threat tier first
+    /// (CRED_HUNT > EXPLOIT > WP_PROBE > LLM_PROBE > CRAWLER > BUYER > BROWSER).
+    ///
+    /// Path matching is **token-aware**: we split each URL on `/` and `?` so a
+    /// segment like `.env` matches `/foo/.env` but not `/wp-environment/`.
+    /// Substring fragments (e.g. `wp-admin`, `wlwmanifest`, `xmrlpc`) still
+    /// match across a segment so we catch obfuscated probes.
+    pub fn classify(paths: &[&str], user_agents: &[&str]) -> &'static str {
+        // Pre-tokenize once. Lowercased segments split on `/` `?` `;` `&` `=`.
+        let segments: Vec<String> = paths
+            .iter()
+            .flat_map(|p| {
+                p.split(['/', '?', ';', '&', '='])
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let seg_refs: Vec<&str> = segments.iter().map(String::as_str).collect();
+        let pl = paths.join(" ").to_ascii_lowercase();
+        let ul = user_agents.join(" ").to_ascii_lowercase();
+
+        // Whole-segment exact matches catch credential filenames without
+        // false-positiving paths that merely contain the token.
+        const CRED_SEGMENTS: &[&str] = &[
+            ".env",
+            ".env.staging",
+            ".env.production",
+            ".env.local",
+            ".env.live",
+            ".env.old",
+            ".env.bak",
+            ".env.sample",
+            ".npmrc",
+            ".boto",
+            ".pgpass",
+            ".pypirc",
+            ".aws",
+            "credentials",
+            "id_rsa",
+            "id_ed25519",
+            ".dockerconfigjson",
+            "wp-config.php",
+            ".env_sample",
+            ".git-credentials",
+            ".docker",
+            "config.json",
+        ];
+        // Path-substring matches for paths that legitimately contain these.
+        const CRED_SUBSTRINGS: &[&str] = &[".git/", ".ssh/", "/.cursor"];
+        if seg_refs.iter().any(|s| CRED_SEGMENTS.contains(s))
+            || CRED_SUBSTRINGS.iter().any(|s| pl.contains(s))
+        {
+            return "CRED_HUNT";
+        }
+
+        const EXPLOIT_SEGMENTS: &[&str] = &["phpmyadmin", "adminer", "shell.php", "config.php"];
+        const EXPLOIT_SUBSTRINGS: &[&str] = &[
+            "/cgi-bin/",
+            "/manager/html",
+            "/admin/serverconfig",
+            "/actuator/env",
+            "/swagger",
+        ];
+        if seg_refs.iter().any(|s| EXPLOIT_SEGMENTS.contains(s))
+            || EXPLOIT_SUBSTRINGS.iter().any(|s| pl.contains(s))
+        {
+            return "EXPLOIT";
+        }
+
+        const WP_SUBSTRINGS: &[&str] = &[
+            "wp-admin",
+            "wp-login",
+            "wp-includes",
+            "wlwmanifest",
+            "xmlrpc",
+            "wordpress",
+            "xmrlpc",
+        ];
+        const WP_SEGMENTS: &[&str] = &["3.php"];
+        if WP_SUBSTRINGS.iter().any(|s| pl.contains(s))
+            || seg_refs.iter().any(|s| WP_SEGMENTS.contains(s))
+        {
+            return "WP_PROBE";
+        }
+
+        if pl.contains("/v1/completions")
+            || pl.contains("/v1/embeddings")
+            || pl.contains("/v1/models")
+            || pl.contains("/v1/chat")
+        {
+            return "LLM_PROBE";
+        }
+        if ul.contains("googlebot")
+            || ul.contains("bingbot")
+            || ul.contains("gptbot")
+            || ul.contains("chatgpt")
+            || ul.contains("anthropic")
+            || ul.contains("applebot")
+            || ul.contains("bytespider")
+            || ul.contains("yandexbot")
+            || ul.contains("duckduck")
+            || ul.contains("linkedinbot")
+            || ul.contains("ccbot")
+            || ul.contains("facebookexternalhit")
+            || ul.contains("crawl")
+            || ul.contains(" bot")
+            || ul.contains("spider")
+        {
+            return "CRAWLER";
+        }
+        // Buyer = visited a marketing/conversion page. Match whole-segment so
+        // `/booklet` does not register as `/book`, `/aboutwordpress` not as `/about`.
+        const BUYER_SEGMENTS: &[&str] = &[
+            "order", "contact", "pricing", "about", "products", "services", "checkout", "govdocs",
+            "sbir", "dcaa", "vre", "book", "booking", "intake",
+        ];
+        if seg_refs.iter().any(|s| BUYER_SEGMENTS.contains(s)) {
+            return "BUYER";
+        }
+        "BROWSER"
+    }
+
+    /// Redact every IPv4/IPv6 literal embedded in free-form text.
+    pub fn redact_text(s: &str) -> String {
+        // Patterns are compile-time literals and unit-tested.  `expect` documents
+        // intent: if these ever fail we want a hard, immediate panic — never
+        // silent under-redaction.
+        let v4 = regex_lite::Regex::new(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
+            .expect("v4 redaction regex must compile");
+        let v6 =
+            regex_lite::Regex::new(r"\b[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F:]+)?\b")
+                .expect("v6 redaction regex must compile");
+        let s = v4
+            .replace_all(s, |c: &regex_lite::Captures| redact(&c[0]))
+            .into_owned();
+        v6.replace_all(&s, |c: &regex_lite::Captures| redact(&c[0]))
+            .into_owned()
+    }
+}

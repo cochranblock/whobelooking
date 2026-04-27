@@ -52,8 +52,8 @@ mod tests {
     fn roundtrip() {
         let key = key_from_passphrase("test-key-whobelooking");
         let plaintext = "zone:abc123\ntoken:sk_test_xyz";
-        let encrypted = encrypt(plaintext, &key).unwrap();
-        let decrypted = decrypt(&encrypted, &key).unwrap();
+        let encrypted = encrypt(plaintext, &key).expect("encrypt must succeed in tests");
+        let decrypted = decrypt(&encrypted, &key).expect("decrypt must succeed in tests");
         assert_eq!(plaintext, decrypted);
     }
 
@@ -61,7 +61,7 @@ mod tests {
     fn wrong_key_fails() {
         let key1 = key_from_passphrase("correct");
         let key2 = key_from_passphrase("wrong");
-        let encrypted = encrypt("secret", &key1).unwrap();
+        let encrypted = encrypt("secret", &key1).expect("encrypt must succeed in tests");
         assert!(decrypt(&encrypted, &key2).is_err());
     }
 }

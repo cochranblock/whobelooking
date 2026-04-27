@@ -3,18 +3,18 @@
 
 pub use whobelooking::queue_types::*;
 
-fn open_db() -> sled::Db {
+fn open_db() -> anyhow::Result<sled::Db> {
     let dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("whobelooking");
-    sled::open(dir).expect("sled open")
+    sled::open(dir).map_err(|e| anyhow::anyhow!("sled open: {}", e))
 }
 
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn iso_week() -> String {
@@ -35,7 +35,7 @@ fn decompress(data: &[u8]) -> Vec<u8> {
 /// Create a new job in the queue. Reserved for Phase 2 sled-backed persistence.
 #[allow(dead_code)] // Phase 2: filesystem orders migrate to sled
 pub fn create_job(email: &str, source_type: SourceType, tier: Tier) -> anyhow::Result<String> {
-    let db = open_db();
+    let db = open_db()?;
     let id = uuid::Uuid::new_v4().to_string();
     let job = Job {
         id: id.clone(),
@@ -71,8 +71,9 @@ pub fn create_job(email: &str, source_type: SourceType, tier: Tier) -> anyhow::R
 }
 
 /// Get a job by ID.
+#[cfg(feature = "serve")]
 pub fn get_job(id: &str) -> anyhow::Result<Option<Job>> {
-    let db = open_db();
+    let db = open_db()?;
     match db.get(format!("queue:job:{}", id).as_bytes())? {
         Some(data) => {
             let raw = decompress(&data);
@@ -84,7 +85,7 @@ pub fn get_job(id: &str) -> anyhow::Result<Option<Job>> {
 
 /// List all jobs.
 pub fn list_jobs() -> anyhow::Result<Vec<Job>> {
-    let db = open_db();
+    let db = open_db()?;
     let mut jobs = Vec::new();
     for item in db.scan_prefix(b"queue:job:") {
         let (_, v) = item?;
@@ -99,14 +100,16 @@ pub fn list_jobs() -> anyhow::Result<Vec<Job>> {
 
 /// Pop next pending job (oldest first).
 pub fn pop_job() -> anyhow::Result<Option<Job>> {
-    let db = open_db();
+    let db = open_db()?;
     let mut oldest: Option<Job> = None;
     for item in db.scan_prefix(b"queue:job:") {
         let (_, v) = item?;
         let raw = decompress(&v);
         if let Ok(job) = serde_json::from_slice::<Job>(&raw) {
             if (job.status == JobStatus::Paid || job.status == JobStatus::Pending)
-                && (oldest.is_none() || job.created_at < oldest.as_ref().unwrap().created_at)
+                && oldest
+                    .as_ref()
+                    .is_none_or(|o| job.created_at < o.created_at)
             {
                 oldest = Some(job);
             }
@@ -126,7 +129,7 @@ pub fn pop_job() -> anyhow::Result<Option<Job>> {
 
 /// Mark job as complete.
 pub fn complete_job(id: &str, report_path: Option<String>) -> anyhow::Result<()> {
-    let db = open_db();
+    let db = open_db()?;
     let key = format!("queue:job:{}", id);
     match db.get(key.as_bytes())? {
         Some(data) => {
@@ -146,7 +149,7 @@ pub fn complete_job(id: &str, report_path: Option<String>) -> anyhow::Result<()>
 
 /// Mark job as delivered.
 pub fn deliver_job(id: &str) -> anyhow::Result<()> {
-    let db = open_db();
+    let db = open_db()?;
     let key = format!("queue:job:{}", id);
     match db.get(key.as_bytes())? {
         Some(data) => {
@@ -162,9 +165,13 @@ pub fn deliver_job(id: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Get hours committed this week.
+/// Get hours committed this week. Returns 0.0 if the DB can't be opened
+/// (e.g. corrupt or locked) so capacity-display callers degrade gracefully
+/// instead of panicking.
 pub fn hours_this_week() -> f32 {
-    let db = open_db();
+    let Ok(db) = open_db() else {
+        return 0.0;
+    };
     let week_key = format!("queue:week:{}", iso_week());
     db.get(week_key.as_bytes())
         .ok()
@@ -176,9 +183,12 @@ pub fn hours_this_week() -> f32 {
         .unwrap_or(0.0)
 }
 
-/// Enrichment cache stats.
+/// Enrichment cache stats. Returns `(0, 0)` if the DB can't be opened.
+#[cfg(feature = "serve")]
 pub fn enrichment_stats() -> (u64, u64) {
-    let db = open_db();
+    let Ok(db) = open_db() else {
+        return (0, 0);
+    };
     let mut ips = 0u64;
     let mut companies = 0u64;
     for item in db.scan_prefix(b"enrich:rdns:") {

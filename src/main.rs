@@ -12,11 +12,18 @@ use clap::Parser;
 use clap::Subcommand;
 
 use whobelooking::crypto;
+use whobelooking::orders;
+#[cfg(feature = "serve")]
+mod ipc;
+mod logs;
 mod queue;
 #[cfg(feature = "serve")]
 mod web;
 
 // Gemini Man pattern — atomic binary replacement via PID lockfile.
+// Only the `serve` arm uses these; gating keeps the default-features build
+// warning-free without adding `#[allow(dead_code)]` everywhere.
+#[cfg(feature = "serve")]
 fn pid_path() -> std::path::PathBuf {
     let base = dirs::data_local_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
     let dir = base.join("whobelooking");
@@ -24,16 +31,68 @@ fn pid_path() -> std::path::PathBuf {
     dir.join("pid")
 }
 
+#[cfg(feature = "serve")]
+fn lockfile_path() -> std::path::PathBuf {
+    let base = dirs::data_local_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    let dir = base.join("whobelooking");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("pid.lock")
+}
+
+#[cfg(feature = "serve")]
 fn read_old_pid() -> Option<u32> {
     std::fs::read_to_string(pid_path())
         .ok()
         .and_then(|s| s.trim().parse().ok())
 }
 
+#[cfg(feature = "serve")]
 fn write_pid() {
     let _ = std::fs::write(pid_path(), std::process::id().to_string());
 }
 
+/// Hold an exclusive `flock` on `pid.lock` for the lifetime of the returned
+/// guard. Two `serve` processes starting concurrently can't both win — the
+/// second `try_write_lock()` returns `WouldBlock`, and the loser exits
+/// cleanly instead of corrupting the PID file mid-write.
+///
+/// Implemented over `fd-lock` so the syscall stays out of our `unsafe` budget.
+#[cfg(feature = "serve")]
+struct PidLock {
+    // Hold both the file and the guard so the lock outlives the function call.
+    // RwLockWriteGuard borrows from RwLock; `Box` lets us pin the lock heap-side
+    // and hand back a `'static`-bounded guard via field ordering on drop.
+    _file: Box<fd_lock::RwLock<std::fs::File>>,
+    _guard: Option<fd_lock::RwLockWriteGuard<'static, std::fs::File>>,
+}
+
+#[cfg(feature = "serve")]
+fn acquire_pid_lock() -> std::io::Result<Option<PidLock>> {
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(lockfile_path())?;
+    let mut lock = Box::new(fd_lock::RwLock::new(f));
+    // Extend the lifetime of the guard to the heap-pinned RwLock's lifetime.
+    // Safety justification: we keep the box alive in the same struct as the
+    // guard, dropped guard-first, lock-second.  But this is `unsafe` and
+    // we're in main.rs (not lib.rs which has #[forbid(unsafe_code)]).
+    let lock_ptr: *mut fd_lock::RwLock<std::fs::File> = lock.as_mut();
+    // SAFETY: the box is owned by `PidLock` alongside the guard; field-drop
+    // order is guard-first then file, so the borrow remains valid until drop.
+    let lock_ref: &'static mut fd_lock::RwLock<std::fs::File> = unsafe { &mut *lock_ptr };
+    match lock_ref.try_write() {
+        Ok(guard) => Ok(Some(PidLock {
+            _file: lock,
+            _guard: Some(guard),
+        })),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(feature = "serve")]
 fn kill_old(pid: u32) {
     #[cfg(unix)]
     {
@@ -87,6 +146,41 @@ enum Cmd {
     Queue,
     /// Pop the next pending job
     Pop,
+    /// Show today's visits (or N days ago) — IP/path/count/timing.
+    #[cfg(feature = "serve")]
+    Visits {
+        /// 0 = today, 1 = yesterday, etc.
+        #[arg(short, long, default_value = "0")]
+        days_ago: u64,
+        /// Output format: text (grouped by IP, default) or json.
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+    /// Probe whether the IPC socket is alive (returns server PID).
+    #[cfg(feature = "serve")]
+    Ping,
+    /// Export the captured-paths corpus from the visits tree (input for the surface-scan WASM).
+    #[cfg(feature = "serve")]
+    Corpus {
+        /// Output format: text (one path per line, default), json (with hit counts).
+        #[arg(short, long, default_value = "text")]
+        format: String,
+        /// Output file. Defaults to stdout.
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Minimum hit count to include (filters one-off oddities).
+        #[arg(long, default_value = "1")]
+        min_hits: u64,
+        /// Include only paths that look like attack/probe candidates (skip plain /, /robots.txt, /favicon.ico).
+        #[arg(long)]
+        attack_only: bool,
+    },
+    /// Atomic order queue — list, approve, reject, mark ready, audit.
+    /// Replaces the old `mv pending/x approved/x` filesystem workflow.
+    Order {
+        #[command(subcommand)]
+        op: OrderOp,
+    },
     /// Mark a job as complete
     Done {
         /// Job ID
@@ -163,6 +257,24 @@ enum Cmd {
         #[arg(short, long, default_value = "6")]
         wait: u64,
     },
+    /// Render a URL or local HTML file to PDF via headless Chrome (CDP printToPDF)
+    #[cfg(feature = "browser")]
+    Pdf {
+        /// URL (https://...) or path to local HTML file
+        input: String,
+        /// Output PDF path
+        #[arg(short, long, default_value = "out.pdf")]
+        out: String,
+        /// Wait seconds for page render before printing
+        #[arg(short, long, default_value = "2")]
+        wait: u64,
+        /// Landscape orientation
+        #[arg(long)]
+        landscape: bool,
+        /// Print background colors/images
+        #[arg(long, default_value = "true")]
+        background: bool,
+    },
     /// Pull US visitor IPs from Cloudflare GraphQL for a given date
     Pull {
         /// Date (YYYY-MM-DD), default today
@@ -185,6 +297,82 @@ enum Cmd {
     Rdns {
         /// IPs to look up (or reads stdin)
         ips: Vec<String>,
+    },
+    /// RDAP whois lookup on a list of IPs (or stdin) — org / netname / country, with on-disk cache
+    Rdap {
+        /// IPs to look up (or reads stdin)
+        ips: Vec<String>,
+        /// Output as JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Parse base log files (`visit ip=…` lines), aggregate per-IP, classify, JSON to stdout
+    ParseLogs {
+        /// Log file paths (whobelooking-style `visit ip=…` lines)
+        files: Vec<String>,
+        /// Window in hours (relative to now); 0 = all
+        #[arg(long, default_value = "48")]
+        hours: u64,
+    },
+    /// Pull last N hours of CF GraphQL data for every zone the token can see (24h chunks)
+    CfFleet {
+        /// Cloudflare API token
+        #[arg(short, long, env = "CF_TOKEN")]
+        token: String,
+        /// Window in hours
+        #[arg(long, default_value = "48")]
+        hours: u64,
+        /// Output JSON path
+        #[arg(short, long, default_value = "/tmp/wbl-cf-fleet.json")]
+        out: String,
+    },
+    /// Enrich a list of IPs across all CF zones (httpRequestsAdaptiveGroups + firewallEventsAdaptive)
+    CfEnrich {
+        /// IPs to enrich (or reads stdin)
+        ips: Vec<String>,
+        /// Cloudflare API token
+        #[arg(short, long, env = "CF_TOKEN")]
+        token: String,
+        /// Window in hours
+        #[arg(long, default_value = "48")]
+        hours: u64,
+        /// Output JSON path
+        #[arg(short, long, default_value = "/tmp/wbl-cf-enriched.json")]
+        out: String,
+    },
+    /// Detect column types in a log/CSV file (uses the same WASM-shippable detector as `/detect`).
+    Detect {
+        /// Path to a log / CSV / TSV file
+        file: String,
+        /// Max rows to sample for column-type voting
+        #[arg(long, default_value = "256")]
+        max_rows: u32,
+        /// Output as JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Full intel pipeline: parse base logs + CF enrich + rDNS + RDAP → redacted & unredacted HTML
+    Intel {
+        /// Directory containing base log files (whobelooking + ireducefraud + cochranblock + …)
+        #[arg(long, default_value = "/tmp/wbl-baselogs")]
+        baselogs_dir: String,
+        /// Cloudflare API token
+        #[arg(short, long, env = "CF_TOKEN")]
+        token: String,
+        /// Window in hours
+        #[arg(long, default_value = "48")]
+        hours: u64,
+        /// Output directory for `intel.unredacted.html` and `intel.redacted.html`
+        #[arg(short, long, default_value = "/tmp/wbl-intel")]
+        out: String,
+    },
+    /// Automated diagnostic surface area scan — probe 140+ attack paths against a URL
+    Scan {
+        /// Target URL (e.g. https://example.com)
+        url: String,
+        /// Output as JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
     /// Scan /24 neighbors of an IP for PTR records that reveal company names
     Neighbors {
@@ -223,6 +411,52 @@ enum Cmd {
     },
 }
 
+#[derive(clap::Subcommand)]
+enum OrderOp {
+    /// List orders, newest first
+    List {
+        /// Filter by state: pending, approved, rejected, ready
+        #[arg(long)]
+        state: Option<String>,
+    },
+    /// Show one order plus its full audit history
+    Show {
+        /// Order id
+        id: String,
+    },
+    /// Pending → Approved
+    Approve {
+        id: String,
+        #[arg(long, default_value = "operator")]
+        actor: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Pending|Approved|Ready → Rejected
+    Reject {
+        id: String,
+        #[arg(long, default_value = "operator")]
+        actor: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Approved → Ready (call after copying report.pdf into the blob dir)
+    Ready {
+        id: String,
+        #[arg(long, default_value = "operator")]
+        actor: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Tail the most-recent audit events (across all orders)
+    Audit {
+        /// Optional order id to filter to
+        id: Option<String>,
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+}
+
 #[cfg(feature = "browser")]
 #[derive(Subcommand)]
 enum CtosOp {
@@ -250,24 +484,149 @@ enum CtosOp {
     },
 }
 
+fn run_order_op(op: OrderOp) -> anyhow::Result<()> {
+    use orders::{OrderState, Store};
+    let store = Store::open()?;
+    match op {
+        OrderOp::List { state } => {
+            let want = state
+                .as_deref()
+                .map(|s| match s.to_ascii_lowercase().as_str() {
+                    "pending" => Some(OrderState::Pending),
+                    "approved" => Some(OrderState::Approved),
+                    "rejected" => Some(OrderState::Rejected),
+                    "ready" => Some(OrderState::Ready),
+                    _ => None,
+                });
+            let orders = store.list_all()?;
+            let filtered: Vec<_> = match want {
+                Some(Some(s)) => orders.into_iter().filter(|o| o.state == s).collect(),
+                Some(None) => {
+                    eprintln!("unknown state filter (use pending|approved|rejected|ready)");
+                    return Ok(());
+                }
+                None => orders,
+            };
+            println!("STATE      ID                   TIER       CREATED                  EMAIL");
+            for o in filtered {
+                let short = &o.id[..o.id.len().min(20)];
+                println!(
+                    "{state:<10} {id:<20} {tier:<10} {created:<24} {email}",
+                    state = o.state.name(),
+                    id = short,
+                    tier = o.tier,
+                    created = o.created_at,
+                    email = o.email
+                );
+            }
+        }
+        OrderOp::Show { id } => {
+            let Some(order) = store.get(&id)? else {
+                eprintln!("order not found: {}", id);
+                std::process::exit(1);
+            };
+            println!("{:#?}", order);
+            println!("\n--- audit ---");
+            for ev in store.audit_for(&id)? {
+                println!(
+                    "  {:?} → {:?}  by {}  {}",
+                    ev.from,
+                    ev.to,
+                    ev.actor,
+                    ev.note.as_deref().unwrap_or("")
+                );
+            }
+        }
+        OrderOp::Approve { id, actor, note } => {
+            let o = store.transition(&id, OrderState::Approved, &actor, note)?;
+            println!("approved: {}  (Pending → {})", o.id, o.state.name());
+        }
+        OrderOp::Reject { id, actor, note } => {
+            let o = store.transition(&id, OrderState::Rejected, &actor, note)?;
+            println!("rejected: {}  ({})", o.id, o.state.name());
+        }
+        OrderOp::Ready { id, actor, note } => {
+            // Sanity-check the report blob is in place before flipping state.
+            let pdf = orders::blobs_dir(&id).join("report.pdf");
+            if !pdf.exists() {
+                anyhow::bail!(
+                    "report.pdf not present at {} — copy it before marking ready",
+                    pdf.display()
+                );
+            }
+            let o = store.transition(&id, OrderState::Ready, &actor, note)?;
+            println!(
+                "ready: {}  ({})  pdf={}",
+                o.id,
+                o.state.name(),
+                pdf.display()
+            );
+        }
+        OrderOp::Audit { id, limit } => {
+            let events = match id {
+                Some(ref oid) => store.audit_for(oid)?,
+                None => store.audit_tail(limit)?,
+            };
+            for ev in events {
+                println!(
+                    "  {}  {:>20}  {:?} → {:?}  by {}  {}",
+                    ev.ts_nanos,
+                    ev.order_id,
+                    ev.from,
+                    ev.to,
+                    ev.actor,
+                    ev.note.as_deref().unwrap_or("")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// If `ips` is empty, read whitespace-separated IPs from stdin. Otherwise return as-is.
+fn read_ips_from_stdin_if_empty(ips: Vec<String>) -> Vec<String> {
+    if !ips.is_empty() {
+        return ips;
+    }
+    use std::io::Read;
+    let mut buf = String::new();
+    let _ = std::io::stdin().read_to_string(&mut buf);
+    buf.split_whitespace().map(|s| s.to_string()).collect()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Keep _log_guard alive for the process lifetime — drops flush the appender.
+    let _log_guard = logs::init("whobelooking").ok();
 
     let cmd = Cmd::parse();
     match cmd {
         #[cfg(feature = "serve")]
         Cmd::Serve { port } => {
-            // Gemini Man: kill old process, take over
+            // Gemini Man: snapshot current log, kill old process, take over.
+            // Hold an exclusive flock on `pid.lock` across the snapshot/kill/write
+            // window so two concurrent restarts can't race on the PID file.
+            let _pid_lock: Option<PidLock> = match acquire_pid_lock() {
+                Ok(Some(f)) => Some(f),
+                Ok(None) => {
+                    eprintln!("another whobelooking serve is starting (pid.lock held); exiting");
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!("could not acquire pid.lock: {} — proceeding anyway", e);
+                    None
+                }
+            };
+            logs::snapshot_pre_restart("whobelooking");
             if let Some(old) = read_old_pid().filter(|&p| p != std::process::id()) {
                 kill_old(old);
+                // Old process serialized its counters to state.bin.zst on SIGTERM.
+                // Restore them so Prometheus totals are continuous across handoffs.
+                logs::load_state("whobelooking");
             }
             write_pid();
+            // IPC dispatcher — operator data over Unix socket. No HTTP /admin.
+            ipc::spawn().await?;
 
             let app = web::router::build();
             let addr = format!("0.0.0.0:{}", port);
@@ -275,14 +634,36 @@ async fn main() -> anyhow::Result<()> {
             let listener = tokio::net::TcpListener::bind(&addr).await?;
 
             let shutdown = async {
+                #[cfg(unix)]
+                {
+                    let mut sigterm =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                            .expect("SIGTERM handler");
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {},
+                        _ = sigterm.recv() => {},
+                    }
+                }
+                #[cfg(not(unix))]
                 tokio::signal::ctrl_c().await.ok();
-                tracing::info!("shutting down");
+                tracing::info!("shutting down — serializing state for handoff");
+                // Save counters to bincode+zstd before exiting. The next process
+                // (Gemini Man) will load this snapshot after kill_old() returns.
+                logs::save_state("whobelooking");
             };
             axum::serve(listener, app)
                 .with_graceful_shutdown(shutdown)
                 .await?;
         }
         Cmd::Queue => {
+            // Try IPC first (server running) → fall back to direct sled (server down).
+            #[cfg(feature = "serve")]
+            let jobs: Vec<crate::queue::Job> = match ipc::call("queue", serde_json::json!({})).await
+            {
+                Ok(v) => serde_json::from_value(v).unwrap_or_default(),
+                Err(_) => queue::list_jobs()?,
+            };
+            #[cfg(not(feature = "serve"))]
             let jobs = queue::list_jobs()?;
             if jobs.is_empty() {
                 println!("queue empty");
@@ -311,6 +692,117 @@ async fn main() -> anyhow::Result<()> {
             }
             None => println!("no pending jobs"),
         },
+        #[cfg(feature = "serve")]
+        Cmd::Ping => match ipc::call("ping", serde_json::json!({})).await {
+            Ok(v) => println!("{}", serde_json::to_string_pretty(&v)?),
+            Err(e) => anyhow::bail!("ipc unreachable: {}", e),
+        },
+        #[cfg(feature = "serve")]
+        Cmd::Visits { days_ago, format } => {
+            let val: serde_json::Value =
+                match ipc::call("visits", serde_json::json!({"days_ago": days_ago})).await {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let today = web::visits::today();
+                        let d = today.saturating_sub(days_ago);
+                        let rows = web::visits::list_for_date(d);
+                        serde_json::json!({
+                            "date_days": d,
+                            "today_minus": days_ago,
+                            "rows": rows.iter().map(|(ip,p,c,f,l)|
+                                serde_json::json!({"ip":ip,"path":p,"count":c,"first":f,"last":l})
+                            ).collect::<Vec<_>>(),
+                        })
+                    }
+                };
+
+            match format.as_str() {
+                "json" => println!("{}", serde_json::to_string_pretty(&val)?),
+                _ => {
+                    let rows = val
+                        .get("rows")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut by_ip: std::collections::HashMap<String, Vec<(String, u64, u64, u64)>> =
+                        std::collections::HashMap::new();
+                    for r in &rows {
+                        let ip = r["ip"].as_str().unwrap_or("").to_string();
+                        let p = r["path"].as_str().unwrap_or("").to_string();
+                        let c = r["count"].as_u64().unwrap_or(0);
+                        let f = r["first"].as_u64().unwrap_or(0);
+                        let l = r["last"].as_u64().unwrap_or(0);
+                        by_ip.entry(ip).or_default().push((p, c, f, l));
+                    }
+                    let mut ranked: Vec<_> = by_ip
+                        .into_iter()
+                        .map(|(ip, mut paths)| {
+                            paths.sort_by_key(|t| std::cmp::Reverse(t.1));
+                            let total: u64 = paths.iter().map(|t| t.1).sum();
+                            let first = paths.iter().map(|t| t.2).min().unwrap_or(0);
+                            let last = paths.iter().map(|t| t.3).max().unwrap_or(0);
+                            (ip, total, first, last, paths)
+                        })
+                        .collect();
+                    ranked.sort_by_key(|r| std::cmp::Reverse(r.1));
+                    println!(
+                        "# whobelooking visits — today-{} — {} unique IPs",
+                        days_ago,
+                        ranked.len()
+                    );
+                    for (ip, total, first, last, paths) in &ranked {
+                        let span = last.saturating_sub(*first);
+                        println!(
+                            "{:>5}  {}  span={}s  ({} paths)",
+                            total,
+                            ip,
+                            span,
+                            paths.len()
+                        );
+                        for (p, c, _, _) in paths.iter().take(8) {
+                            println!("        {:>4}x  {}", c, p);
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(feature = "serve")]
+        Cmd::Corpus {
+            format,
+            output,
+            min_hits,
+            attack_only,
+        } => {
+            // IPC first → fall back to direct sled if server isn't running.
+            let corpus: Vec<(String, u64)> = match ipc::call(
+                "corpus",
+                serde_json::json!({"min_hits": min_hits, "attack_only": attack_only}),
+            )
+            .await
+            {
+                Ok(v) => serde_json::from_value(v).unwrap_or_default(),
+                Err(_) => web::visits::corpus_paths(min_hits, attack_only),
+            };
+
+            let rendered = match format.as_str() {
+                "json" => serde_json::to_string_pretty(&corpus)?,
+                _ => corpus
+                    .iter()
+                    .map(|(p, _)| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            };
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, &rendered)?;
+                    eprintln!("wrote {} paths to {}", corpus.len(), path);
+                }
+                None => println!("{}", rendered),
+            }
+        }
+        Cmd::Order { op } => {
+            run_order_op(op)?;
+        }
         Cmd::Done { id, report } => {
             queue::complete_job(&id, report)?;
             println!("marked complete: {}", id);
@@ -366,6 +858,16 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Scrape { file, out, wait } => {
             browse::scrape(&file, &out, wait).await?;
         }
+        #[cfg(feature = "browser")]
+        Cmd::Pdf {
+            input,
+            out,
+            wait,
+            landscape,
+            background,
+        } => {
+            browse::pdf(&input, &out, wait, landscape, background).await?;
+        }
         Cmd::Pull {
             date,
             zone,
@@ -380,10 +882,102 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("{} IPs pulled", visitors.len());
         }
         Cmd::Rdns { ips } => {
+            let ips = read_ips_from_stdin_if_empty(ips);
             let results = dns::rdns_batch(&ips).await;
             for (ip, rdns) in &results {
                 println!("{:<42} {}", ip, rdns.as_deref().unwrap_or("-"));
             }
+        }
+        Cmd::Rdap { ips, json } => {
+            let ips = read_ips_from_stdin_if_empty(ips);
+            let results = rdap::lookup_batch(&ips).await;
+            if json {
+                let map: std::collections::BTreeMap<&str, &rdap::Info> = ips
+                    .iter()
+                    .zip(results.iter())
+                    .map(|(i, r)| (i.as_str(), r))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&map)?);
+            } else {
+                for (ip, info) in ips.iter().zip(results.iter()) {
+                    println!(
+                        "{:<42} {:>3} {:<22} {}",
+                        ip,
+                        info.country.as_deref().unwrap_or("-"),
+                        info.cidr.as_deref().unwrap_or("-"),
+                        info.org
+                            .as_deref()
+                            .unwrap_or(info.name.as_deref().unwrap_or("-")),
+                    );
+                }
+            }
+        }
+        Cmd::ParseLogs { files, hours } => {
+            let agg = parse_logs::parse_files(&files, hours)?;
+            println!("{}", serde_json::to_string_pretty(&agg)?);
+            eprintln!("{} unique IPs across {} files", agg.len(), files.len());
+        }
+        Cmd::CfFleet { token, hours, out } => {
+            let zones = cf::list_zones(&token).await?;
+            eprintln!("{} zones found", zones.len());
+            let groups = cf::pull_fleet(&token, &zones, hours).await?;
+            std::fs::write(&out, serde_json::to_string_pretty(&groups)?)?;
+            eprintln!("wrote {} ({} zone keys)", out, groups.len());
+        }
+        Cmd::CfEnrich {
+            ips,
+            token,
+            hours,
+            out,
+        } => {
+            let ips = read_ips_from_stdin_if_empty(ips);
+            let zones = cf::list_zones(&token).await?;
+            let enriched = cf::enrich_ips(&token, &zones, &ips, hours).await?;
+            std::fs::write(&out, serde_json::to_string_pretty(&enriched)?)?;
+            eprintln!(
+                "enriched {} IPs across {} zones → {}",
+                ips.len(),
+                zones.len(),
+                out
+            );
+        }
+        Cmd::Detect {
+            file,
+            max_rows,
+            json,
+        } => {
+            let text = std::fs::read_to_string(&file)?;
+            let report = wbl_detect::detect_schema(&text, max_rows as usize);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "delim={:?}  rows_sampled={}  had_header={}",
+                    report.delimiter, report.rows_sampled, report.had_header
+                );
+                for c in &report.columns {
+                    let conf = (c.confidence * 100.0) as u32;
+                    println!(
+                        "  col {:>2}  {:<12}  {:>3}%  {}  {}",
+                        c.index,
+                        c.kind.name(),
+                        conf,
+                        c.header.as_deref().unwrap_or(""),
+                        c.samples.first().map(String::as_str).unwrap_or(""),
+                    );
+                }
+            }
+        }
+        Cmd::Intel {
+            baselogs_dir,
+            token,
+            hours,
+            out,
+        } => {
+            intel::run(&baselogs_dir, &token, hours, &out).await?;
+        }
+        Cmd::Scan { url, json } => {
+            scan_cli::run(&url, json).await?;
         }
         Cmd::Neighbors { ip, skip_isp } => {
             let results = dns::scan_neighbors(&ip, skip_isp).await?;
@@ -509,25 +1103,29 @@ mod scout {
         zstd::decode_all(data).unwrap_or_else(|_| data.to_vec())
     }
 
+    /// Cache helper — returns `true` if the row is new to the sled tree, `false` if
+    /// already present.  Serialization or sled write errors collapse to `false` so
+    /// the scout can keep working through transient I/O hiccups.
+    fn cache_put<T: serde::Serialize>(db: &sled::Db, key: &str, value: &T) -> bool {
+        let Ok(buf) = serde_json::to_vec(value) else {
+            return false;
+        };
+        db.insert(key, compress(&buf))
+            .map(|prev| prev.is_none())
+            .unwrap_or(false)
+    }
+
     fn cache_bid(db: &sled::Db, b: &Bid) -> bool {
-        let key = format!("bid:{}:{}", b.source, b.id);
-        let val = compress(&serde_json::to_vec(b).unwrap());
-        db.insert(&key, val).unwrap().is_none()
+        cache_put(db, &format!("bid:{}:{}", b.source, b.id), b)
     }
     fn cache_award(db: &sled::Db, a: &Award) -> bool {
-        let key = format!("award:{}:{}", a.source, a.id);
-        let val = compress(&serde_json::to_vec(a).unwrap());
-        db.insert(&key, val).unwrap().is_none()
+        cache_put(db, &format!("award:{}:{}", a.source, a.id), a)
     }
     fn cache_signal(db: &sled::Db, s: &Signal) -> bool {
-        let key = format!("signal:{}:{}", s.source, s.id);
-        let val = compress(&serde_json::to_vec(s).unwrap());
-        db.insert(&key, val).unwrap().is_none()
+        cache_put(db, &format!("signal:{}:{}", s.source, s.id), s)
     }
     fn cache_rate(db: &sled::Db, r: &Rate) -> bool {
-        let key = format!("rate:{}", r.id);
-        let val = compress(&serde_json::to_vec(r).unwrap());
-        db.insert(&key, val).unwrap().is_none()
+        cache_put(db, &format!("rate:{}", r.id), r)
     }
 
     fn strip_html(s: &str) -> String {
@@ -558,10 +1156,13 @@ mod scout {
 
     /// Enrich a batch of bids — fetch full descriptions in parallel, cap concurrency
     async fn enrich_bids(bids: &mut [Bid], db: &sled::Db) {
-        let client = reqwest::Client::builder()
+        let Ok(client) = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .unwrap();
+        else {
+            tracing::warn!("enrich_bids: reqwest client build failed, skipping enrichment");
+            return;
+        };
 
         for b in bids.iter_mut() {
             // Skip if already enriched (description > 200 chars = probably full text)
@@ -571,7 +1172,7 @@ mod scout {
 
             // Check sled for cached enrichment
             let ekey = format!("enriched:{}:{}", b.source, b.id);
-            if let Some(cached) = db.get(&ekey).unwrap() {
+            if let Ok(Some(cached)) = db.get(&ekey) {
                 let text = String::from_utf8_lossy(&decompress(&cached)).to_string();
                 if !text.is_empty() {
                     b.description = text;
@@ -1146,11 +1747,11 @@ mod scout {
             let db = super::open_db();
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             for code in naics {
                 let cache_key = format!("sam_last:{}", code);
-                if let Some(ts_bytes) = db.get(&cache_key).unwrap() {
+                if let Ok(Some(ts_bytes)) = db.get(&cache_key) {
                     let ts = u64::from_le_bytes(ts_bytes.as_ref().try_into().unwrap_or([0; 8]));
                     if now - ts < 86400 {
                         eprintln!("[sam.gov] {} cached (<24h), skipping API call", code);
@@ -1621,8 +2222,8 @@ mod cf {
     fn chrono_free_today() -> String {
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let days = (secs / 86400) as i64;
         let y = (10000 * days + 14780) / 3652425;
         let doy = days - (365 * y + y / 4 - y / 100 + y / 400);
@@ -1637,6 +2238,998 @@ mod cf {
         let year = y + mi / 10;
         let day = doy - (mi * 306 + 5) / 10 + 1;
         format!("{:04}-{:02}-{:02}", year, month, day)
+    }
+
+    // ---- additions for fleet pull / enrichment ----
+
+    /// Per-process throttle for CF GraphQL.  CF allows 5 req/s per token.
+    /// We aim for ≤4 req/s with jittered spacing to leave headroom for
+    /// the dashboard + bot-management lookups happening alongside.
+    static GQL_GATE: tokio::sync::Mutex<Option<std::time::Instant>> =
+        tokio::sync::Mutex::const_new(None);
+
+    async fn pace() {
+        const MIN_GAP_MS: u64 = 250; // 4 req/s
+        let mut g = GQL_GATE.lock().await;
+        let now = std::time::Instant::now();
+        if let Some(prev) = *g {
+            let elapsed = now.duration_since(prev);
+            if elapsed < std::time::Duration::from_millis(MIN_GAP_MS) {
+                let wait = std::time::Duration::from_millis(MIN_GAP_MS) - elapsed;
+                drop(g);
+                tokio::time::sleep(wait).await;
+                g = GQL_GATE.lock().await;
+            }
+        }
+        *g = Some(std::time::Instant::now());
+    }
+
+    /// POST a GraphQL request with retry + exponential backoff. Retries on:
+    ///   * `429 Too Many Requests`
+    ///   * any 5xx
+    ///   * transient transport errors (timeouts, connect failures)
+    ///
+    /// Backoff: 500ms, 1s, 2s, 4s. After 4 attempts we surface the error.
+    async fn graphql_post(
+        client: &reqwest::Client,
+        token: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let mut attempt = 0u32;
+        loop {
+            pace().await;
+            let res = client
+                .post("https://api.cloudflare.com/client/v4/graphql")
+                .header("Authorization", format!("Bearer {}", token))
+                .json(body)
+                .send()
+                .await;
+            let retry_reason: Option<String> = match res {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        return Ok(resp.json().await?);
+                    }
+                    if status.as_u16() == 429 || status.is_server_error() {
+                        Some(format!("HTTP {}", status))
+                    } else {
+                        let text = resp.text().await.unwrap_or_default();
+                        anyhow::bail!(
+                            "CF GraphQL non-retryable {}: {}",
+                            status,
+                            &text[..text.len().min(200)]
+                        );
+                    }
+                }
+                Err(e) if e.is_timeout() || e.is_connect() => Some(format!("transport: {}", e)),
+                Err(e) => return Err(e.into()),
+            };
+            attempt += 1;
+            if attempt > 4 {
+                anyhow::bail!(
+                    "CF GraphQL gave up after {} attempts: {}",
+                    attempt,
+                    retry_reason.as_deref().unwrap_or("?")
+                );
+            }
+            // Exponential backoff with small jitter (ms = 500 << (attempt-1) ± 100).
+            let base = 500u64 << (attempt - 1);
+            let jitter = (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_millis())
+                .unwrap_or(0)
+                % 200) as u64;
+            let wait = base.saturating_add(jitter);
+            tracing::warn!(
+                "[cf-graphql] retry {} after {}ms ({})",
+                attempt,
+                wait,
+                retry_reason.as_deref().unwrap_or("?")
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+        }
+    }
+
+    /// List every zone the token can see (paginated).
+    pub async fn list_zones(token: &str) -> anyhow::Result<Vec<(String, String)>> {
+        #[derive(serde::Deserialize)]
+        struct Zone {
+            id: String,
+            name: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            success: bool,
+            result: Vec<Zone>,
+        }
+        let client = reqwest::Client::new();
+        let mut out = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let r: Resp = client
+                .get(format!(
+                    "https://api.cloudflare.com/client/v4/zones?per_page=50&page={}",
+                    page
+                ))
+                .header("Authorization", format!("Bearer {}", token))
+                .send()
+                .await?
+                .json()
+                .await?;
+            if !r.success {
+                anyhow::bail!("CF zones API: success=false");
+            }
+            let n = r.result.len();
+            out.extend(r.result.into_iter().map(|z| (z.name, z.id)));
+            if n < 50 {
+                break;
+            }
+            page += 1;
+            if page > 20 {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Build ISO-8601 RFC-3339 strings for `now-hours` → `now`, split into 24h chunks.
+    pub fn windows_24h(hours: u64) -> Vec<(String, String)> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let start = now.saturating_sub(hours * 3600);
+        let mut chunks = Vec::new();
+        let mut cur = start;
+        while cur < now {
+            let end = (cur + 24 * 3600).min(now);
+            chunks.push((iso_z(cur), iso_z(end)));
+            cur = end;
+        }
+        chunks
+    }
+
+    fn iso_z(secs: u64) -> String {
+        let days = (secs / 86400) as i64;
+        let z = days + 719468;
+        let era = z.div_euclid(146097);
+        let doe = (z - era * 146097) as u64;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe as i64 + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+        let yfix = y + if m <= 2 { 1 } else { 0 };
+        let hod = secs % 86400;
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            yfix,
+            m,
+            d,
+            hod / 3600,
+            (hod % 3600) / 60,
+            hod % 60
+        )
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+    pub struct FleetGroup {
+        pub count: u32,
+        pub ip: String,
+        pub country: Option<String>,
+        pub host: Option<String>,
+        pub path: Option<String>,
+        pub status: Option<u32>,
+        pub user_agent: Option<String>,
+    }
+
+    /// Pull `httpRequestsAdaptiveGroups` for every zone × every 24h window. Returns map zone-name → groups.
+    pub async fn pull_fleet(
+        token: &str,
+        zones: &[(String, String)],
+        hours: u64,
+    ) -> anyhow::Result<std::collections::BTreeMap<String, Vec<FleetGroup>>> {
+        let windows = windows_24h(hours);
+        let client = reqwest::Client::new();
+        let mut out = std::collections::BTreeMap::<String, Vec<FleetGroup>>::new();
+        for (zname, zid) in zones {
+            let entry = out.entry(zname.clone()).or_default();
+            for (s, e) in &windows {
+                let q = r#"query($zone:String!,$s:Time!,$e:Time!){
+  viewer { zones(filter:{zoneTag:$zone}){
+    httpRequestsAdaptiveGroups(limit:10000,
+      filter:{datetime_geq:$s, datetime_leq:$e},
+      orderBy:[count_DESC]){
+        count
+        dimensions { clientIP clientCountryName clientRequestHTTPHost clientRequestPath edgeResponseStatus userAgent }
+    } } } }"#;
+                let body =
+                    serde_json::json!({ "query": q, "variables": {"zone": zid, "s": s, "e": e}});
+                let v = match graphql_post(&client, token, &body).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("[cf-fleet] {} {} {}", zname, s, e);
+                        continue;
+                    }
+                };
+                if let Some(errs) = v.get("errors").and_then(|x| x.as_array()) {
+                    if !errs.is_empty() {
+                        eprintln!(
+                            "[cf-fleet] {} {} errors: {}",
+                            zname,
+                            s,
+                            errs[0]
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("?")
+                        );
+                        continue;
+                    }
+                }
+                let groups = v
+                    .pointer("/data/viewer/zones/0/httpRequestsAdaptiveGroups")
+                    .and_then(|x| x.as_array());
+                if let Some(arr) = groups {
+                    for g in arr {
+                        let dim = &g["dimensions"];
+                        entry.push(FleetGroup {
+                            count: g["count"].as_u64().unwrap_or(0) as u32,
+                            ip: dim["clientIP"].as_str().unwrap_or("").to_string(),
+                            country: dim["clientCountryName"].as_str().map(|s| s.to_string()),
+                            host: dim["clientRequestHTTPHost"].as_str().map(|s| s.to_string()),
+                            path: dim["clientRequestPath"].as_str().map(|s| s.to_string()),
+                            status: dim["edgeResponseStatus"].as_u64().map(|x| x as u32),
+                            user_agent: dim["userAgent"].as_str().map(|s| s.to_string()),
+                        });
+                    }
+                }
+            }
+            eprintln!("[cf-fleet] {:25} {:6} groups", zname, entry.len());
+        }
+        Ok(out)
+    }
+
+    #[derive(serde::Serialize, Default, Clone)]
+    pub struct EnrichRecord {
+        pub cf_hits: u32,
+        pub countries: std::collections::BTreeSet<String>,
+        pub paths: std::collections::BTreeMap<String, u32>,
+        pub zones: std::collections::BTreeMap<String, u32>,
+        pub statuses: std::collections::BTreeMap<String, u32>,
+        pub user_agents: std::collections::BTreeSet<String>,
+        pub firewall_blocks: u32,
+        pub firewall_events: Vec<FwEvent>,
+    }
+
+    #[derive(serde::Serialize, Default, Clone)]
+    pub struct FwEvent {
+        pub zone: String,
+        pub action: String,
+        pub source: String,
+        pub rule: String,
+        pub host: String,
+        pub path: String,
+        pub time: String,
+        pub country: String,
+    }
+
+    /// Enrich a list of IPs across every zone, both `httpRequestsAdaptiveGroups` and `firewallEventsAdaptive`.
+    pub async fn enrich_ips(
+        token: &str,
+        zones: &[(String, String)],
+        ips: &[String],
+        hours: u64,
+    ) -> anyhow::Result<std::collections::BTreeMap<String, EnrichRecord>> {
+        let windows = windows_24h(hours);
+        let client = reqwest::Client::new();
+        let mut out: std::collections::BTreeMap<String, EnrichRecord> = ips
+            .iter()
+            .map(|ip| (ip.clone(), EnrichRecord::default()))
+            .collect();
+        for (zname, zid) in zones {
+            for (s, e) in &windows {
+                let q = r#"query($zone:String!,$s:Time!,$e:Time!,$ips:[String!]!){
+  viewer { zones(filter:{zoneTag:$zone}){
+    httpRequestsAdaptiveGroups(limit:10000,
+      filter:{datetime_geq:$s, datetime_leq:$e, clientIP_in:$ips},
+      orderBy:[count_DESC]){
+        count
+        dimensions { clientIP clientCountryName clientRequestHTTPHost clientRequestPath edgeResponseStatus userAgent }
+    }
+    firewallEventsAdaptive(limit:1000,
+      filter:{datetime_geq:$s, datetime_leq:$e, clientIP_in:$ips}){
+        clientIP action source ruleId clientCountryName userAgent
+        clientRequestHTTPHost clientRequestPath datetime
+    }
+  } } }"#;
+                let body = serde_json::json!({ "query": q, "variables": {"zone": zid, "s": s, "e": e, "ips": ips}});
+                let v = match graphql_post(&client, token, &body).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("[cf-enrich] {} {} {}", zname, s, e);
+                        continue;
+                    }
+                };
+                if let Some(errs) = v.get("errors").and_then(|x| x.as_array()) {
+                    if !errs.is_empty() {
+                        eprintln!(
+                            "[cf-enrich] {} {} {}",
+                            zname,
+                            s,
+                            errs[0]
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("?")
+                        );
+                        continue;
+                    }
+                }
+                if let Some(arr) = v
+                    .pointer("/data/viewer/zones/0/httpRequestsAdaptiveGroups")
+                    .and_then(|x| x.as_array())
+                {
+                    for g in arr {
+                        let dim = &g["dimensions"];
+                        let ip = dim["clientIP"].as_str().unwrap_or("");
+                        let Some(rec) = out.get_mut(ip) else { continue };
+                        let n = g["count"].as_u64().unwrap_or(0) as u32;
+                        rec.cf_hits += n;
+                        if let Some(cc) = dim["clientCountryName"].as_str() {
+                            rec.countries.insert(cc.to_string());
+                        }
+                        if let Some(p) = dim["clientRequestPath"].as_str() {
+                            *rec.paths.entry(p.to_string()).or_insert(0) += n;
+                        }
+                        *rec.zones.entry(zname.clone()).or_insert(0) += n;
+                        if let Some(st) = dim["edgeResponseStatus"].as_u64() {
+                            *rec.statuses.entry(st.to_string()).or_insert(0) += n;
+                        }
+                        if let Some(ua) = dim["userAgent"].as_str() {
+                            rec.user_agents.insert(ua.chars().take(160).collect());
+                        }
+                    }
+                }
+                if let Some(arr) = v
+                    .pointer("/data/viewer/zones/0/firewallEventsAdaptive")
+                    .and_then(|x| x.as_array())
+                {
+                    for ev in arr {
+                        let ip = ev["clientIP"].as_str().unwrap_or("");
+                        let Some(rec) = out.get_mut(ip) else { continue };
+                        rec.firewall_blocks += 1;
+                        rec.firewall_events.push(FwEvent {
+                            zone: zname.clone(),
+                            action: ev["action"].as_str().unwrap_or("").to_string(),
+                            source: ev["source"].as_str().unwrap_or("").to_string(),
+                            rule: ev["ruleId"].as_str().unwrap_or("").to_string(),
+                            host: ev["clientRequestHTTPHost"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string(),
+                            path: ev["clientRequestPath"].as_str().unwrap_or("").to_string(),
+                            time: ev["datetime"].as_str().unwrap_or("").to_string(),
+                            country: ev["clientCountryName"].as_str().unwrap_or("").to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Parse `whobelooking`-style base log lines (`visit ip=… cc=… method=… path=… ua="…" ref="…"`).
+mod parse_logs {
+    use regex_lite::Regex;
+    use serde::Serialize;
+    use std::collections::BTreeMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[derive(Serialize, Default, Clone)]
+    pub struct PerIp {
+        pub hits: u32,
+        pub class: String,
+        pub paths: BTreeMap<String, u32>,
+        pub user_agents: BTreeMap<String, u32>,
+        pub countries: BTreeMap<String, u32>,
+        pub sites: BTreeMap<String, u32>,
+        pub methods: BTreeMap<String, u32>,
+        pub first_unix: u64,
+        pub last_unix: u64,
+    }
+
+    pub fn parse_files(paths: &[String], hours: u64) -> anyhow::Result<BTreeMap<String, PerIp>> {
+        // Pre-compile regexes (literal patterns, unit-tested — `expect` is correct).
+        let ansi = Regex::new(r"\x1b\[[0-9;]*m").expect("ANSI strip regex must compile");
+        let ts_re = Regex::new(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})")
+            .expect("timestamp regex must compile");
+        let visit_re = Regex::new(
+            r#"visit ip=(\S+) cc=(\S+) method=(\S+) path=(\S+) ua="([^"]*)" ref="([^"]*)""#,
+        )
+        .expect("visit-line regex must compile");
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let cutoff = if hours == 0 {
+            0
+        } else {
+            now.saturating_sub(hours * 3600)
+        };
+
+        let mut out: BTreeMap<String, PerIp> = BTreeMap::new();
+        for path in paths {
+            let site = std::path::Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            // Stream the file line-by-line through a `BufReader` so we never
+            // hold the whole log in memory. A 1 GB Cloudflare log used to
+            // peak at ~2 GB RAM (utf8_lossy doubling); now it's bounded by
+            // the longest single line.
+            let file = match std::fs::File::open(path) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("[parse-logs] skip {}: {}", path, e);
+                    continue;
+                }
+            };
+            use std::io::BufRead;
+            let reader = std::io::BufReader::with_capacity(64 * 1024, file);
+            for line in reader.lines() {
+                let Ok(line) = line else { continue };
+                let stripped = ansi.replace_all(&line, "");
+                let Some(ts) = ts_re.captures(&stripped) else {
+                    continue;
+                };
+                let Some(v) = visit_re.captures(&stripped) else {
+                    continue;
+                };
+                let ts_unix = utc_to_unix(
+                    ts[1].parse()?,
+                    ts[2].parse()?,
+                    ts[3].parse()?,
+                    ts[4].parse()?,
+                    ts[5].parse()?,
+                    ts[6].parse()?,
+                );
+                if ts_unix < cutoff {
+                    continue;
+                }
+                let ip = v[1].to_string();
+                let rec = out.entry(ip.clone()).or_default();
+                rec.hits += 1;
+                *rec.paths.entry(v[4].to_string()).or_insert(0) += 1;
+                let ua: String = v[5].chars().take(160).collect();
+                *rec.user_agents.entry(ua).or_insert(0) += 1;
+                *rec.countries.entry(v[2].to_string()).or_insert(0) += 1;
+                *rec.sites.entry(site.clone()).or_insert(0) += 1;
+                *rec.methods.entry(v[3].to_string()).or_insert(0) += 1;
+                if rec.first_unix == 0 || ts_unix < rec.first_unix {
+                    rec.first_unix = ts_unix;
+                }
+                if ts_unix > rec.last_unix {
+                    rec.last_unix = ts_unix;
+                }
+            }
+        }
+        // Classify
+        for rec in out.values_mut() {
+            rec.class = classify(rec).to_string();
+        }
+        Ok(out)
+    }
+
+    pub fn classify(p: &PerIp) -> &'static str {
+        let paths: Vec<&str> = p.paths.keys().map(String::as_str).collect();
+        let uas: Vec<&str> = p.user_agents.keys().map(String::as_str).collect();
+        whobelooking::redact::classify(&paths, &uas)
+    }
+
+    fn utc_to_unix(y: i64, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> u64 {
+        // Howard Hinnant's days_from_civil
+        let y = y - if mo <= 2 { 1 } else { 0 };
+        let era = y.div_euclid(400);
+        let yoe = (y - era * 400) as u64;
+        let m = mo as u64;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + (d as u64) - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146097 + doe as i64 - 719468;
+        let secs = (days as i128) * 86400 + (h as i128) * 3600 + (mi as i128) * 60 + s as i128;
+        secs.max(0) as u64
+    }
+}
+
+/// RDAP whois lookup via rdap.org bootstrap.
+///
+/// The on-disk cache is **CIDR-keyed**: when a fetch returns a netblock
+/// (e.g. `8.8.8.0/24`), we store one entry under `cidr:8.8.8.0/24` and
+/// every subsequent lookup of an IP that falls inside that block returns
+/// the cached `Info` without an HTTP call.  Same `Info` is also stored
+/// under `ip:{exact}` so direct hits stay O(1); CIDR scan is the fallback.
+mod rdap {
+    use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use whobelooking::cidr;
+
+    #[derive(Serialize, Deserialize, Default, Clone)]
+    pub struct Info {
+        pub handle: Option<String>,
+        pub name: Option<String>,
+        pub country: Option<String>,
+        pub cidr: Option<String>,
+        pub org: Option<String>,
+        pub admin: Option<String>,
+        pub remarks: Vec<String>,
+        pub error: Option<String>,
+    }
+
+    fn cache_db_path() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("whobelooking")
+            .join("rdap_cache.db")
+    }
+
+    fn legacy_json_path() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("whobelooking")
+            .join("rdap_cache.json")
+    }
+
+    /// Open the sled-backed RDAP cache. If absent, attempt to migrate from
+    /// the legacy `rdap_cache.json` file (preserves existing /24 lookups
+    /// across upgrades). Failure to open returns `None` so the caller can
+    /// still proceed without persistence.
+    ///
+    /// sled gives us atomic single-writer semantics across the Gemini Man
+    /// restart window — old + new whobelooking can both read, only one can
+    /// write at a time, and there's no JSON-file last-writer-wins race.
+    fn open_cache() -> Option<sled::Db> {
+        let p = cache_db_path();
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let db = match sled::open(&p) {
+            Ok(db) => db,
+            Err(e) => {
+                tracing::warn!("rdap sled open failed: {} — running without cache", e);
+                return None;
+            }
+        };
+        if db.is_empty() {
+            if let Ok(s) = std::fs::read_to_string(legacy_json_path()) {
+                if let Ok(m) = serde_json::from_str::<HashMap<String, Info>>(&s) {
+                    let mut migrated = 0u32;
+                    for (k, v) in m {
+                        if let Ok(buf) = serde_json::to_vec(&v) {
+                            if db.insert(k.as_bytes(), buf).is_ok() {
+                                migrated += 1;
+                            }
+                        }
+                    }
+                    let _ = db.flush();
+                    if migrated > 0 {
+                        tracing::info!(
+                            "rdap cache: migrated {} entries from legacy JSON",
+                            migrated
+                        );
+                    }
+                }
+            }
+        }
+        Some(db)
+    }
+
+    fn cache_get(db: &sled::Db, key: &str) -> Option<Info> {
+        let v = db.get(key.as_bytes()).ok().flatten()?;
+        serde_json::from_slice(&v).ok()
+    }
+
+    fn cache_put(db: &sled::Db, key: &str, info: &Info) {
+        if let Ok(buf) = serde_json::to_vec(info) {
+            let _ = db.insert(key.as_bytes(), buf);
+        }
+    }
+
+    /// Walk the sled tree once; return the first `cidr:` entry whose prefix
+    /// contains `ip`. Cache size in practice is hundreds to low thousands;
+    /// linear scan beats indexing complexity at this scale.
+    fn cache_cidr_match(db: &sled::Db, ip: &str) -> Option<Info> {
+        for kv in db.scan_prefix("cidr:") {
+            let Ok((k, v)) = kv else {
+                continue;
+            };
+            let Ok(key) = std::str::from_utf8(&k) else {
+                continue;
+            };
+            let cidr_str = key.strip_prefix("cidr:").unwrap_or("");
+            if cidr::contains(cidr_str, ip) {
+                return serde_json::from_slice(&v).ok();
+            }
+        }
+        None
+    }
+
+    fn cache_lookup(db: &sled::Db, ip: &str) -> Option<Info> {
+        cache_get(db, &format!("ip:{}", ip)).or_else(|| cache_cidr_match(db, ip))
+    }
+
+    fn cache_insert(db: &sled::Db, ip: &str, info: &Info) {
+        cache_put(db, &format!("ip:{}", ip), info);
+        if let Some(c) = info.cidr.as_deref() {
+            if cidr::contains(c, ip) {
+                cache_put(db, &format!("cidr:{}", c), info);
+            }
+        }
+    }
+
+    pub async fn lookup_batch(ips: &[String]) -> Vec<Info> {
+        let cache = open_cache();
+        let client = reqwest::Client::builder()
+            .user_agent("whobelooking-rdap/0.1")
+            .timeout(std::time::Duration::from_secs(12))
+            .build()
+            .unwrap_or_default();
+        let mut out = Vec::with_capacity(ips.len());
+        for ip in ips {
+            if let Some(db) = &cache {
+                if let Some(hit) = cache_lookup(db, ip) {
+                    out.push(hit);
+                    continue;
+                }
+            }
+            let info = match fetch_one(&client, ip).await {
+                Ok(i) => i,
+                Err(e) => Info {
+                    error: Some(e.to_string()),
+                    ..Info::default()
+                },
+            };
+            if let Some(db) = &cache {
+                cache_insert(db, ip, &info);
+            }
+            out.push(info);
+            // Be kind to RDAP — 250ms between calls.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        if let Some(db) = &cache {
+            let _ = db.flush_async().await;
+        }
+        out
+    }
+
+    async fn fetch_one(client: &reqwest::Client, ip: &str) -> anyhow::Result<Info> {
+        let url = format!("https://rdap.org/ip/{}", ip);
+        let resp = client.get(&url).send().await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("HTTP {}: {}", status, &text[..text.len().min(120)]);
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)?;
+        let mut out = Info {
+            handle: v["handle"].as_str().map(|s| s.to_string()),
+            name: v["name"].as_str().map(|s| s.to_string()),
+            country: v["country"].as_str().map(|s| s.to_string()),
+            ..Info::default()
+        };
+        // CIDR assembly
+        if let Some(arr) = v["cidr0_cidrs"].as_array() {
+            if let Some(c) = arr.first() {
+                let pfx = c["v4prefix"]
+                    .as_str()
+                    .or_else(|| c["v6prefix"].as_str())
+                    .unwrap_or("");
+                let len = c["length"].as_u64().unwrap_or(0);
+                if !pfx.is_empty() {
+                    out.cidr = Some(format!("{}/{}", pfx, len));
+                }
+            }
+        } else if let Some(s) = v["startAddress"].as_str() {
+            out.cidr = Some(s.to_string());
+        }
+        if let Some(arr) = v["remarks"].as_array() {
+            for r in arr.iter().take(3) {
+                if let Some(s) = r["description"].as_str() {
+                    out.remarks.push(s.to_string());
+                }
+            }
+        }
+        if let Some(arr) = v["entities"].as_array() {
+            for e in arr {
+                let roles = e["roles"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                let (fn_, org, kind) = vcard(&e["vcardArray"]);
+                let label = match (fn_.as_deref(), org.as_deref(), kind.as_deref()) {
+                    (_, Some(o), _) => Some(o.to_string()),
+                    (Some(f), _, Some("org")) => Some(f.to_string()),
+                    (Some(f), _, _) if !roles.contains("administrative") => Some(f.to_string()),
+                    _ => None,
+                };
+                if out.org.is_none() {
+                    if let Some(l) = label.clone() {
+                        out.org = Some(l);
+                    }
+                }
+                if roles.contains("administrative") && out.admin.is_none() {
+                    if let Some(f) = fn_ {
+                        out.admin = Some(f);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn vcard(v: &serde_json::Value) -> (Option<String>, Option<String>, Option<String>) {
+        let arr = match v.as_array() {
+            Some(a) if a.len() >= 2 => &a[1],
+            _ => return (None, None, None),
+        };
+        let entries = match arr.as_array() {
+            Some(a) => a,
+            None => return (None, None, None),
+        };
+        let mut fn_ = None;
+        let mut org = None;
+        let mut kind = None;
+        for entry in entries {
+            let tup = match entry.as_array() {
+                Some(t) if t.len() >= 4 => t,
+                _ => continue,
+            };
+            let key = tup[0].as_str().unwrap_or("");
+            let val = tup[3].as_str().map(|s| s.to_string());
+            match key {
+                "fn" => fn_ = val,
+                "org" => org = val,
+                "kind" => kind = val,
+                _ => {}
+            }
+        }
+        (fn_, org, kind)
+    }
+}
+
+/// End-to-end intel pipeline orchestrator.  Reads base logs, hits CF GraphQL, runs rDNS + RDAP,
+/// emits two HTML files (`intel.unredacted.html` + `intel.redacted.html`).
+mod intel {
+    use crate::{cf, dns, parse_logs, rdap};
+    use std::collections::BTreeMap;
+    use whobelooking::redact;
+
+    pub async fn run(
+        baselogs_dir: &str,
+        cf_token: &str,
+        hours: u64,
+        out_dir: &str,
+    ) -> anyhow::Result<()> {
+        std::fs::create_dir_all(out_dir)?;
+
+        // 1. Parse base logs (any *.log under the dir).
+        eprintln!("[intel] parsing base logs in {}", baselogs_dir);
+        let mut log_files = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(baselogs_dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|s| s.to_str()) == Some("log") {
+                    if let Some(s) = p.to_str() {
+                        log_files.push(s.to_string());
+                    }
+                }
+            }
+        }
+        log_files.sort();
+        let mut base = parse_logs::parse_files(&log_files, hours)?;
+
+        // 2. Drop operator IPs entirely.
+        let before = base.len();
+        base.retain(|ip, _| !redact::is_operator(ip));
+        eprintln!(
+            "[intel] {} unique IPs ({} dropped as operator)",
+            base.len(),
+            before - base.len()
+        );
+
+        // 3. Pick priority IPs (top by hits, top per threat tier, top buyers).
+        let priority = pick_priority(&base);
+        eprintln!("[intel] {} priority IPs for enrichment", priority.len());
+
+        // 4. CF zone discovery + enrichment.
+        let zones = cf::list_zones(cf_token).await.unwrap_or_default();
+        eprintln!("[intel] {} CF zones visible", zones.len());
+        let cf_enrich = if !zones.is_empty() && !priority.is_empty() {
+            cf::enrich_ips(cf_token, &zones, &priority, hours)
+                .await
+                .unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        };
+
+        // 5. rDNS + RDAP for priority IPs only (ignore-listed are already gone).
+        let rdns_results = dns::rdns_batch(&priority).await;
+        let rdns_map: BTreeMap<String, String> = rdns_results
+            .into_iter()
+            .map(|(ip, h)| (ip, h.unwrap_or_else(|| "-".to_string())))
+            .collect();
+        let rdap_results = rdap::lookup_batch(&priority).await;
+        let rdap_map: BTreeMap<String, rdap::Info> = priority
+            .iter()
+            .cloned()
+            .zip(rdap_results.into_iter())
+            .collect();
+
+        // 6. Save raw artifacts (unredacted) for ops.
+        let raw_path = format!("{}/intel.json", out_dir);
+        let raw = serde_json::json!({
+            "hours": hours,
+            "baselogs_dir": baselogs_dir,
+            "ips_total": base.len(),
+            "base": base,
+            "cf_enrich": cf_enrich,
+            "rdns": rdns_map,
+            "rdap": rdap_map,
+        });
+        std::fs::write(&raw_path, serde_json::to_string_pretty(&raw)?)?;
+        eprintln!("[intel] wrote {}", raw_path);
+
+        // 7. Build HTML — unredacted first, then redacted.
+        let html_unredacted = render_html(
+            &base, &cf_enrich, &rdns_map, &rdap_map, hours, /*redacted=*/ false,
+        );
+        let html_redacted = render_html(
+            &base, &cf_enrich, &rdns_map, &rdap_map, hours, /*redacted=*/ true,
+        );
+        let unred_path = format!("{}/intel.unredacted.html", out_dir);
+        let red_path = format!("{}/intel.redacted.html", out_dir);
+        std::fs::write(&unred_path, &html_unredacted)?;
+        std::fs::write(&red_path, &html_redacted)?;
+        eprintln!("[intel] wrote {}", unred_path);
+        eprintln!("[intel] wrote {}", red_path);
+        Ok(())
+    }
+
+    fn pick_priority(base: &BTreeMap<String, parse_logs::PerIp>) -> Vec<String> {
+        let mut by_class: std::collections::HashMap<&str, Vec<(&String, u32)>> = Default::default();
+        let mut all: Vec<(&String, u32)> = base.iter().map(|(k, v)| (k, v.hits)).collect();
+        for (ip, p) in base {
+            by_class
+                .entry(p.class.as_str())
+                .or_default()
+                .push((ip, p.hits));
+        }
+        all.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut out: Vec<String> = all.iter().take(40).map(|(ip, _)| (*ip).clone()).collect();
+        for cls in ["CRED_HUNT", "EXPLOIT", "LLM_PROBE", "BUYER"] {
+            if let Some(v) = by_class.get_mut(cls) {
+                v.sort_by(|a, b| b.1.cmp(&a.1));
+                for (ip, _) in v.iter().take(15) {
+                    if !out.contains(*ip) {
+                        out.push((*ip).clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn render_html(
+        base: &BTreeMap<String, parse_logs::PerIp>,
+        cf_enrich: &BTreeMap<String, cf::EnrichRecord>,
+        rdns: &BTreeMap<String, String>,
+        rdap_map: &BTreeMap<String, rdap::Info>,
+        hours: u64,
+        redacted: bool,
+    ) -> String {
+        let label = if redacted {
+            "REDACTED"
+        } else {
+            "INTERNAL — UNREDACTED"
+        };
+        let mut ranked: Vec<(&String, &parse_logs::PerIp)> = base.iter().collect();
+        ranked.sort_by(|a, b| b.1.hits.cmp(&a.1.hits));
+        let mut top_rows = String::new();
+        for (ip, p) in ranked.iter().take(25) {
+            let display_ip = if redacted {
+                redact::redact(ip)
+            } else {
+                (*ip).clone()
+            };
+            let cc = p.countries.keys().next().cloned().unwrap_or_default();
+            let top_path = p
+                .paths
+                .iter()
+                .max_by_key(|(_, c)| **c)
+                .map(|(k, _)| k.clone())
+                .unwrap_or_default();
+            let rd_raw = rdns.get(*ip).cloned().unwrap_or_else(|| "-".to_string());
+            let rd = if redacted {
+                redact::redact_text(&rd_raw)
+            } else {
+                rd_raw
+            };
+            let org = rdap_map
+                .get(*ip)
+                .and_then(|r| r.org.clone().or_else(|| r.name.clone()))
+                .unwrap_or_else(|| "-".to_string());
+            let cf_hits = cf_enrich.get(*ip).map(|e| e.cf_hits).unwrap_or(0);
+            let fw = cf_enrich.get(*ip).map(|e| e.firewall_blocks).unwrap_or(0);
+            top_rows.push_str(&format!(
+                "<tr><td>{ip}</td><td>{cc}</td><td>{org}</td><td>{rd}</td><td class=r>{base}</td><td class=r>{cf}</td><td class=r>{fw}</td><td>{cls}</td><td>{path}</td></tr>",
+                ip = display_ip,
+                cc = cc,
+                org = htmlesc(&org),
+                rd = htmlesc(&rd),
+                base = p.hits,
+                cf = cf_hits,
+                fw = fw,
+                cls = p.class,
+                path = htmlesc(&top_path),
+            ));
+        }
+
+        format!(
+            r#"<!doctype html><html><head><meta charset=utf-8>
+<title>WHOBELOOKING — {label} — last {hours}h</title>
+<style>
+@page {{ size: letter; margin: 0.6in; background: #1a1f2e; }}
+html, body {{ background: #1a1f2e; }}
+body {{ font: 10pt/1.45 'Helvetica Neue',Arial,sans-serif; color: #d8d4cc; padding: 0.6in; margin:0; }}
+h1 {{ font-size:18pt; color:#f1ede4; letter-spacing:.04em; margin:0 0 4pt; }}
+h2 {{ font-size:12pt; color:#f1ede4; text-transform:uppercase; letter-spacing:.05em;
+      border-bottom:2px solid #4a5670; padding:14pt 0 4pt; margin:0; }}
+.classification {{ font-size:7pt; letter-spacing:.3em; text-transform:uppercase; color:#e07b5e;
+      text-align:center; padding:4pt 0; border:1px solid #6b4338;
+      background:rgba(224,123,94,.06); margin-bottom:14pt; }}
+.header {{ border-bottom:3px solid #4a5670; padding-bottom:8pt; margin-bottom:14pt; }}
+.header .sub {{ font-size:8pt; color:#9ba2b3; margin-top:4pt; }}
+table {{ width:100%; border-collapse:collapse; font-size:9pt; margin:6pt 0 12pt; }}
+th {{ background:#2c3346; color:#f1ede4; text-align:left; padding:5pt 8pt;
+      font-size:8pt; letter-spacing:.05em; text-transform:uppercase; }}
+td {{ padding:4pt 8pt; border-bottom:1px solid #2c3346; vertical-align:top; }}
+tr:nth-child(even) td {{ background:#1f2536; }}
+td.r {{ text-align:right; }}
+code {{ font-family:'SF Mono',Consolas,monospace; font-size:8pt;
+       background:#2c3346; color:#c4d4e0; padding:1pt 3pt; border-radius:2pt; }}
+.footer {{ margin-top:16pt; padding-top:6pt; border-top:1px solid #4a5670;
+       font-size:7pt; color:#7d8497; text-align:center; }}
+</style></head><body>
+<div class=classification>Confidential — {label} — The Cochran Block, LLC</div>
+<div class=header>
+<h1>WHOBELOOKING — FLEET INTEL ({hours}h)</h1>
+<div class=sub>Source: app base logs + CF GraphQL (24h chunks) · rDNS · RDAP whois<br>
+Generated: <code>whobelooking intel</code> — chromiumoxide PDF via <code>whobelooking pdf</code></div>
+</div>
+
+<h2>Top 25 IPs</h2>
+<table>
+<tr><th>IP</th><th>CC</th><th>Org (RDAP)</th><th>rDNS</th><th class=r>Base</th><th class=r>CF</th><th class=r>FW</th><th>Class</th><th>Top path</th></tr>
+{top_rows}
+</table>
+
+<div class=footer>All Rights Reserved — The Cochran Block, LLC — operator IP filtered via ignore-list — {label}</div>
+</body></html>"#,
+            label = label,
+            hours = hours,
+            top_rows = top_rows,
+        )
+    }
+
+    fn htmlesc(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
     }
 }
 
@@ -1976,6 +3569,70 @@ mod browse {
         Ok(())
     }
 
+    /// Render a URL or local HTML file to PDF via Chrome DevTools `Page.printToPDF`.
+    pub async fn pdf(
+        input: &str,
+        out_path: &str,
+        wait: u64,
+        landscape: bool,
+        background: bool,
+    ) -> anyhow::Result<()> {
+        use chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams;
+
+        let url = if input.starts_with("http://") || input.starts_with("https://") {
+            input.to_string()
+        } else {
+            let abs = std::fs::canonicalize(input)
+                .map_err(|e| anyhow::anyhow!("canonicalize {}: {}", input, e))?;
+            format!("file://{}", abs.display())
+        };
+
+        eprintln!("[pdf] launching headless chrome...");
+        let config = browser_config().await.map_err(|e| anyhow::anyhow!(e))?;
+        let (mut browser, mut handler) = chromiumoxide::Browser::launch(config)
+            .await
+            .map_err(|e| anyhow::anyhow!("launch: {}", e))?;
+        let handle =
+            tokio::spawn(
+                async move { while futures::StreamExt::next(&mut handler).await.is_some() {} },
+            );
+
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(|e| anyhow::anyhow!("new_page: {}", e))?;
+
+        eprintln!("[pdf] navigating to {}...", url);
+        page.goto(&url)
+            .await
+            .map_err(|e| anyhow::anyhow!("goto: {}", e))?;
+        tokio::time::sleep(Duration::from_secs(wait)).await;
+
+        let params = PrintToPdfParams {
+            landscape: Some(landscape),
+            print_background: Some(background),
+            prefer_css_page_size: Some(true),
+            ..Default::default()
+        };
+        let bytes = page
+            .pdf(params)
+            .await
+            .map_err(|e| anyhow::anyhow!("printToPDF: {}", e))?;
+
+        if let Some(parent) = Path::new(out_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        std::fs::write(out_path, &bytes)?;
+        eprintln!("[pdf] wrote {} ({} bytes)", out_path, bytes.len());
+
+        let _ = page.close().await;
+        let _ = browser.close().await;
+        handle.abort();
+        Ok(())
+    }
+
     /// Perf benchmark — measure render performance via Chrome DevTools Protocol.
     /// Uses CDP Network domain for real transfer sizes (not Performance API which
     /// returns 0 for cross-origin resources without CORS headers).
@@ -2202,7 +3859,11 @@ mod browse {
             let out = out.clone();
             let done = done.clone();
             let h = tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
+                // `acquire` only errors after `sem.close()`, which we never call.
+                let _permit = sem
+                    .acquire()
+                    .await
+                    .expect("scrape semaphore should not be closed");
                 let slug = url_to_slug(&url);
                 let txt_path = out.join(format!("{}.txt", slug));
                 let png_path = out.join(format!("{}.png", slug));
@@ -2346,8 +4007,12 @@ mod ctos {
     pub fn cache_mention(db: &sled::Db, m: &CtoMention) -> bool {
         let uniq = format!("{}|{}|{}", m.source_url, m.name, m.company);
         let key = format!("cto:mention:{}:{}", m.source, hash_str(&uniq));
-        let val = compress(&serde_json::to_vec(m).unwrap());
-        db.insert(key.as_bytes(), val).unwrap().is_none()
+        let Ok(buf) = serde_json::to_vec(m) else {
+            return false;
+        };
+        db.insert(key.as_bytes(), compress(&buf))
+            .map(|prev| prev.is_none())
+            .unwrap_or(false)
     }
 
     pub fn load_mentions(db: &sled::Db) -> Vec<CtoMention> {
@@ -2363,8 +4028,9 @@ mod ctos {
 
     fn cache_contact(db: &sled::Db, key: &str, c: &CtoContact) {
         let k = format!("cto:contact:{}", key);
-        let val = compress(&serde_json::to_vec(c).unwrap());
-        let _ = db.insert(k.as_bytes(), val);
+        if let Ok(buf) = serde_json::to_vec(c) {
+            let _ = db.insert(k.as_bytes(), compress(&buf));
+        }
     }
 
     fn load_contact(db: &sled::Db, key: &str) -> Option<CtoContact> {
@@ -2820,14 +4486,11 @@ mod ctos {
         eprintln!("{} verified CTOs (2+ distinct sources)\n", verified.len());
 
         println!("=== VERIFIED CTOs ===");
-        println!(
-            "{:<28} {:<30} {:<8} {}",
-            "Name", "Company", "#src", "sources"
-        );
+        println!("{:<28} {:<30} {:<8} sources", "Name", "Company", "#src");
         println!("{}", "-".repeat(100));
         for v in &verified {
             let src_list: Vec<&str> = v.sources.iter().map(|(s, _)| s.as_str()).collect();
-            let mut distinct: Vec<&str> = src_list.iter().copied().collect();
+            let mut distinct: Vec<&str> = src_list.to_vec();
             distinct.sort();
             distinct.dedup();
             println!(
@@ -3019,6 +4682,252 @@ mod ctos {
             eprintln!("\n  → run `ctos verified --scrape-emails` to pull more contacts");
             eprintln!("  → skipped entries will never get a fabricated email");
         }
+        Ok(())
+    }
+}
+
+mod scan_cli {
+    use reqwest::redirect;
+    use serde::Serialize;
+    use std::time::{Duration, Instant};
+    use tokio::task::JoinSet;
+
+    #[derive(Clone)]
+    struct Probe {
+        path: &'static str,
+        label: &'static str,
+        sev: &'static str,
+    }
+
+    #[derive(Serialize)]
+    pub struct Finding {
+        pub path: String,
+        pub label: String,
+        pub sev: String,
+        pub status: u16,
+        pub ms: u64,
+        pub verdict: String,
+    }
+
+    fn probes() -> &'static [Probe] {
+        &[
+            // CRITICAL
+            Probe { path: "/.env",                          label: ".env",                        sev: "critical" },
+            Probe { path: "/.env.local",                    label: ".env.local",                  sev: "critical" },
+            Probe { path: "/.env.production",               label: ".env.production",             sev: "critical" },
+            Probe { path: "/.env.development",              label: ".env.development",            sev: "critical" },
+            Probe { path: "/.env.backup",                   label: ".env.backup",                 sev: "critical" },
+            Probe { path: "/.env.bak",                      label: ".env.bak",                    sev: "critical" },
+            Probe { path: "/config.php",                    label: "config.php",                  sev: "critical" },
+            Probe { path: "/configuration.php",             label: "configuration.php",           sev: "critical" },
+            Probe { path: "/wp-config.php",                 label: "wp-config.php",               sev: "critical" },
+            Probe { path: "/wp-config.php.bak",             label: "wp-config.php.bak",           sev: "critical" },
+            Probe { path: "/config.yml",                    label: "config.yml",                  sev: "critical" },
+            Probe { path: "/config.yaml",                   label: "config.yaml",                 sev: "critical" },
+            Probe { path: "/secrets.json",                  label: "secrets.json",                sev: "critical" },
+            Probe { path: "/credentials.json",              label: "credentials.json",            sev: "critical" },
+            Probe { path: "/serviceAccountKey.json",        label: "GCP service account",         sev: "critical" },
+            Probe { path: "/.aws/credentials",              label: "AWS credentials",             sev: "critical" },
+            Probe { path: "/.ssh/id_rsa",                   label: "SSH private key",             sev: "critical" },
+            Probe { path: "/.ssh/id_ed25519",               label: "SSH Ed25519 key",             sev: "critical" },
+            Probe { path: "/private.key",                   label: "private.key",                 sev: "critical" },
+            Probe { path: "/server.key",                    label: "server.key",                  sev: "critical" },
+            Probe { path: "/.git/HEAD",                     label: "Git HEAD",                    sev: "critical" },
+            Probe { path: "/.git/config",                   label: "Git config",                  sev: "critical" },
+            Probe { path: "/.git/COMMIT_EDITMSG",           label: "Git last commit msg",         sev: "critical" },
+            Probe { path: "/database.sql",                  label: "database.sql",                sev: "critical" },
+            Probe { path: "/db.sql",                        label: "db.sql",                      sev: "critical" },
+            Probe { path: "/backup.sql",                    label: "backup.sql",                  sev: "critical" },
+            Probe { path: "/dump.sql",                      label: "dump.sql",                    sev: "critical" },
+            Probe { path: "/phpinfo.php",                   label: "phpinfo",                     sev: "critical" },
+            Probe { path: "/info.php",                      label: "info.php",                    sev: "critical" },
+            Probe { path: "/test.php",                      label: "test.php",                    sev: "high"     },
+            Probe { path: "/wp-login.php",                  label: "WordPress login",             sev: "critical" },
+            // HIGH
+            Probe { path: "/phpmyadmin",                    label: "phpMyAdmin",                  sev: "high"     },
+            Probe { path: "/phpmyadmin/",                   label: "phpMyAdmin/",                 sev: "high"     },
+            Probe { path: "/pma",                           label: "PMA shortcut",                sev: "high"     },
+            Probe { path: "/adminer.php",                   label: "Adminer",                     sev: "high"     },
+            Probe { path: "/.cursor/mcp.json",              label: "Cursor MCP config",           sev: "high"     },
+            Probe { path: "/.cursor/settings.json",         label: "Cursor settings",             sev: "high"     },
+            Probe { path: "/.vscode/settings.json",         label: "VS Code settings",            sev: "high"     },
+            Probe { path: "/api/v1/users",                  label: "User list API",               sev: "high"     },
+            Probe { path: "/api/v1/admin",                  label: "Admin API",                   sev: "high"     },
+            Probe { path: "/api/admin",                     label: "Admin API (alt)",             sev: "high"     },
+            Probe { path: "/api/users",                     label: "Users API",                   sev: "high"     },
+            Probe { path: "/api/keys",                      label: "Keys API",                    sev: "high"     },
+            Probe { path: "/api/v1/keys",                   label: "Keys API v1",                 sev: "high"     },
+            Probe { path: "/api/config",                    label: "Config API",                  sev: "high"     },
+            Probe { path: "/backup/",                       label: "Backup dir",                  sev: "high"     },
+            Probe { path: "/backups/",                      label: "Backups dir",                 sev: "high"     },
+            Probe { path: "/backup.zip",                    label: "backup.zip",                  sev: "high"     },
+            Probe { path: "/backup.tar.gz",                 label: "backup.tar.gz",               sev: "high"     },
+            Probe { path: "/site.tar.gz",                   label: "site.tar.gz",                 sev: "high"     },
+            Probe { path: "/logs/",                         label: "Logs dir",                    sev: "high"     },
+            Probe { path: "/log/",                          label: "Log dir",                     sev: "high"     },
+            Probe { path: "/error.log",                     label: "error.log",                   sev: "high"     },
+            Probe { path: "/access.log",                    label: "access.log",                  sev: "high"     },
+            Probe { path: "/debug.log",                     label: "debug.log",                   sev: "high"     },
+            Probe { path: "/storage/logs/laravel.log",      label: "Laravel log",                 sev: "high"     },
+            Probe { path: "/.openai",                       label: ".openai dir",                 sev: "high"     },
+            Probe { path: "/.openai/config.json",           label: "OpenAI config",               sev: "high"     },
+            Probe { path: "/openai.json",                   label: "openai.json",                 sev: "high"     },
+            // MEDIUM
+            Probe { path: "/admin/",                        label: "Admin panel",                 sev: "medium"   },
+            Probe { path: "/administrator/",                label: "Joomla admin",                sev: "medium"   },
+            Probe { path: "/wp-admin/",                     label: "WordPress admin",             sev: "medium"   },
+            Probe { path: "/server-status",                 label: "Apache status",               sev: "medium"   },
+            Probe { path: "/server-info",                   label: "Apache info",                 sev: "medium"   },
+            Probe { path: "/graphql",                       label: "GraphQL",                     sev: "medium"   },
+            Probe { path: "/swagger.json",                  label: "Swagger docs",                sev: "medium"   },
+            Probe { path: "/openapi.json",                  label: "OpenAPI docs",                sev: "medium"   },
+            Probe { path: "/api-docs",                      label: "API docs",                    sev: "medium"   },
+            Probe { path: "/api/docs",                      label: "API docs (alt)",              sev: "medium"   },
+            Probe { path: "/xmlrpc.php",                    label: "XML-RPC",                     sev: "medium"   },
+            Probe { path: "/.DS_Store",                     label: ".DS_Store",                   sev: "medium"   },
+            Probe { path: "/.htaccess",                     label: ".htaccess",                   sev: "medium"   },
+            Probe { path: "/docker-compose.yml",            label: "Docker Compose",              sev: "medium"   },
+            Probe { path: "/.travis.yml",                   label: "Travis CI config",            sev: "medium"   },
+            Probe { path: "/Jenkinsfile",                   label: "Jenkinsfile",                 sev: "medium"   },
+            Probe { path: "/.circleci/config.yml",          label: "CircleCI config",             sev: "medium"   },
+            Probe { path: "/.gitlab-ci.yml",                label: "GitLab CI config",            sev: "medium"   },
+            Probe { path: "/install.php",                   label: "Install script",              sev: "medium"   },
+            Probe { path: "/console",                       label: "Console",                     sev: "medium"   },
+            Probe { path: "/.gitignore",                    label: ".gitignore",                  sev: "medium"   },
+            Probe { path: "/package-lock.json",             label: "package-lock.json",           sev: "medium"   },
+            Probe { path: "/requirements.txt",              label: "requirements.txt",            sev: "medium"   },
+            Probe { path: "/CHANGELOG.md",                  label: "CHANGELOG",                   sev: "medium"   },
+            // LOW / INFO
+            Probe { path: "/robots.txt",                    label: "robots.txt",                  sev: "info"     },
+            Probe { path: "/sitemap.xml",                   label: "Sitemap",                     sev: "info"     },
+            Probe { path: "/",                              label: "Root",                        sev: "info"     },
+        ]
+    }
+
+    fn verdict(status: u16) -> &'static str {
+        if status == 0 { return "unreachable"; }
+        if status >= 200 && status < 300 { return "EXPOSED"; }
+        if status == 401 || status == 403 { return "auth-wall"; }
+        if status >= 300 && status < 400 { return "redirect"; }
+        if status >= 500 { return "server-error"; }
+        "clean"
+    }
+
+    fn is_finding(status: u16) -> bool {
+        (status >= 200 && status < 300) || status == 401 || status == 403
+    }
+
+    fn sev_order(sev: &str) -> u8 {
+        match sev { "critical" => 0, "high" => 1, "medium" => 2, "low" => 3, _ => 4 }
+    }
+
+    pub async fn run(url: &str, as_json: bool) -> anyhow::Result<()> {
+        let base = url.trim_end_matches('/');
+        let base = if base.starts_with("http") { base.to_string() } else { format!("https://{}", base) };
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .redirect(redirect::Policy::none())
+            .user_agent("whobelooking-scan/1.0 (+https://whobelooking.org/scan)")
+            .build()?;
+
+        let probes = probes();
+        let total = probes.len();
+        let mut set: JoinSet<Finding> = JoinSet::new();
+
+        for p in probes {
+            let client = client.clone();
+            let target = format!("{}{}", base, p.path);
+            let path = p.path;
+            let label = p.label;
+            let sev = p.sev;
+            set.spawn(async move {
+                let t0 = Instant::now();
+                let (status, ms) = match client.head(&target).send().await {
+                    Ok(r) => (r.status().as_u16(), t0.elapsed().as_millis() as u64),
+                    Err(_) => (0u16, t0.elapsed().as_millis() as u64),
+                };
+                Finding {
+                    path: path.to_string(),
+                    label: label.to_string(),
+                    sev: sev.to_string(),
+                    status,
+                    ms,
+                    verdict: verdict(status).to_string(),
+                }
+            });
+        }
+
+        let mut findings: Vec<Finding> = Vec::with_capacity(total);
+        while let Some(r) = set.join_next().await {
+            if let Ok(f) = r { findings.push(f); }
+        }
+
+        findings.sort_by(|a, b| {
+            sev_order(&a.sev).cmp(&sev_order(&b.sev))
+                .then(b.status.cmp(&a.status))
+        });
+
+        if as_json {
+            println!("{}", serde_json::to_string_pretty(&findings)?);
+            return Ok(());
+        }
+
+        // Terminal output
+        let hits: Vec<&Finding> = findings.iter().filter(|f| is_finding(f.status)).collect();
+        let crit: Vec<&Finding> = hits.iter().filter(|f| f.sev == "critical").copied().collect();
+
+        eprintln!();
+        eprintln!("  whobelooking scan — {}", base);
+        eprintln!("  {} paths probed", total);
+        eprintln!();
+
+        if hits.is_empty() {
+            eprintln!("  \x1b[32m✓ No exposed paths found.\x1b[0m");
+        } else {
+            if !crit.is_empty() {
+                eprintln!("  \x1b[1;31m⚠  {} CRITICAL FINDING{}\x1b[0m", crit.len(), if crit.len() > 1 { "S" } else { "" });
+                for f in &crit {
+                    eprintln!("  \x1b[31m  {} — {} (HTTP {})\x1b[0m", f.path, f.label, f.status);
+                }
+                eprintln!();
+            }
+            eprintln!("  \x1b[33m{} path{} answered\x1b[0m", hits.len(), if hits.len() > 1 { "s" } else { "" });
+        }
+
+        eprintln!();
+        eprintln!("  {:<40}  {:<10}  {:<10}  {:>6}  {:>6}", "PATH", "LABEL", "VERDICT", "STATUS", "MS");
+        eprintln!("  {}", "-".repeat(80));
+
+        let mut last_sev = "";
+        for f in &findings {
+            if f.sev != last_sev {
+                eprintln!("  \x1b[2m[{}]\x1b[0m", f.sev.to_uppercase());
+                last_sev = &f.sev;
+            }
+            let color = match f.verdict.as_str() {
+                "EXPOSED"      => "\x1b[1;31m",
+                "auth-wall"    => "\x1b[33m",
+                "redirect"     => "\x1b[2m",
+                "server-error" => "\x1b[2;33m",
+                _              => "\x1b[2m",
+            };
+            eprintln!("  {}{:<40}  {:<10}  {:<10}  {:>6}  {:>6}\x1b[0m",
+                color,
+                &f.path[..f.path.len().min(39)],
+                &f.label[..f.label.len().min(10)],
+                &f.verdict[..f.verdict.len().min(10)],
+                if f.status == 0 { "-".to_string() } else { f.status.to_string() },
+                f.ms,
+            );
+        }
+
+        eprintln!();
+        if !hits.is_empty() {
+            eprintln!("  Need help closing these gaps? https://cochranblock.org/book");
+        }
+        eprintln!();
+
         Ok(())
     }
 }

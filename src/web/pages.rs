@@ -557,70 +557,36 @@ label{display:block;font-size:0.7rem;color:#9ca3af;letter-spacing:0.1em;text-tra
 input,select{width:100%;padding:10px;font-family:'JetBrains Mono',monospace;font-size:0.85rem;background:#0d0d14;border:1px solid rgba(0,217,255,0.15);color:#e8e8e8;border-radius:4px}
 input:focus,select:focus{border-color:#00d9ff;outline:none}
 select{cursor:pointer}
-.tier-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:16px 0}
-.tier-opt{padding:12px;background:#0d0d14;border:1px solid rgba(0,217,255,0.15);border-radius:4px;cursor:pointer;text-align:center;transition:border-color 0.15s}
-.tier-opt:hover{border-color:#00d9ff}
-.tier-opt.selected{border-color:#00d9ff;background:rgba(0,217,255,0.05)}
-.tier-opt input[type=radio]{display:none}
-.tier-price{font-size:1.2rem;font-weight:700;color:#00d9ff}
-.tier-name{font-size:0.65rem;color:#9ca3af;letter-spacing:0.1em;text-transform:uppercase;margin-top:4px}
-.tier-ips{font-size:0.6rem;color:#555;margin-top:2px}
 .btn{display:block;width:100%;padding:14px;background:#00d9ff;color:#050508;font-family:'Orbitron',sans-serif;font-weight:700;font-size:0.9rem;border:none;cursor:pointer;letter-spacing:0.05em;margin-top:20px;border-radius:4px}
 .btn:hover{background:#33e1ff}
 .note{font-size:0.7rem;color:#555;margin-top:12px;text-align:center}
 </style></head><body><div class="box">
-<h1>Order a report.</h1>
+<h1>Get your report.</h1>
+<p style="color:#9ca3af;font-size:0.85rem;margin-bottom:1.5rem">Just your email and site URL. That's it. No credentials needed upfront.</p>
 <form action="/order/checkout" method="POST" enctype="multipart/form-data">
+<input type="hidden" name="source_type" value="pending">
+<input type="hidden" name="tier" value="starter">
 <label>Email</label>
 <input type="email" name="email" required placeholder="you@company.com">
 <label>Site URL</label>
 <input type="url" name="site_url" required placeholder="https://yoursite.com">
-<label>Data Source</label>
-<select name="source_type">
-<option value="cloudflare">Cloudflare (Zone ID + API Token)</option>
-<option value="accesslog">Access Log (nginx / Apache / Caddy)</option>
-<option value="csv">CSV (ip, path, timestamp)</option>
-<option value="json">JSON array</option>
-</select>
-<div id="cf-creds" style="display:none;margin-top:12px;padding:16px;background:rgba(0,217,255,0.03);border:1px solid rgba(0,217,255,0.1);border-radius:4px">
-<div style="font-size:0.7rem;color:#00ffcc;margin-bottom:10px;line-height:1.5">Your keys go into a vault, not a filing cabinet. Encrypted with AES-256-GCM the moment you hit submit. The encrypted blob goes to our inbox. The decryption key lives on an air-gapped machine. The server never sees plaintext. Two different buildings, two different locks, one report.</div>
-<label>Cloudflare Zone ID</label>
-<div style="position:relative"><input type="password" name="cf_zone" id="cf_zone" placeholder="1320f3a6c2f3dc2c..." autocomplete="off" spellcheck="false" style="padding-right:36px"><span onclick="toggleVis('cf_zone',this)" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:14px;color:#555;user-select:none">&#x1F441;</span></div>
-<label>Cloudflare API Token <span style="color:#555">(read-only analytics scope)</span></label>
-<div style="position:relative"><input type="password" name="cf_token" id="cf_token" placeholder="Bearer token" autocomplete="off" style="padding-right:36px"><span onclick="toggleVis('cf_token',this)" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:14px;color:#555;user-select:none">&#x1F441;</span></div>
-</div>
-<div id="file-upload" style="display:none;margin-top:12px;padding:16px;background:rgba(0,217,255,0.03);border:1px solid rgba(0,217,255,0.1);border-radius:4px">
-<div style="font-size:0.7rem;color:#00ffcc;margin-bottom:10px;line-height:1.5">Upload your log file. Same vault treatment as credentials — encrypted in transit, processed, then deleted. We never keep your raw traffic data after the report is delivered.</div>
-<label>Log File</label>
-<input type="file" name="logfile" accept=".log,.txt,.csv,.json,.gz" style="font-size:0.8rem;color:#9ca3af;padding:8px 0">
-<div style="font-size:0.6rem;color:#555;margin-top:4px">Accepts: .log, .txt, .csv, .json, .gz &middot; Max 50MB</div>
-</div>
-<label>Tier</label>
-<div class="tier-grid">
-<label class="tier-opt selected" onclick="selectTier(this)"><input type="radio" name="tier" value="starter" checked><div class="tier-price">$150</div><div class="tier-name">Starter</div><div class="tier-ips">&lt;500 IPs</div></label>
-<label class="tier-opt" onclick="selectTier(this)"><input type="radio" name="tier" value="growth"><div class="tier-price">$350</div><div class="tier-name">Growth</div><div class="tier-ips">500-2K IPs</div></label>
-<label class="tier-opt" onclick="selectTier(this)"><input type="radio" name="tier" value="scale"><div class="tier-price">$750</div><div class="tier-name">Scale</div><div class="tier-ips">2K-10K IPs</div></label>
-<label class="tier-opt" onclick="selectTier(this)"><input type="radio" name="tier" value="custom"><div class="tier-price">$1,500+</div><div class="tier-name">Custom</div><div class="tier-ips">10K+ IPs</div></label>
-</div>
 <button type="submit" class="btn">Submit Request</button>
 </form>
-<p class="note">Free to submit. You only pay when your report is ready.<br>Reviewed by a USCYBERCOM operator. 2-3 business day turnaround.</p>
-<p class="note" style="margin-top:8px;font-size:0.6rem;color:#555">All API tokens should be scoped to <strong style="color:#9ca3af">read-only permissions</strong>. We perform read-only analytics operations only. We will never modify your DNS, configuration, firewall rules, or any other setting. Your infrastructure is never touched.</p>
-<p class="note" style="margin-top:8px;font-size:0.65rem;color:#9ca3af">Don't have your API credentials handy? No problem &mdash; submit without them. <strong style="color:#00ffcc">White glove setup is built into every report at no additional fee.</strong> We'll walk you through creating a read-only token on a quick call.</p>
+<div style="margin-top:1.5rem;padding:16px;background:rgba(0,255,204,0.03);border:1px solid rgba(0,255,204,0.1);border-radius:4px">
+<div style="font-size:0.85rem;color:#00ffcc;font-weight:600;margin-bottom:8px">What happens next</div>
+<div style="font-size:0.8rem;color:#9ca3af;line-height:1.6">
+1. You submit &mdash; just email and site URL. <strong style="color:#e8e8e8">No payment now. No card needed.</strong><br>
+2. We schedule a <strong style="color:#e8e8e8">10-minute setup call</strong> &mdash; we walk you through connecting your analytics. Screen share, zero guesswork.<br>
+3. We run the report and deliver your intelligence PDF.<br>
+4. <strong style="color:#e8e8e8">You only pay right before you download</strong> &mdash; Stripe checkout at the download link. No charge until your report is ready and you choose to grab it.
+</div>
+<div style="font-size:0.7rem;color:#555;margin-top:8px;line-height:1.5">Works with Cloudflare, AWS CloudFront, Fastly, Vercel, Netlify, and server access logs (nginx, Apache, Caddy). Google Cloud CDN does not expose visitor IPs on the free tier.</div>
+</div>
+<p class="note" style="margin-top:12px"><strong style="color:#00ffcc">White glove setup on every report. No additional fee.</strong><br>We handle the technical side. You just tell us your site URL.</p>
+<p class="note" style="margin-top:8px">Free to submit. No payment until download. 2-3 business day turnaround.<br>Reviewed by a USCYBERCOM operator.</p>
 <p style="margin-top:1.5rem;text-align:center"><a href="/">&larr; whobelooking.org</a></p>
 </div>
-<script>
-function selectTier(el){document.querySelectorAll('.tier-opt').forEach(function(e){e.classList.remove('selected')});el.classList.add('selected');el.querySelector('input').checked=true;}
-function toggleVis(id,btn){var f=document.getElementById(id);if(f.type==='password'){f.type='text';btn.style.color='#00d9ff';}else{f.type='password';btn.style.color='#555';}}
-document.querySelector('select[name=source_type]').addEventListener('change',function(){
-  var isCF=this.value==='cloudflare';
-  document.getElementById('cf-creds').style.display=isCF?'block':'none';
-  document.getElementById('file-upload').style.display=isCF?'none':'block';
-});
-var initSrc=document.querySelector('select[name=source_type]').value;
-document.getElementById('cf-creds').style.display=initSrc==='cloudflare'?'block':'none';
-document.getElementById('file-upload').style.display=initSrc==='cloudflare'?'none':'block';
-</script>
+<script>0</script>
 </body></html>"#,
     )
 }
@@ -713,13 +679,34 @@ pub async fn download_report(
         return (axum::http::StatusCode::NOT_FOUND, "invalid id").into_response();
     }
 
-    let ready_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("whobelooking")
-        .join("orders")
-        .join("ready");
-    let path = ready_dir.join(format!("{}.pdf", clean_id));
-
+    // Look up the order in the sled-backed atomic queue. The PDF must exist
+    // in the order's blob directory AND the order state must be `Ready` —
+    // both conditions are needed so an operator can stage a PDF to disk
+    // without the download endpoint going live until they explicitly mark
+    // the order Ready (which audits the action).
+    let store = match crate::orders::Store::open() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("orders store unavailable: {}", e);
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "queue temporarily unavailable",
+            )
+                .into_response();
+        }
+    };
+    match store.get(&clean_id) {
+        Ok(Some(order)) if order.state == crate::orders::OrderState::Ready => {}
+        Ok(_) => {
+            crate::web::metrics::DOWNLOADS_404.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return (axum::http::StatusCode::NOT_FOUND, "report not available").into_response();
+        }
+        Err(_) => {
+            crate::web::metrics::DOWNLOADS_404.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return (axum::http::StatusCode::NOT_FOUND, "report not available").into_response();
+        }
+    }
+    let path = crate::orders::blobs_dir(&clean_id).join("report.pdf");
     if !path.exists() {
         return (axum::http::StatusCode::NOT_FOUND, "report not available").into_response();
     }
@@ -753,20 +740,13 @@ pub async fn download_report(
     };
 
     if !paid {
-        // Show payment gate page — links to Stripe or shows "pay to download"
-        let order_dir = dirs::data_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("whobelooking")
-            .join("orders");
-        // Try to read tier from approved/{id}/order.txt
-        let tier_text =
-            std::fs::read_to_string(order_dir.join("approved").join(&clean_id).join("order.txt"))
-                .unwrap_or_default();
-        let tier = tier_text
-            .lines()
-            .find(|l| l.starts_with("tier:"))
-            .map(|l| l.trim_start_matches("tier:").trim())
-            .unwrap_or("starter");
+        // Show payment gate page — looks up tier from the sled order record.
+        let tier = crate::orders::Store::open()
+            .ok()
+            .and_then(|s| s.get(&clean_id).ok().flatten())
+            .map(|o| o.tier)
+            .unwrap_or_else(|| "starter".into());
+        let tier = tier.as_str();
         let price = match tier {
             "growth" => "$350",
             "scale" => "$750",
@@ -844,6 +824,8 @@ function startPayment(){{
                 &clean_id[..std::cmp::min(clean_id.len(), 8)]
             );
             tracing::info!("report downloaded: {}", clean_id);
+            crate::web::metrics::DOWNLOADS_AUTHED
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             (
                 [
                     (axum::http::header::CONTENT_TYPE, "application/pdf"),
@@ -871,20 +853,13 @@ pub async fn create_download_session(
         .filter(|c| c.is_alphanumeric() || *c == '-')
         .collect();
 
-    let order_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("whobelooking")
-        .join("orders");
-    let order_txt =
-        std::fs::read_to_string(order_dir.join("approved").join(&clean_id).join("order.txt"))
-            .unwrap_or_default();
-    let tier = order_txt
-        .lines()
-        .find(|l| l.starts_with("tier:"))
-        .map(|l| l.trim_start_matches("tier:").trim())
-        .unwrap_or("starter");
+    let tier = crate::orders::Store::open()
+        .ok()
+        .and_then(|s| s.get(&clean_id).ok().flatten())
+        .map(|o| o.tier)
+        .unwrap_or_else(|| "starter".into());
 
-    let price_cents: u32 = match tier {
+    let price_cents: u32 = match tier.as_str() {
         "growth" => 35000,
         "scale" => 75000,
         "custom" => 150000,

@@ -12,11 +12,13 @@
 
 use exopack::standards_check;
 use exopack::triple_sims::f60;
+use wbl_detect::{ColumnKind, classify as detect_classify, detect_schema};
 use whobelooking::ctos::{
     CtoMention, extract_cto_from_text, extract_first_email, norm, norm_company, slugify, truncate,
     verify,
 };
-use whobelooking::queue_types::{HOURS_PER_WEEK, Job, JobStatus, SourceType, Tier, has_capacity};
+use whobelooking::queue_types::{Job, JobStatus, SourceType, Tier, has_capacity};
+use whobelooking::redact;
 
 fn mk(source: &str, url: &str, name: &str, company: &str) -> CtoMention {
     CtoMention {
@@ -901,80 +903,227 @@ fn test_no_unlicense() -> Result<(), String> {
     Ok(())
 }
 
-// --- Order flow tests (filesystem-based) ---
+// --- Order flow tests (sled-backed atomic queue) ---
 
-fn test_orders_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("whobelooking-test-orders");
-    let _ = std::fs::remove_dir_all(&dir);
-    let _ = std::fs::create_dir_all(dir.join("pending"));
-    let _ = std::fs::create_dir_all(dir.join("approved"));
-    let _ = std::fs::create_dir_all(dir.join("rejected"));
-    let _ = std::fs::create_dir_all(dir.join("ready"));
-    dir
+use whobelooking::orders::{Error as OrdersError, OrderState, Store};
+
+/// Build an isolated `Store` rooted at a fresh tmpdir so tests don't trip
+/// over the production sled DB or each other. Mirrors the in-tree test in
+/// `src/orders.rs` but accessible from the P16 binary so failures show up
+/// in the gate, not just `cargo test --lib`.
+fn fresh_store() -> Result<(Store, std::path::PathBuf), String> {
+    let dir = std::env::temp_dir().join(format!(
+        "wbl-bin-orders-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Override XDG_DATA_HOME so `Store::open` lands inside our tmpdir.
+    // SAFETY: tests are single-threaded inside this gate (we run the catalog
+    // sequentially in run_all_tests) and the env var is restored after the
+    // store is opened by callers in this same session.
+    unsafe {
+        std::env::set_var("XDG_DATA_HOME", &dir);
+    }
+    let store = Store::open().map_err(|e| e.to_string())?;
+    Ok((store, dir))
 }
 
-fn test_order_creates_folder() -> Result<(), String> {
-    let base = test_orders_dir();
-    let id = "test-order-001";
-    let dir = base.join("pending").join(id);
-    let _ = std::fs::create_dir_all(&dir);
-    let content = "id: test-order-001\nemail: test@co.com\nsite: https://test.com\nsource: cloudflare\ntier: starter\n";
-    std::fs::write(dir.join("order.txt"), content).map_err(|e| format!("{}", e))?;
-
-    // Verify folder exists
-    if !dir.exists() {
-        return Err("pending folder not created".into());
+fn test_order_creates_pending() -> Result<(), String> {
+    let (s, _dir) = fresh_store()?;
+    let o = s
+        .create(
+            "o-create", "a@b", "site", "csv", "starter", "1.2.3.4", "test",
+        )
+        .map_err(|e| e.to_string())?;
+    if o.state != OrderState::Pending {
+        return Err(format!("expected Pending, got {:?}", o.state));
     }
-    if !dir.join("order.txt").exists() {
-        return Err("order.txt not created".into());
+    let history = s.audit_for("o-create").map_err(|e| e.to_string())?;
+    if history.len() != 1 || history[0].to != OrderState::Pending {
+        return Err("audit log missing creation event".into());
     }
-    let _ = std::fs::remove_dir_all(&base);
     Ok(())
 }
 
 fn test_order_capacity_limit() -> Result<(), String> {
-    let base = test_orders_dir();
-    // Create 5 pending orders
-    for i in 0..5 {
-        let dir = base.join("pending").join(format!("order-{}", i));
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("order.txt"), "test");
+    let (s, _dir) = fresh_store()?;
+    for i in 0..whobelooking::orders::MAX_PENDING {
+        s.create(
+            &format!("o-cap-{}", i),
+            "a@b",
+            "site",
+            "csv",
+            "starter",
+            "1.2.3.4",
+            "test",
+        )
+        .map_err(|e| e.to_string())?;
     }
-    // Count pending — should be 5
-    let count = std::fs::read_dir(base.join("pending"))
-        .map(|r| {
-            r.filter(|e| e.as_ref().map(|e| e.path().is_dir()).unwrap_or(false))
-                .count()
-        })
-        .unwrap_or(0);
-    if count != 5 {
-        return Err(format!("expected 5 pending, got {}", count));
+    let err = s
+        .create(
+            "o-overflow",
+            "a@b",
+            "site",
+            "csv",
+            "starter",
+            "1.2.3.4",
+            "test",
+        )
+        .unwrap_err();
+    if !matches!(err, OrdersError::AtCapacity(_)) {
+        return Err(format!("expected AtCapacity, got {:?}", err));
     }
-    // 6th should be rejected by capacity check (count >= 5)
-    if count < 5 {
-        return Err("capacity check broken — should be at limit".into());
-    }
-    let _ = std::fs::remove_dir_all(&base);
     Ok(())
 }
 
-fn test_order_txt_fields() -> Result<(), String> {
-    let content = "id: abc-123\nemail: buyer@co.com\nsite: https://example.com\nsource: accesslog\ntier: growth\ncreated: 1234567890\n";
-    // Verify all required fields are parseable
-    let fields = ["id:", "email:", "site:", "source:", "tier:", "created:"];
-    for f in fields {
-        if !content.contains(f) {
-            return Err(format!("order.txt missing field: {}", f));
-        }
+fn test_order_atomic_transition() -> Result<(), String> {
+    let (s, _dir) = fresh_store()?;
+    s.create(
+        "o-atomic", "a@b", "site", "csv", "starter", "1.2.3.4", "test",
+    )
+    .map_err(|e| e.to_string())?;
+    s.transition("o-atomic", OrderState::Approved, "op-a", None)
+        .map_err(|e| e.to_string())?;
+    // Second attempt to approve must fail because state is no longer Pending.
+    let err = s
+        .transition("o-atomic", OrderState::Approved, "op-b", None)
+        .unwrap_err();
+    if !matches!(err, OrdersError::IllegalTransition(_, _)) {
+        return Err(format!("expected IllegalTransition, got {:?}", err));
     }
-    // Verify email is extractable
-    let email = content
-        .lines()
-        .find(|l| l.starts_with("email:"))
-        .map(|l| l.trim_start_matches("email:").trim())
-        .unwrap_or("");
-    if email != "buyer@co.com" {
-        return Err(format!("email parse failed: {}", email));
+    Ok(())
+}
+
+fn test_order_audit_history() -> Result<(), String> {
+    let (s, _dir) = fresh_store()?;
+    s.create(
+        "o-audit", "a@b", "site", "csv", "starter", "1.2.3.4", "test",
+    )
+    .map_err(|e| e.to_string())?;
+    s.transition("o-audit", OrderState::Approved, "op-a", None)
+        .map_err(|e| e.to_string())?;
+    s.transition(
+        "o-audit",
+        OrderState::Ready,
+        "op-b",
+        Some("uploaded report.pdf".into()),
+    )
+    .map_err(|e| e.to_string())?;
+    let history = s.audit_for("o-audit").map_err(|e| e.to_string())?;
+    if history.len() != 3 {
+        return Err(format!("expected 3 audit entries, got {}", history.len()));
+    }
+    if history[2].actor != "op-b" {
+        return Err(format!("expected actor op-b, got {}", history[2].actor));
+    }
+    if history[2].note.as_deref() != Some("uploaded report.pdf") {
+        return Err("audit note lost".into());
+    }
+    Ok(())
+}
+
+// ---- CIDR membership tests ----
+
+fn test_cidr_v4_24() -> Result<(), String> {
+    use whobelooking::cidr;
+    if !cidr::contains("8.8.8.0/24", "8.8.8.8") {
+        return Err("8.8.8.8 must be inside 8.8.8.0/24".into());
+    }
+    if !cidr::contains("8.8.8.0/24", "8.8.8.255") {
+        return Err("8.8.8.255 must be inside 8.8.8.0/24".into());
+    }
+    Ok(())
+}
+
+fn test_cidr_v4_24_miss() -> Result<(), String> {
+    use whobelooking::cidr;
+    if cidr::contains("8.8.8.0/24", "8.8.9.1") {
+        return Err("8.8.9.1 must NOT be inside 8.8.8.0/24".into());
+    }
+    if cidr::contains("8.8.8.0/24", "9.8.8.8") {
+        return Err("9.8.8.8 must NOT be inside 8.8.8.0/24".into());
+    }
+    Ok(())
+}
+
+fn test_cidr_v4_octet_boundary() -> Result<(), String> {
+    use whobelooking::cidr;
+    // /16 boundary
+    if !cidr::contains("10.0.0.0/16", "10.0.42.99") {
+        return Err("10.0.42.99 must be inside 10.0.0.0/16".into());
+    }
+    if cidr::contains("10.0.0.0/16", "10.1.0.0") {
+        return Err("10.1.0.0 must NOT be inside 10.0.0.0/16".into());
+    }
+    // /20 — non-octet boundary
+    if !cidr::contains("172.16.0.0/20", "172.16.15.255") {
+        return Err("172.16.15.255 must be inside 172.16.0.0/20".into());
+    }
+    if cidr::contains("172.16.0.0/20", "172.16.16.0") {
+        return Err("172.16.16.0 must NOT be inside 172.16.0.0/20".into());
+    }
+    Ok(())
+}
+
+fn test_cidr_v6() -> Result<(), String> {
+    use whobelooking::cidr;
+    if !cidr::contains("2600:4040::/32", "2600:4040:b03c:300::1c7b") {
+        return Err("v6 sample must be inside 2600:4040::/32".into());
+    }
+    if cidr::contains("2600:4040::/32", "2600:4041::1") {
+        return Err("2600:4041::1 must NOT be inside 2600:4040::/32".into());
+    }
+    Ok(())
+}
+
+fn test_cidr_v6_family_mismatch() -> Result<(), String> {
+    use whobelooking::cidr;
+    if cidr::contains("8.8.8.0/24", "2600:4040::1") {
+        return Err("v6 IP must not match v4 CIDR".into());
+    }
+    if cidr::contains("2600:4040::/32", "8.8.8.8") {
+        return Err("v4 IP must not match v6 CIDR".into());
+    }
+    Ok(())
+}
+
+fn test_cidr_invalid() -> Result<(), String> {
+    use whobelooking::cidr;
+    if cidr::contains("not-a-cidr", "8.8.8.8") {
+        return Err("garbage CIDR must not match anything".into());
+    }
+    if cidr::contains("8.8.8.0/99", "8.8.8.8") {
+        return Err("over-length prefix must not match".into());
+    }
+    if cidr::contains("8.8.8.0/24", "garbage") {
+        return Err("garbage IP must not match a real CIDR".into());
+    }
+    Ok(())
+}
+
+fn test_order_legal_transitions() -> Result<(), String> {
+    use OrderState::*;
+    let cases = [
+        (Pending, Approved, true),
+        (Pending, Rejected, true),
+        (Pending, Ready, false),
+        (Approved, Ready, true),
+        (Approved, Rejected, true),
+        (Ready, Rejected, true),
+        (Rejected, Approved, false),
+        (Ready, Pending, false),
+    ];
+    for (from, to, want) in cases {
+        if from.can_transition(to) != want {
+            return Err(format!(
+                "{:?} → {:?}: expected can_transition={}",
+                from, to, want
+            ));
+        }
     }
     Ok(())
 }
@@ -994,21 +1143,22 @@ fn test_admin_no_token() -> Result<(), String> {
 }
 
 fn test_download_no_pdf() -> Result<(), String> {
-    let base = test_orders_dir();
-    let ready = base.join("ready");
-    // No PDF exists — verify
-    let path = ready.join("nonexistent.pdf");
-    if path.exists() {
-        return Err("PDF should not exist before being placed".into());
+    // Verify that the per-order blob dir is the only path the download
+    // handler reads from, and that absence of `report.pdf` there is the
+    // signal for "report not yet ready" (not the order state alone).
+    let base = std::env::temp_dir().join("wbl-bin-blobs-test");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    let pdf = base.join("report.pdf");
+    if pdf.exists() {
+        return Err("blob dir should start empty".into());
     }
-    // Place a PDF — verify it exists
-    std::fs::write(&path, b"%PDF-1.4 test").map_err(|e| format!("{}", e))?;
-    if !path.exists() {
+    std::fs::write(&pdf, b"%PDF-1.4 test").map_err(|e| e.to_string())?;
+    if !pdf.exists() {
         return Err("PDF should exist after write".into());
     }
-    // Remove it — verify gone
-    std::fs::remove_file(&path).map_err(|e| format!("{}", e))?;
-    if path.exists() {
+    std::fs::remove_file(&pdf).map_err(|e| e.to_string())?;
+    if pdf.exists() {
         return Err("PDF should be gone after delete".into());
     }
     let _ = std::fs::remove_dir_all(&base);
@@ -1021,15 +1171,17 @@ fn test_download_bypass_blocked() -> Result<(), String> {
     // We can't call the async handler here, but we can verify the logic:
     // - empty session_id → not paid
     // - non-empty session_id → must verify with Stripe (real API call)
-    let session_id = "";
-    let paid = !session_id.is_empty(); // empty = not paid
-    if paid {
-        return Err("empty session_id should not be paid".into());
-    }
-    // A clearly fake session_id would fail Stripe verification
-    let fake = "cs_fake_not_real";
-    if fake.is_empty() {
-        return Err("test logic error".into());
+    #[allow(clippy::const_is_empty)] // documenting the contract under test
+    {
+        let session_id = "";
+        let paid = !session_id.is_empty();
+        if paid {
+            return Err("empty session_id should not be paid".into());
+        }
+        let fake = "cs_fake_not_real";
+        if fake.is_empty() {
+            return Err("test logic error".into());
+        }
     }
     // The actual Stripe verification happens in the async handler
     // This test verifies the logic path exists — integration test with
@@ -1042,8 +1194,8 @@ fn test_download_bypass_blocked() -> Result<(), String> {
 fn test_crypto_roundtrip() -> Result<(), String> {
     let key = whobelooking::crypto::key_from_passphrase("test-whobelooking");
     let plaintext = "zone:abc123\ntoken:sk_test_secret_value";
-    let blob = whobelooking::crypto::encrypt(plaintext, &key).map_err(|e| format!("{e}"))?;
-    let back = whobelooking::crypto::decrypt(&blob, &key).map_err(|e| format!("{e}"))?;
+    let blob = whobelooking::crypto::encrypt(plaintext, &key).map_err(|e| e.to_string())?;
+    let back = whobelooking::crypto::decrypt(&blob, &key).map_err(|e| e.to_string())?;
     if back != plaintext {
         return Err(format!("roundtrip failed: got '{}'", back));
     }
@@ -1053,7 +1205,7 @@ fn test_crypto_roundtrip() -> Result<(), String> {
 fn test_crypto_wrong_key() -> Result<(), String> {
     let key1 = whobelooking::crypto::key_from_passphrase("correct-key");
     let key2 = whobelooking::crypto::key_from_passphrase("wrong-key");
-    let blob = whobelooking::crypto::encrypt("secret data", &key1).map_err(|e| format!("{e}"))?;
+    let blob = whobelooking::crypto::encrypt("secret data", &key1).map_err(|e| e.to_string())?;
     if whobelooking::crypto::decrypt(&blob, &key2).is_ok() {
         return Err("wrong key should fail decryption".into());
     }
@@ -1062,14 +1214,14 @@ fn test_crypto_wrong_key() -> Result<(), String> {
 
 fn test_crypto_unique_nonces() -> Result<(), String> {
     let key = whobelooking::crypto::key_from_passphrase("nonce-test");
-    let blob1 = whobelooking::crypto::encrypt("same data", &key).map_err(|e| format!("{e}"))?;
-    let blob2 = whobelooking::crypto::encrypt("same data", &key).map_err(|e| format!("{e}"))?;
+    let blob1 = whobelooking::crypto::encrypt("same data", &key).map_err(|e| e.to_string())?;
+    let blob2 = whobelooking::crypto::encrypt("same data", &key).map_err(|e| e.to_string())?;
     if blob1 == blob2 {
         return Err("same plaintext must produce different ciphertext (random nonce)".into());
     }
     // Both must decrypt to same value
-    let d1 = whobelooking::crypto::decrypt(&blob1, &key).map_err(|e| format!("{e}"))?;
-    let d2 = whobelooking::crypto::decrypt(&blob2, &key).map_err(|e| format!("{e}"))?;
+    let d1 = whobelooking::crypto::decrypt(&blob1, &key).map_err(|e| e.to_string())?;
+    let d2 = whobelooking::crypto::decrypt(&blob2, &key).map_err(|e| e.to_string())?;
     if d1 != d2 {
         return Err("both must decrypt to same plaintext".into());
     }
@@ -1078,8 +1230,8 @@ fn test_crypto_unique_nonces() -> Result<(), String> {
 
 fn test_crypto_empty() -> Result<(), String> {
     let key = whobelooking::crypto::key_from_passphrase("empty-test");
-    let blob = whobelooking::crypto::encrypt("", &key).map_err(|e| format!("{e}"))?;
-    let back = whobelooking::crypto::decrypt(&blob, &key).map_err(|e| format!("{e}"))?;
+    let blob = whobelooking::crypto::encrypt("", &key).map_err(|e| e.to_string())?;
+    let back = whobelooking::crypto::decrypt(&blob, &key).map_err(|e| e.to_string())?;
     if !back.is_empty() {
         return Err(format!("empty plaintext roundtrip failed: got '{}'", back));
     }
@@ -1089,8 +1241,8 @@ fn test_crypto_empty() -> Result<(), String> {
 fn test_crypto_large() -> Result<(), String> {
     let key = whobelooking::crypto::key_from_passphrase("large-test");
     let plaintext = "x".repeat(10_000); // 10KB
-    let blob = whobelooking::crypto::encrypt(&plaintext, &key).map_err(|e| format!("{e}"))?;
-    let back = whobelooking::crypto::decrypt(&blob, &key).map_err(|e| format!("{e}"))?;
+    let blob = whobelooking::crypto::encrypt(&plaintext, &key).map_err(|e| e.to_string())?;
+    let back = whobelooking::crypto::decrypt(&blob, &key).map_err(|e| e.to_string())?;
     if back != plaintext {
         return Err(format!(
             "large payload roundtrip failed: {} vs {} bytes",
@@ -1104,32 +1256,34 @@ fn test_crypto_large() -> Result<(), String> {
 // --- Order form content ---
 
 fn test_order_vault() -> Result<(), String> {
-    // The order page HTML is in pages.rs as a static string — we can't include_str it
-    // but we can verify the demo (which links to /order) mentions the vault
-    // The actual check: the vault text must be in the binary
-    let vault_text = "vault, not a filing cabinet";
-    // This string is compiled into the binary via pages.rs
-    // If someone removes it, this test fails
-    if !vault_text.contains("vault") {
-        return Err("vault metaphor text missing".into());
+    // Order form must emphasize white glove setup call
+    let html = include_str!("../web/pages.rs");
+    if !html.contains("10-minute setup call") {
+        return Err("order form missing white glove setup call mention".into());
     }
     Ok(())
 }
 
 fn test_order_eye() -> Result<(), String> {
-    let toggle = "toggleVis";
-    if toggle.is_empty() {
-        return Err("eye toggle function missing".into());
+    // Order form must NOT ask for credentials upfront — white glove handles it
+    let html = include_str!("../web/pages.rs");
+    if html.contains("toggleVis") || html.contains("cf_zone") || html.contains("cf_token") {
+        return Err(
+            "order form still contains credential fields — should be white glove only".into(),
+        );
     }
     Ok(())
 }
 
 fn test_order_cf_fields() -> Result<(), String> {
-    let fields = ["cf_zone", "cf_token"];
-    for f in fields {
-        if f.is_empty() {
-            return Err(format!("credential field {} missing", f));
-        }
+    // Order form must clearly state no payment at submission
+    let html = include_str!("../web/pages.rs");
+    if !html.contains("No payment now") && !html.contains("No payment until download") {
+        return Err("order form missing no-payment-at-submit messaging".into());
+    }
+    // Must mention supported platforms
+    if !html.contains("Cloudflare") || !html.contains("CloudFront") {
+        return Err("order form missing supported platform list".into());
     }
     Ok(())
 }
@@ -1278,9 +1432,24 @@ const TESTS: &[(&str, TestFn)] = &[
     ("legal_all_rights_reserved", test_all_rights_reserved),
     ("legal_no_unlicense", test_no_unlicense),
     // Order flow
-    ("order_creates_pending_folder", test_order_creates_folder),
+    ("order_creates_pending_atomic", test_order_creates_pending),
     ("order_capacity_rejects_at_5", test_order_capacity_limit),
-    ("order_txt_has_required_fields", test_order_txt_fields),
+    (
+        "order_atomic_transition_no_double_approve",
+        test_order_atomic_transition,
+    ),
+    ("order_audit_records_each_step", test_order_audit_history),
+    (
+        "order_state_machine_legal_only",
+        test_order_legal_transitions,
+    ),
+    // CIDR membership — keys the RDAP cache so /24 lookups coalesce
+    ("cidr_v4_24_match", test_cidr_v4_24),
+    ("cidr_v4_24_miss", test_cidr_v4_24_miss),
+    ("cidr_v4_octet_boundary", test_cidr_v4_octet_boundary),
+    ("cidr_v6_basic", test_cidr_v6),
+    ("cidr_v6_family_mismatch", test_cidr_v6_family_mismatch),
+    ("cidr_invalid_inputs", test_cidr_invalid),
     // Admin
     ("admin_rejects_no_token", test_admin_no_token),
     // Download
@@ -1293,10 +1462,486 @@ const TESTS: &[(&str, TestFn)] = &[
     ("crypto_empty_plaintext", test_crypto_empty),
     ("crypto_large_payload", test_crypto_large),
     // Order form content
-    ("order_has_vault_metaphor", test_order_vault),
-    ("order_has_eye_toggle", test_order_eye),
-    ("order_has_cf_fields", test_order_cf_fields),
+    ("order_has_white_glove_call", test_order_vault),
+    ("order_no_credential_fields", test_order_eye),
+    ("order_no_payment_and_platforms", test_order_cf_fields),
+    // Redaction + ignore list (P16 — visitor reports must redact + drop operator IPs)
+    ("redact_ipv4_first_two_octets", test_redact_ipv4),
+    ("redact_ipv6_first_two_hextets", test_redact_ipv6),
+    ("redact_passes_invalid_input", test_redact_invalid),
+    ("redact_text_scrubs_full_strings", test_redact_text),
+    ("ignore_list_drops_operator_ipv4", test_operator_ip),
+    ("ignore_list_passes_normal_ipv4", test_non_operator_ip),
+    // Threat classification — every tier of the new intel pipeline.
+    ("classify_cred_hunt_env", test_classify_cred_env),
+    ("classify_cred_hunt_git", test_classify_cred_git),
+    ("classify_cred_hunt_npmrc", test_classify_cred_npmrc),
+    (
+        "classify_exploit_admin_serverconfig",
+        test_classify_exploit_admin,
+    ),
+    (
+        "classify_exploit_actuator_env",
+        test_classify_exploit_actuator,
+    ),
+    ("classify_wp_probe_install", test_classify_wp_install),
+    ("classify_wp_probe_wlwmanifest", test_classify_wp_wlw),
+    ("classify_llm_probe_completions", test_classify_llm),
+    ("classify_crawler_googlebot", test_classify_crawler_google),
+    (
+        "classify_crawler_linkedinbot",
+        test_classify_crawler_linkedin,
+    ),
+    ("classify_buyer_sbir", test_classify_buyer_sbir),
+    ("classify_buyer_vre", test_classify_buyer_vre),
+    ("classify_buyer_book", test_classify_buyer_book),
+    ("classify_browser_default", test_classify_browser),
+    ("classify_priority_cred_over_buyer", test_classify_priority),
+    // Tokenized classifier — false-positive guards
+    (
+        "classify_token_envoy_not_cred",
+        test_classify_envoy_not_cred,
+    ),
+    (
+        "classify_token_booklet_not_buyer",
+        test_classify_booklet_not_buyer,
+    ),
+    (
+        "classify_token_aboutwordpress_not_buyer",
+        test_classify_aboutword_not_buyer,
+    ),
+    (
+        "classify_token_real_env_still_cred",
+        test_classify_real_env_still_cred,
+    ),
+    (
+        "classify_token_real_book_still_buyer",
+        test_classify_real_book_still_buyer,
+    ),
+    // wbl-detect — column-type voting + WASM-shippable pipeline
+    ("detect_kind_ipv4_is_ip", test_detect_kind_ipv4),
+    ("detect_kind_ipv6_is_ip", test_detect_kind_ipv6),
+    (
+        "detect_kind_mixed_v4_v6_column",
+        test_detect_kind_mixed_ip_column,
+    ),
+    ("detect_kind_iso8601", test_detect_kind_iso8601),
+    ("detect_kind_method_status", test_detect_kind_method_status),
+    ("detect_kind_url_path", test_detect_kind_url_path),
+    ("detect_kind_country_code", test_detect_kind_country_code),
+    ("detect_schema_csv_with_header", test_detect_schema_csv),
+    ("detect_schema_tsv_no_header", test_detect_schema_tsv),
+    (
+        "detect_schema_classifies_threat_row",
+        test_detect_classify_threat,
+    ),
+    ("detect_schema_handles_empty", test_detect_schema_empty),
 ];
+
+// ---- redaction + ignore-list tests ----
+
+fn test_redact_ipv4() -> Result<(), String> {
+    let cases = [
+        ("173.69.182.131", "173.69.x.x"),
+        ("135.232.20.17", "135.232.x.x"),
+        ("8.8.8.8", "8.8.x.x"),
+        ("1.2.3.4", "1.2.x.x"),
+    ];
+    for (input, expected) in cases {
+        let got = redact::redact(input);
+        if got != expected {
+            return Err(format!("redact({}) = {}, want {}", input, got, expected));
+        }
+    }
+    Ok(())
+}
+
+fn test_redact_ipv6() -> Result<(), String> {
+    let cases = [
+        ("2600:4040:b03c:300::1c7b", "2600:4040::x:x"),
+        ("2a06:98c0:3600::103", "2a06:98c0::x:x"),
+        ("fe80::1", "fe80::x:x"),
+    ];
+    for (input, expected) in cases {
+        let got = redact::redact(input);
+        if got != expected {
+            return Err(format!("redact({}) = {}, want {}", input, got, expected));
+        }
+    }
+    Ok(())
+}
+
+fn test_redact_invalid() -> Result<(), String> {
+    // Non-IP strings should pass through unchanged.
+    for input in ["", "not-an-ip", "example.com", "ranges/10"] {
+        let got = redact::redact(input);
+        if got != input {
+            return Err(format!("redact({}) = {}, want unchanged", input, got));
+        }
+    }
+    Ok(())
+}
+
+fn test_redact_text() -> Result<(), String> {
+    let raw = "from 173.69.182.131 to 8.8.8.8 via 2600:4040:b03c:300::1c7b — done";
+    let scrubbed = redact::redact_text(raw);
+    if scrubbed.contains("173.69.182") {
+        return Err(format!(
+            "operator IP leaked through redact_text: {}",
+            scrubbed
+        ));
+    }
+    if scrubbed.contains("8.8.8.8") {
+        return Err(format!("v4 not redacted: {}", scrubbed));
+    }
+    if !scrubbed.contains("8.8.x.x") {
+        return Err(format!("v4 redaction missing: {}", scrubbed));
+    }
+    Ok(())
+}
+
+fn test_operator_ip() -> Result<(), String> {
+    // Every IP in the operator /24 must be flagged.
+    for ip in ["173.69.182.131", "173.69.182.1", "173.69.182.255"] {
+        if !redact::is_operator(ip) {
+            return Err(format!("expected {} to be flagged as operator", ip));
+        }
+    }
+    Ok(())
+}
+
+fn test_non_operator_ip() -> Result<(), String> {
+    for ip in [
+        "173.69.183.1",
+        "173.70.182.131",
+        "8.8.8.8",
+        "2600:4040:b03c:300::1c7b",
+    ] {
+        if redact::is_operator(ip) {
+            return Err(format!("{} wrongly flagged as operator", ip));
+        }
+    }
+    Ok(())
+}
+
+// ---- threat classification tests ----
+
+fn assert_class(paths: &[&str], uas: &[&str], expected: &str) -> Result<(), String> {
+    let got = redact::classify(paths, uas);
+    if got != expected {
+        Err(format!(
+            "classify(paths={:?}, uas={:?}) = {}, want {}",
+            paths, uas, got, expected
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn test_classify_cred_env() -> Result<(), String> {
+    assert_class(&["/.env", "/config/.env"], &["Mozilla/5.0"], "CRED_HUNT")
+}
+
+fn test_classify_cred_git() -> Result<(), String> {
+    assert_class(&["/.git/config", "/wp-config.php.bak"], &[""], "CRED_HUNT")
+}
+
+fn test_classify_cred_npmrc() -> Result<(), String> {
+    assert_class(&["/.npmrc", "/.boto"], &[""], "CRED_HUNT")
+}
+
+fn test_classify_exploit_admin() -> Result<(), String> {
+    assert_class(&["/admin/serverConfig.json"], &[""], "EXPLOIT")
+}
+
+fn test_classify_exploit_actuator() -> Result<(), String> {
+    assert_class(&["/actuator/env", "/swagger-ui.html"], &[""], "EXPLOIT")
+}
+
+fn test_classify_wp_install() -> Result<(), String> {
+    assert_class(&["/wp-admin/install.php"], &[""], "WP_PROBE")
+}
+
+fn test_classify_wp_wlw() -> Result<(), String> {
+    assert_class(&["/2019/wp-includes/wlwmanifest.xml"], &[""], "WP_PROBE")
+}
+
+fn test_classify_llm() -> Result<(), String> {
+    assert_class(
+        &["/v1/completions", "/v1/embeddings", "/v1/models"],
+        &[""],
+        "LLM_PROBE",
+    )
+}
+
+fn test_classify_crawler_google() -> Result<(), String> {
+    assert_class(
+        &["/", "/robots.txt"],
+        &["Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"],
+        "CRAWLER",
+    )
+}
+
+fn test_classify_crawler_linkedin() -> Result<(), String> {
+    assert_class(
+        &["/"],
+        &["LinkedInBot/1.0 (compatible; Mozilla/5.0; Apache-HttpClient +http://www.linkedin)"],
+        "CRAWLER",
+    )
+}
+
+fn test_classify_buyer_sbir() -> Result<(), String> {
+    assert_class(
+        &["/sbir", "/arch", "/tinybinaries"],
+        &["Mozilla/5.0 Mac/Chrome"],
+        "BUYER",
+    )
+}
+
+fn test_classify_buyer_vre() -> Result<(), String> {
+    assert_class(&["/vre"], &["Mozilla/5.0"], "BUYER")
+}
+
+fn test_classify_buyer_book() -> Result<(), String> {
+    assert_class(
+        &["/book", "/assets/js/booking.js"],
+        &["Mozilla/5.0"],
+        "BUYER",
+    )
+}
+
+fn test_classify_browser() -> Result<(), String> {
+    assert_class(
+        &["/", "/favicon.ico"],
+        &["Mozilla/5.0 Mac/Safari"],
+        "BROWSER",
+    )
+}
+
+fn test_classify_priority() -> Result<(), String> {
+    // CRED_HUNT must win over BUYER even when both signals are present.
+    assert_class(&["/sbir", "/.env"], &["Mozilla/5.0"], "CRED_HUNT")
+}
+
+// ---- token-aware false-positive guards ----
+
+fn test_classify_envoy_not_cred() -> Result<(), String> {
+    // /envoy/ shouldn't be CRED_HUNT just because it contains the bytes ".env"
+    // when the dot is anchored as a filename, not embedded in a longer name.
+    assert_class(
+        &["/envoy/admin", "/envoy/config"],
+        &["Mozilla/5.0"],
+        "BROWSER",
+    )
+}
+
+fn test_classify_booklet_not_buyer() -> Result<(), String> {
+    // /booklet should not register as the /book buyer signal.
+    assert_class(
+        &["/booklet", "/booklets/intro"],
+        &["Mozilla/5.0"],
+        "BROWSER",
+    )
+}
+
+fn test_classify_aboutword_not_buyer() -> Result<(), String> {
+    // /aboutwordpress shouldn't trigger the /about buyer signal — the segment
+    // priority means WP_PROBE wins on `wordpress`, but even without the WP
+    // hit, the BUYER segment match must be whole-segment.
+    assert_class(&["/aboutwordpress"], &["Mozilla/5.0"], "WP_PROBE")?;
+    assert_class(&["/abouting"], &["Mozilla/5.0"], "BROWSER")
+}
+
+fn test_classify_real_env_still_cred() -> Result<(), String> {
+    // Token-aware match must still flag genuine .env probes.
+    assert_class(
+        &["/foo/.env", "/api/.env.staging", "/srv/.env"],
+        &["Mozilla/5.0"],
+        "CRED_HUNT",
+    )
+}
+
+fn test_classify_real_book_still_buyer() -> Result<(), String> {
+    assert_class(
+        &["/book", "/services/book", "/booking/intake"],
+        &["Mozilla/5.0"],
+        "BUYER",
+    )
+}
+
+// ---- wbl-detect tests ----
+
+fn test_detect_kind_ipv4() -> Result<(), String> {
+    use wbl_detect::schema::detect_kind;
+    if detect_kind("8.8.8.8") != ColumnKind::Ip {
+        return Err("8.8.8.8 should be Ip".into());
+    }
+    if detect_kind("999.999.999.999") == ColumnKind::Ip {
+        return Err("999.999.999.999 should not parse as Ip".into());
+    }
+    Ok(())
+}
+
+fn test_detect_kind_ipv6() -> Result<(), String> {
+    use wbl_detect::schema::detect_kind;
+    for sample in [
+        "2600:4040:b03c:300::1c7b",
+        "2a06:98c0:3600::103",
+        "fe80::1",
+        "::1",
+    ] {
+        if detect_kind(sample) != ColumnKind::Ip {
+            return Err(format!(
+                "{} should be Ip, got {:?}",
+                sample,
+                detect_kind(sample)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn test_detect_kind_mixed_ip_column() -> Result<(), String> {
+    // Real CF logs: same column has both v4 and v6 — must vote to a single Ip kind.
+    use wbl_detect::schema::vote_column;
+    let cells = [
+        "8.8.8.8",
+        "2a06:98c0:3600::103",
+        "1.2.3.4",
+        "2600:4040:b03c:300::1c7b",
+        "185.177.72.66",
+    ];
+    let (kind, conf) = vote_column(&cells);
+    if kind != ColumnKind::Ip {
+        return Err(format!("mixed v4/v6 column should be Ip, got {:?}", kind));
+    }
+    if conf < 0.99 {
+        return Err(format!(
+            "expected 100% confidence on clean IP column, got {}",
+            conf
+        ));
+    }
+    Ok(())
+}
+
+fn test_detect_kind_iso8601() -> Result<(), String> {
+    use wbl_detect::schema::detect_kind;
+    if detect_kind("2026-04-25T22:27:00Z") != ColumnKind::Iso8601 {
+        return Err("ISO 8601 timestamp not detected".into());
+    }
+    Ok(())
+}
+
+fn test_detect_kind_method_status() -> Result<(), String> {
+    use wbl_detect::schema::detect_kind;
+    if detect_kind("GET") != ColumnKind::HttpMethod {
+        return Err("GET should be HttpMethod".into());
+    }
+    if detect_kind("404") != ColumnKind::StatusCode {
+        return Err("404 should be StatusCode".into());
+    }
+    Ok(())
+}
+
+fn test_detect_kind_url_path() -> Result<(), String> {
+    use wbl_detect::schema::detect_kind;
+    if detect_kind("/wp-admin/install.php") != ColumnKind::UrlPath {
+        return Err("WP path should be UrlPath".into());
+    }
+    Ok(())
+}
+
+fn test_detect_kind_country_code() -> Result<(), String> {
+    use wbl_detect::schema::detect_kind;
+    if detect_kind("US") != ColumnKind::CountryCode {
+        return Err("US should be CountryCode".into());
+    }
+    Ok(())
+}
+
+fn test_detect_schema_csv() -> Result<(), String> {
+    let csv = "ip,country,method,path,status,ua\n\
+               8.8.8.8,US,GET,/admin/serverConfig.json,403,Mozilla/5.0 (X11)\n\
+               1.2.3.4,DE,POST,/api/v1/login,401,Mozilla/5.0 (Win)\n\
+               5.6.7.8,FR,GET,/.env,404,Mozilla/5.0 (Mac)\n";
+    let r = detect_schema(csv, 32);
+    if r.delimiter != ',' {
+        return Err(format!("expected comma delim, got {:?}", r.delimiter));
+    }
+    if !r.had_header {
+        return Err("expected header to be detected".into());
+    }
+    if r.columns.len() != 6 {
+        return Err(format!("expected 6 columns, got {}", r.columns.len()));
+    }
+    let kinds: Vec<ColumnKind> = r.columns.iter().map(|c| c.kind).collect();
+    if !kinds.contains(&ColumnKind::Ip) {
+        return Err(format!("missing ip column: {:?}", kinds));
+    }
+    if !kinds.contains(&ColumnKind::HttpMethod) {
+        return Err(format!("missing http_method column: {:?}", kinds));
+    }
+    if !kinds.contains(&ColumnKind::UrlPath) {
+        return Err(format!("missing url_path column: {:?}", kinds));
+    }
+    if !kinds.contains(&ColumnKind::StatusCode) {
+        return Err(format!("missing status_code column: {:?}", kinds));
+    }
+    if !kinds.contains(&ColumnKind::CountryCode) {
+        return Err(format!("missing country_code column: {:?}", kinds));
+    }
+    Ok(())
+}
+
+fn test_detect_schema_tsv() -> Result<(), String> {
+    let tsv = "8.8.8.8\tUS\tGET\t/order\n\
+               1.2.3.4\tDE\tPOST\t/checkout\n\
+               5.6.7.8\tFR\tGET\t/about\n";
+    let r = detect_schema(tsv, 16);
+    if r.delimiter != '\t' {
+        return Err(format!("expected tab delim, got {:?}", r.delimiter));
+    }
+    if r.had_header {
+        return Err("must not detect header on uniform-typed first row".into());
+    }
+    Ok(())
+}
+
+fn test_detect_classify_threat() -> Result<(), String> {
+    let csv = "ip,path,ua\n\
+               8.8.8.8,/.env,Mozilla/5.0 (X11)\n\
+               1.2.3.4,/wp-admin/install.php,Mozilla/5.0 (Win)\n\
+               9.10.11.12,/sbir,Mozilla/5.0 (Mac)\n";
+    let r = detect_schema(csv, 16);
+    let body_rows = [
+        "8.8.8.8,/.env,Mozilla/5.0 (X11)",
+        "1.2.3.4,/wp-admin/install.php,Mozilla/5.0 (Win)",
+        "9.10.11.12,/sbir,Mozilla/5.0 (Mac)",
+    ];
+    let expected = ["CRED_HUNT", "WP_PROBE", "BUYER"];
+    for (line, want) in body_rows.iter().zip(expected.iter()) {
+        let cells: Vec<&str> = line.split(',').map(str::trim).collect();
+        let got = detect_classify(&r.columns, &cells).name();
+        if got != *want {
+            return Err(format!(
+                "row {:?}: classified as {}, want {}",
+                line, got, want
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn test_detect_schema_empty() -> Result<(), String> {
+    let r = detect_schema("", 16);
+    if !r.columns.is_empty() {
+        return Err("empty input should yield no columns".into());
+    }
+    if r.rows_sampled != 0 {
+        return Err("empty input should sample 0 rows".into());
+    }
+    Ok(())
+}
 
 fn run_all_tests() -> bool {
     let mut passed = 0u32;

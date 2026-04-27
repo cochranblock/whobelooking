@@ -1,12 +1,18 @@
 // All Rights Reserved — The Cochran Block, LLC
-//! Admin — filesystem-based queue. Orders are directories.
-//! pending/ → approved/ or rejected/. You move them. That's it.
+//! Admin — sled-backed atomic order queue.
+//!
+//! Order metadata + state transitions are handled by `crate::orders::Store`.
+//! Blobs (uploaded logfiles, generated PDFs) live at
+//! `~/.local/share/whobelooking/orders/blobs/{id}/`.
+//!
+//! State machine: `Pending → Approved → Ready` (with `Rejected` terminal at
+//! any non-terminal state). Every transition is journaled to the `audit/`
+//! tree so a restart can reconstruct the timeline.
 
+use crate::orders::{MAX_PENDING, OrderState, Store};
 use axum::extract::Query;
 use axum::response::Html;
 use serde::Deserialize;
-
-const MAX_PENDING: usize = 5;
 
 #[derive(Deserialize)]
 pub struct AdminQuery {
@@ -18,53 +24,50 @@ fn check_token(q: &AdminQuery) -> bool {
     q.token.as_deref() == Some(&expected)
 }
 
-fn orders_dir() -> std::path::PathBuf {
-    let dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("whobelooking")
-        .join("orders");
-    let _ = std::fs::create_dir_all(dir.join("pending"));
-    let _ = std::fs::create_dir_all(dir.join("approved"));
-    let _ = std::fs::create_dir_all(dir.join("rejected"));
-    let _ = std::fs::create_dir_all(dir.join("ready"));
-    dir
+fn store() -> Option<Store> {
+    match Store::open() {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!("orders store unavailable: {}", e);
+            None
+        }
+    }
 }
 
 pub fn pending_count() -> usize {
-    let dir = orders_dir().join("pending");
-    std::fs::read_dir(dir)
-        .map(|r| {
-            r.filter(|e| e.as_ref().map(|e| e.path().is_dir()).unwrap_or(false))
-                .count()
-        })
-        .unwrap_or(0)
+    store().map(|s| s.pending_count()).unwrap_or(0)
 }
 
 pub fn has_capacity() -> bool {
     pending_count() < MAX_PENDING
 }
 
-pub fn create_order(id: &str, email: &str, site_url: &str, source_type: &str, tier: &str) -> bool {
-    if !has_capacity() {
+pub fn create_order(
+    id: &str,
+    email: &str,
+    site_url: &str,
+    source_type: &str,
+    tier: &str,
+    client_ip: &str,
+) -> bool {
+    let Some(s) = store() else {
+        crate::web::metrics::ORDER_CREATES_REJECTED
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return false;
+    };
+    match s.create(id, email, site_url, source_type, tier, client_ip, "web") {
+        Ok(_) => {
+            crate::web::metrics::ORDER_CREATES_OK
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        }
+        Err(e) => {
+            tracing::warn!("create_order({}) failed: {}", id, e);
+            crate::web::metrics::ORDER_CREATES_REJECTED
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            false
+        }
     }
-    let dir = orders_dir().join("pending").join(id);
-    if std::fs::create_dir_all(&dir).is_err() {
-        return false;
-    }
-    let content = format!(
-        "id: {}\nemail: {}\nsite: {}\nsource: {}\ntier: {}\ncreated: {}\n",
-        id,
-        email,
-        site_url,
-        source_type,
-        tier,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    );
-    std::fs::write(dir.join("order.txt"), content).is_ok()
 }
 
 pub async fn dashboard(Query(q): Query<AdminQuery>) -> Html<String> {
@@ -72,50 +75,34 @@ pub async fn dashboard(Query(q): Query<AdminQuery>) -> Html<String> {
         return Html("<h1 style='color:#ff6b35;font-family:monospace;background:#050508;height:100vh;display:flex;align-items:center;justify-content:center;margin:0'>unauthorized</h1>".into());
     }
 
-    let base = orders_dir();
     let mut rows = String::new();
+    let store_opt = store();
+    let pending = store_opt.as_ref().map(|s| s.pending_count()).unwrap_or(0);
 
-    for folder in ["pending", "approved", "rejected", "ready"] {
-        let dir = base.join(folder);
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    let id = entry.file_name().to_string_lossy().to_string();
-                    let order_txt =
-                        std::fs::read_to_string(entry.path().join("order.txt")).unwrap_or_default();
-                    let has_report = entry.path().join("report.pdf").exists();
-                    let color = match folder {
-                        "pending" => "#00d9ff",
-                        "approved" => "#00ffcc",
-                        "rejected" => "#ff6b35",
-                        _ => "#555",
-                    };
-                    let email = order_txt
-                        .lines()
-                        .find(|l| l.starts_with("email:"))
-                        .map(|l| l.trim_start_matches("email:").trim())
-                        .unwrap_or("?");
-                    let tier = order_txt
-                        .lines()
-                        .find(|l| l.starts_with("tier:"))
-                        .map(|l| l.trim_start_matches("tier:").trim())
-                        .unwrap_or("?");
-                    let report_badge = if has_report {
-                        "<span style='color:#00ffcc'>PDF</span>"
-                    } else {
-                        ""
-                    };
-
-                    rows.push_str(&format!(
-                        "<tr><td style='color:{color}'>{folder}</td><td style='font-size:10px;color:#555'>{short_id}</td><td>{email}</td><td>{tier}</td><td>{report_badge}</td></tr>\n",
-                        color = color,
-                        folder = folder,
-                        short_id = &id[..std::cmp::min(id.len(), 8)],
-                        email = email,
-                        tier = tier,
-                        report_badge = report_badge,
-                    ));
-                }
+    if let Some(s) = &store_opt {
+        if let Ok(orders) = s.list_all() {
+            for o in orders {
+                let color = match o.state {
+                    OrderState::Pending => "#00d9ff",
+                    OrderState::Approved => "#00ffcc",
+                    OrderState::Rejected => "#ff6b35",
+                    OrderState::Ready => "#9d4edd",
+                };
+                let has_report = crate::orders::blobs_dir(&o.id).join("report.pdf").exists();
+                let report_badge = if has_report {
+                    "<span style='color:#00ffcc'>PDF</span>"
+                } else {
+                    ""
+                };
+                rows.push_str(&format!(
+                    "<tr><td style='color:{color}'>{state}</td><td style='font-size:10px;color:#555'>{short_id}</td><td>{email}</td><td>{tier}</td><td>{report_badge}</td></tr>\n",
+                    color = color,
+                    state = o.state.name(),
+                    short_id = &o.id[..o.id.len().min(8)],
+                    email = o.email,
+                    tier = o.tier,
+                    report_badge = report_badge,
+                ));
             }
         }
     }
@@ -123,8 +110,6 @@ pub async fn dashboard(Query(q): Query<AdminQuery>) -> Html<String> {
     if rows.is_empty() {
         rows = "<tr><td colspan='5' style='color:#555;text-align:center;padding:2rem'>No orders</td></tr>".into();
     }
-
-    let pending = pending_count();
 
     Html(format!(
         r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -147,10 +132,12 @@ code{{font-size:0.7rem;color:#9ca3af;background:#0d0d14;padding:2px 6px;border-r
 {rows}
 </table>
 <p style="margin-top:2rem;font-size:0.7rem;color:#555">
-Workflow: <code>ls ~/.local/share/whobelooking/orders/pending/</code><br>
-Approve: <code>mv pending/{{id}} approved/</code><br>
-Reject: <code>mv pending/{{id}} rejected/</code><br>
-Upload report: <code>cp report.pdf approved/{{id}}/report.pdf</code>
+Workflow (atomic, audited):<br>
+List: <code>whobelooking order list</code><br>
+Approve: <code>whobelooking order approve {{id}}</code><br>
+Reject: <code>whobelooking order reject {{id}}</code><br>
+Upload report: <code>cp report.pdf ~/.local/share/whobelooking/orders/blobs/{{id}}/report.pdf &amp;&amp; whobelooking order ready {{id}}</code><br>
+History: <code>whobelooking order audit [id]</code>
 </p>
 </body></html>"#,
         pending = pending,
@@ -158,3 +145,7 @@ Upload report: <code>cp report.pdf approved/{{id}}/report.pdf</code>
         rows = rows,
     ))
 }
+
+// Operator data (visits, corpus) is no longer served over HTTP — see src/ipc.rs
+// and the `whobelooking visits` / `whobelooking corpus` CLI subcommands which
+// route over the local Unix socket. File-mode 0600 on the socket is the auth.

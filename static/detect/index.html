@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WHOBELOOKING — Detect (in-browser, customer logs never leave the customer)</title>
+<style>
+:root { --void:#050508; --void-2:#0a0a14; --cyan:#00d9ff; --purple:#9d4edd;
+        --teal:#00ffcc; --amber:#ffb547; --red:#ff3a5c; --ash:#8b8ba0;
+        --ice:#e8e8f0; }
+* { box-sizing: border-box; }
+html, body { margin:0; background: var(--void); color: var(--ice);
+             font-family: 'Rajdhani','Helvetica Neue',Arial,sans-serif; }
+body { background:
+  radial-gradient(ellipse at 12% 8%, rgba(157,78,221,.18) 0%, transparent 42%),
+  radial-gradient(ellipse at 88% 6%, rgba(0,217,255,.15) 0%, transparent 40%),
+  radial-gradient(ellipse at 50% 100%, rgba(0,255,204,.10) 0%, transparent 55%),
+  var(--void);
+  padding: 24px 28px 40px; min-height: 100vh; }
+h1 { font-family: 'Orbitron','Helvetica Neue',sans-serif; font-weight:900;
+     letter-spacing:.16em; color: var(--cyan); margin:0; font-size:22pt;
+     text-shadow: 0 0 8px rgba(0,217,255,.5); }
+h1 .be { color: var(--purple); } h1 .looking { color: var(--teal); }
+.sub { color: var(--ash); letter-spacing:.18em; text-transform: uppercase;
+       font-size: 8pt; margin-top: 6px; }
+.zone { margin: 22px 0; padding: 28px;
+        border: 1px dashed rgba(0,217,255,.35);
+        background: rgba(0,217,255,.04);
+        text-align: center; border-radius: 4px;
+        cursor: pointer; transition: all .2s; }
+.zone.hot { border-color: var(--teal); background: rgba(0,255,204,.06); }
+.zone code { color: var(--cyan); font-family: 'JetBrains Mono', monospace; }
+input[type=file] { display:none; }
+.kpis { display:grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 16px 0; }
+.kpi { border: 1px solid rgba(0,217,255,.3); padding: 10px; }
+.kpi .num { font-family: 'Orbitron', sans-serif; font-size: 20pt; font-weight:700;
+            color: var(--teal); display:block; }
+.kpi .lbl { font-size: 7pt; letter-spacing:.12em; text-transform: uppercase;
+            color: var(--ash); }
+table { width:100%; border-collapse: collapse; font-family: 'JetBrains Mono', monospace;
+        font-size: 8.5pt; margin: 10px 0; }
+th { text-align:left; font-family: 'Orbitron',sans-serif; font-size: 7.5pt;
+     letter-spacing:.14em; color: var(--cyan); text-transform: uppercase;
+     border-bottom: 1px solid rgba(0,217,255,.4); padding: 5px 7px;
+     background: rgba(0,217,255,.04); }
+td { padding: 4px 7px; border-bottom: 1px solid rgba(139,139,160,.12);
+     vertical-align: top; color: var(--ice); }
+.kind { display:inline-block; font-family:'Orbitron',sans-serif; font-size:7pt;
+        letter-spacing:.1em; padding:1px 6px; border:1px solid; border-radius:2px;
+        text-transform: uppercase; }
+.kind.ipv4, .kind.ipv6, .kind.cidr { color: var(--teal); border-color: var(--teal); }
+.kind.url_path, .kind.user_agent  { color: var(--cyan); border-color: var(--cyan); }
+.kind.iso8601, .kind.epoch_secs, .kind.epoch_ms { color: var(--purple); border-color: var(--purple); }
+.kind.unknown { color: var(--ash); border-color: var(--ash); }
+.signal { display:inline-block; font-family:'Orbitron',sans-serif; font-size:7pt;
+          font-weight:700; letter-spacing:.1em; padding:1px 6px; border-radius:1px; }
+.signal.cred_hunt { color: #050508; background: var(--red); }
+.signal.exploit   { color: #050508; background: #ff2bd6; }
+.signal.wp_probe  { color: #050508; background: var(--amber); }
+.signal.llm_probe { color: var(--ice); background: var(--purple); }
+.signal.crawler   { color: var(--cyan); border:1px solid var(--cyan); }
+.signal.buyer     { color: #050508; background: var(--teal); }
+.signal.browser   { color: var(--ash); border:1px solid var(--ash); }
+.note { font-size: 9pt; color: var(--ash); margin: 14px 0; }
+.note b { color: var(--ice); }
+.legal { margin-top: 28px; padding-top: 12px; border-top: 1px solid rgba(0,217,255,.2);
+         font-family:'Orbitron',sans-serif; font-size: 7pt; letter-spacing:.18em;
+         text-transform: uppercase; color: var(--ash); text-align:center; }
+</style>
+</head>
+<body>
+
+<h1>W H O&nbsp;&nbsp;<span class="be">B E</span>&nbsp;&nbsp;<span class="looking">L O O K I N G</span></h1>
+<div class="sub">Detect · WebAssembly · Customer Logs Never Leave This Browser</div>
+
+<div class="zone" id="drop">
+  <div style="font-family:'Orbitron',sans-serif;font-size:11pt;letter-spacing:.16em;color:var(--cyan)">DROP A LOG / CSV / TSV HERE</div>
+  <div style="margin-top:6px;color:var(--ash);font-size:9pt">or click to pick a file · processed locally · <code>POST</code> never happens</div>
+  <input type="file" id="picker" accept="*/*">
+</div>
+
+<div class="note" id="note">Waiting for file. The detector is a 116 KB WebAssembly module compiled from <code>crates/wbl-detect</code>. Column-type voting + threat classification run in this browser tab; the file you drop never gets uploaded.</div>
+
+<div class="kpis" id="kpis" style="display:none">
+  <div class="kpi"><span class="num" id="kpi-rows">0</span><span class="lbl">Rows Sampled</span></div>
+  <div class="kpi"><span class="num" id="kpi-cols">0</span><span class="lbl">Columns</span></div>
+  <div class="kpi"><span class="num" id="kpi-delim">·</span><span class="lbl">Delimiter</span></div>
+  <div class="kpi"><span class="num" id="kpi-class">0</span><span class="lbl">Rows Classified</span></div>
+  <div class="kpi"><span class="num" id="kpi-threat">0</span><span class="lbl">Threat Rows</span></div>
+</div>
+
+<div id="schema-out"></div>
+<div id="rows-out"></div>
+
+<div class="legal">All Rights Reserved · The Cochran Block, LLC · runs locally · zero upload</div>
+
+<script type="module">
+import init, { detect, classify_rows } from './wbl_detect.js';
+
+const drop = document.getElementById('drop');
+const picker = document.getElementById('picker');
+const note = document.getElementById('note');
+const schemaOut = document.getElementById('schema-out');
+const rowsOut = document.getElementById('rows-out');
+const kpis = document.getElementById('kpis');
+
+let ready = init().then(() => {
+  note.innerHTML = '<b>Detector loaded.</b> 116 KB WASM, ready. Drop a file or click the zone.';
+});
+
+drop.addEventListener('click', () => picker.click());
+['dragover','dragenter'].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('hot'); }));
+['dragleave','dragend','drop'].forEach(ev =>
+  drop.addEventListener(ev, e => drop.classList.remove('hot')));
+drop.addEventListener('drop', e => {
+  e.preventDefault();
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+picker.addEventListener('change', e => {
+  if (e.target.files.length) handleFile(e.target.files[0]);
+});
+
+async function handleFile(file) {
+  await ready;
+  note.innerHTML = `Reading <b>${file.name}</b> (${file.size.toLocaleString()} bytes) · processing locally…`;
+  const text = await file.text();
+  // Phase 1 — schema detection (fast, ~200 rows sampled)
+  const schema = detect(text, 256);
+  renderSchema(schema, file);
+  // Phase 2 — full classify (capped to keep DOM sane)
+  const t0 = performance.now();
+  const rows = classify_rows(text, 4096);
+  const ms = (performance.now() - t0).toFixed(0);
+  renderRows(rows, schema, ms);
+}
+
+function renderSchema(schema, file) {
+  const cols = schema.columns;
+  document.getElementById('kpi-rows').textContent = schema.rows_sampled.toLocaleString();
+  document.getElementById('kpi-cols').textContent = cols.length;
+  document.getElementById('kpi-delim').textContent = schema.delimiter === '\t' ? '↹' : schema.delimiter;
+  kpis.style.display = 'grid';
+  let html = `<h3 style="font-family:'Orbitron',sans-serif;color:var(--teal);letter-spacing:.16em;text-transform:uppercase;font-size:11pt;margin:18px 0 6px">Detected Schema · ${file.name}</h3>`;
+  html += '<table><tr><th>#</th><th>Header</th><th>Kind</th><th>Confidence</th><th>Samples</th></tr>';
+  for (const c of cols) {
+    const conf = (c.confidence * 100).toFixed(0) + '%';
+    const samples = c.samples.map(s => `<code>${escapeHtml(s)}</code>`).join(' · ');
+    html += `<tr><td>${c.index}</td><td>${escapeHtml(c.header || '—')}</td>` +
+            `<td><span class="kind ${c.kind}">${c.kind}</span></td>` +
+            `<td>${conf}</td><td>${samples}</td></tr>`;
+  }
+  html += '</table>';
+  schemaOut.innerHTML = html;
+}
+
+function renderRows(rows, schema, ms) {
+  const counts = {};
+  for (const r of rows) counts[r.signal] = (counts[r.signal] || 0) + 1;
+  const threat = (counts.CRED_HUNT || 0) + (counts.EXPLOIT || 0) + (counts.WP_PROBE || 0) + (counts.LLM_PROBE || 0);
+  document.getElementById('kpi-class').textContent = rows.length.toLocaleString();
+  document.getElementById('kpi-threat').textContent = threat.toLocaleString();
+  let html = `<h3 style="font-family:'Orbitron',sans-serif;color:var(--cyan);letter-spacing:.16em;text-transform:uppercase;font-size:11pt;margin:18px 0 6px">Classification · ${rows.length.toLocaleString()} rows in ${ms} ms</h3>`;
+  html += '<table><tr><th>#</th><th>Signal</th><th>IP</th></tr>';
+  // Show first 200 + group counts
+  for (const r of rows.slice(0, 200)) {
+    const cls = r.signal.toLowerCase();
+    html += `<tr><td>${r.row_index}</td><td><span class="signal ${cls}">${r.signal}</span></td><td><code>${escapeHtml(r.ip || '—')}</code></td></tr>`;
+  }
+  html += '</table>';
+  if (rows.length > 200) {
+    html += `<div class="note">Showing first 200 of ${rows.length.toLocaleString()}. Tier counts: ` +
+      Object.entries(counts).sort((a,b)=>b[1]-a[1])
+            .map(([k,v])=>`<b>${k}</b>=${v}`).join(' · ') + '</div>';
+  }
+  rowsOut.innerHTML = html;
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+</script>
+</body>
+</html>

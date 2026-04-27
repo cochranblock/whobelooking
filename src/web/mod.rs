@@ -3,5 +3,9 @@
 
 pub mod admin;
 pub mod checkout;
+pub mod detect;
+pub mod metrics;
 pub mod pages;
 pub mod router;
+pub mod scan;
+pub mod visits;

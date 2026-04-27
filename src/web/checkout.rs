@@ -3,6 +3,7 @@
 
 use crate::web::admin;
 use axum::extract::{Multipart, Query};
+use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse, Redirect};
 use serde::Deserialize;
 use whobelooking::crypto;
@@ -25,7 +26,11 @@ struct ParsedOrder {
 }
 
 /// Submit a request. Credentials encrypted, files saved encrypted. Never plaintext on disk.
-pub async fn create_checkout(mut multipart: Multipart) -> axum::response::Response {
+pub async fn create_checkout(
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> axum::response::Response {
+    let client_ip = super::visits::client_ip(&headers);
     let mut order = ParsedOrder::default();
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -65,16 +70,18 @@ pub async fn create_checkout(mut multipart: Multipart) -> axum::response::Respon
         &order.site_url,
         &order.source_type,
         &order.tier,
+        &client_ip,
     ) {
         return Redirect::to("/order?error=capacity").into_response();
     }
 
     tracing::info!(
-        "new order: {} from {} for {} ({})",
+        "new order: {} from {} for {} ({}) ip={}",
         id,
         order.email,
         order.site_url,
-        order.source_type
+        order.source_type,
+        client_ip,
     );
 
     let passphrase =
@@ -105,14 +112,11 @@ pub async fn create_checkout(mut multipart: Multipart) -> axum::response::Respon
         let plaintext_b64 = base64::engine::general_purpose::STANDARD.encode(data);
         match crypto::encrypt(&plaintext_b64, &key) {
             Ok(blob) => {
-                // Save encrypted log to the order folder
-                let order_dir = dirs::data_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("whobelooking")
-                    .join("orders")
-                    .join("pending")
-                    .join(&id);
-                let enc_path = order_dir.join("logfile.enc");
+                // Save encrypted log to the order's blob directory.
+                // `orders::create` already created this dir at submit time.
+                let blob_dir = crate::orders::blobs_dir(&id);
+                let _ = std::fs::create_dir_all(&blob_dir);
+                let enc_path = blob_dir.join("logfile.enc");
                 let _ = std::fs::write(&enc_path, &blob);
                 tracing::info!(
                     "log file encrypted for {} — {} bytes from '{}' → logfile.enc",

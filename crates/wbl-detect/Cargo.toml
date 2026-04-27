@@ -1,0 +1,29 @@
+# All Rights Reserved — The Cochran Block, LLC
+# Contributors: GotEmCoach, KOVA, Claude Opus 4.7
+
+[package]
+name = "wbl-detect"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Column-type detector + threat classifier — runs in the browser as WebAssembly. Customer logs never leave the customer's machine."
+license = "LicenseRef-Proprietary"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+regex-lite = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.114"
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[features]
+default = []
+panic-hook = ["dep:console_error_panic_hook"]
+
+# Note: profile config lives at workspace root.
