@@ -3,6 +3,7 @@
 
 use axum::{
     Router,
+    response::IntoResponse,
     routing::{get, post},
 };
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
@@ -14,9 +15,26 @@ pub fn build() -> Router {
         // Public
         .route("/", get(pages::demo))
         .route("/about", get(pages::index))
-        .route("/order", get(pages::order_form))
-        .route("/order/checkout", post(checkout::create_checkout))
-        .route("/order/confirmed", get(checkout::checkout_success))
+        // Order form removed — whobelooking is free / Unlicense / public domain.
+        // Old /order paths now redirect to the GitHub repo (clone & run yourself).
+        .route(
+            "/order",
+            get(|| async {
+                axum::response::Redirect::permanent("https://github.com/cochranblock/whobelooking")
+            }),
+        )
+        .route(
+            "/order/checkout",
+            post(|| async {
+                axum::response::Redirect::permanent("https://github.com/cochranblock/whobelooking")
+            }),
+        )
+        .route(
+            "/order/confirmed",
+            get(|| async {
+                axum::response::Redirect::permanent("https://github.com/cochranblock/whobelooking")
+            }),
+        )
         .route("/status/{id}", get(pages::job_status))
         .route("/download/{id}", get(pages::download_report))
         .route(
@@ -36,14 +54,40 @@ pub fn build() -> Router {
         .route("/scan", get(scan::index))
         .route("/scan/", get(scan::index))
         .route("/api/probe", get(scan::probe))
+        .route("/api/scan/status", get(scan::status))
         .route("/api/scan/pay", post(scan::pay))
         .route("/api/scan/gate", post(scan::gate))
         .route("/api/scan/finalize", post(scan::finalize))
+        .route("/api/scan/feedback", post(super::feedback::submit))
         // Admin (token-gated)
         .route("/admin", get(admin::dashboard))
         .route("/metrics", get(metrics::endpoint))
         .fallback(pages::not_found)
         .layer(CompressionLayer::new().zstd(true))
+        .layer(axum::middleware::from_fn(redirect_legacy_hosts))
         .layer(axum::middleware::from_fn(super::visits::log_middleware))
         .layer(TraceLayer::new_for_http())
+}
+
+/// 301 anything served at the legacy whobelooking.org / .com hostnames over
+/// to whobelooking.cochranblock.org. The product is consolidating onto a
+/// single subdomain under the cochranblock umbrella; old domains stay live
+/// only as redirectors so existing inbound links keep working.
+async fn redirect_legacy_hosts(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if let Some(host) = req.headers().get(axum::http::header::HOST).and_then(|h| h.to_str().ok()) {
+        let h = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+        let legacy = matches!(
+            h.as_str(),
+            "whobelooking.org" | "www.whobelooking.org" | "whobelooking.com" | "www.whobelooking.com"
+        );
+        if legacy {
+            let pq = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+            let target = format!("https://whobelooking.cochranblock.org{}", pq);
+            return axum::response::Redirect::permanent(&target).into_response();
+        }
+    }
+    next.run(req).await
 }

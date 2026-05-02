@@ -19,7 +19,7 @@ pub async fn index() -> Html<String> {
         r##"<!DOCTYPE html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>whobelooking — Who's looking at your site?</title>
-<meta name="description" content="Visitor intelligence. We tell you which companies are silently evaluating your site, which pages they read, and what it means. Starting at $150.">
+<meta name="description" content="Visitor intelligence. We tell you which companies are silently evaluating your site, which pages they read, and what it means. Free. Unlicense.">
 <meta property="og:title" content="whobelooking — Visitor Intelligence">
 <meta property="og:description" content="Microsoft had a 3-hour meeting about us. We caught them. Want to know who's meeting about you?">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -373,7 +373,7 @@ body::before {{
 <div class="hero">
   <div class="hero-kicker">The Cochran Block, LLC</div>
   <h1>Who's looking at your site?</h1>
-  <p class="hero-sub">We tell you which companies are silently evaluating you. Which pages they read. How long they stayed. Whether they're a threat or an opportunity. Starting at $150.</p>
+  <p class="hero-sub">We tell you which companies are silently evaluating you. Which pages they read. How long they stayed. Whether they're a threat or an opportunity. Free, Unlicense.</p>
 </div>
 
 <div class="proof">
@@ -424,35 +424,9 @@ body::before {{
 </div>
 
 <div class="section">
-  <div class="section-label">Pricing</div>
-  <h2>Scales with your traffic</h2>
-  <p>More visitors = more IPs to resolve = more analysis time. Price reflects the work.</p>
-  <div class="pricing">
-    <div class="price-card featured">
-      <div class="price-tier">Starter</div>
-      <div class="price-amount">$150</div>
-      <div class="price-ips">&lt;500 unique IPs</div>
-      <div class="price-hours">~1.5 hrs</div>
-    </div>
-    <div class="price-card">
-      <div class="price-tier">Growth</div>
-      <div class="price-amount">$350</div>
-      <div class="price-ips">500 &ndash; 2,000 IPs</div>
-      <div class="price-hours">~3 hrs</div>
-    </div>
-    <div class="price-card">
-      <div class="price-tier">Scale</div>
-      <div class="price-amount">$750</div>
-      <div class="price-ips">2,000 &ndash; 10,000 IPs</div>
-      <div class="price-hours">~6 hrs</div>
-    </div>
-    <div class="price-card">
-      <div class="price-tier">Custom</div>
-      <div class="price-amount">$1,500+</div>
-      <div class="price-ips">10,000+ IPs</div>
-      <div class="price-hours">Quote</div>
-    </div>
-  </div>
+  <div class="section-label">Free</div>
+  <h2>Free, every report, no tiers</h2>
+  <p>Unlicense / public domain. No paywall, no usage caps, no per-IP fees. Source on GitHub. Run it yourself or send it through here.</p>
   <p style="font-size:0.75rem;color:#555">Every report is manually reviewed. Automation earns its place by passing the creator's quality gate &mdash; same philosophy as <a href="https://knox.cochranblock.org" style="color:var(--muted)">KNOXAI</a>.</p>
 </div>
 
@@ -483,7 +457,7 @@ body::before {{
 <div class="cta">
   <h2>Find out who's watching.</h2>
   <p>Email your site URL, source type, and credentials. You'll get a confirmation within 24 hours.</p>
-  <a href="/order" class="btn">Request a Report</a>
+  <a href="https://github.com/cochranblock/whobelooking" class="btn">Get the source — free</a>
   <a href="/sample" class="btn btn-ghost">View Sample</a>
 </div>
 
@@ -543,53 +517,6 @@ body::before {{
     ))
 }
 
-pub async fn order_form() -> Html<&'static str> {
-    Html(
-        r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Order — whobelooking</title>
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&family=Rajdhani:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'JetBrains Mono',monospace;background:#050508;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}
-.box{max-width:500px;width:100%}
-h1{font-family:'Orbitron',sans-serif;font-size:1.6rem;color:#00d9ff;margin-bottom:1.5rem}
-p{margin-bottom:1rem;font-size:0.85rem;color:#9ca3af;line-height:1.6}
-a{color:#00d9ff;text-decoration:none;border-bottom:1px solid rgba(0,217,255,0.3)}a:hover{border-color:#00d9ff}
-label{display:block;font-size:0.7rem;color:#9ca3af;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:4px;margin-top:16px}
-input,select{width:100%;padding:10px;font-family:'JetBrains Mono',monospace;font-size:0.85rem;background:#0d0d14;border:1px solid rgba(0,217,255,0.15);color:#e8e8e8;border-radius:4px}
-input:focus,select:focus{border-color:#00d9ff;outline:none}
-select{cursor:pointer}
-.btn{display:block;width:100%;padding:14px;background:#00d9ff;color:#050508;font-family:'Orbitron',sans-serif;font-weight:700;font-size:0.9rem;border:none;cursor:pointer;letter-spacing:0.05em;margin-top:20px;border-radius:4px}
-.btn:hover{background:#33e1ff}
-.note{font-size:0.7rem;color:#555;margin-top:12px;text-align:center}
-</style></head><body><div class="box">
-<h1>Get your report.</h1>
-<p style="color:#9ca3af;font-size:0.85rem;margin-bottom:1.5rem">Just your email and site URL. That's it. No credentials needed upfront.</p>
-<form action="/order/checkout" method="POST" enctype="multipart/form-data">
-<input type="hidden" name="source_type" value="pending">
-<input type="hidden" name="tier" value="starter">
-<label>Email</label>
-<input type="email" name="email" required placeholder="you@company.com">
-<label>Site URL</label>
-<input type="url" name="site_url" required placeholder="https://yoursite.com">
-<button type="submit" class="btn">Submit Request</button>
-</form>
-<div style="margin-top:1.5rem;padding:16px;background:rgba(0,255,204,0.03);border:1px solid rgba(0,255,204,0.1);border-radius:4px">
-<div style="font-size:0.85rem;color:#00ffcc;font-weight:600;margin-bottom:8px">What happens next</div>
-<div style="font-size:0.8rem;color:#9ca3af;line-height:1.6">
-1. You submit &mdash; just email and site URL. <strong style="color:#e8e8e8">No payment now. No card needed.</strong><br>
-2. We schedule a <strong style="color:#e8e8e8">10-minute setup call</strong> &mdash; we walk you through connecting your analytics. Screen share, zero guesswork.<br>
-3. We run the report and deliver your intelligence PDF.<br>
-4. <strong style="color:#e8e8e8">You only pay right before you download</strong> &mdash; Stripe checkout at the download link. No charge until your report is ready and you choose to grab it.
-</div>
-<div style="font-size:0.7rem;color:#555;margin-top:8px;line-height:1.5">Works with Cloudflare, AWS CloudFront, Fastly, Vercel, Netlify, and server access logs (nginx, Apache, Caddy). Google Cloud CDN does not expose visitor IPs on the free tier.</div>
-</div>
-<p class="note" style="margin-top:12px"><strong style="color:#00ffcc">White glove setup on every report. No additional fee.</strong><br>We handle the technical side. You just tell us your site URL.</p>
-<p class="note" style="margin-top:8px">Free to submit. No payment until download. 2-3 business day turnaround.<br>Reviewed by a USCYBERCOM operator.</p>
-<p style="margin-top:1.5rem;text-align:center"><a href="/">&larr; whobelooking.org</a></p>
-</div>
-<script>0</script>
-</body></html>"#,
-    )
-}
 
 pub async fn queue_status() -> Html<String> {
     let hours = queue::hours_this_week();
@@ -616,7 +543,7 @@ p{{font-size:0.8rem;color:#9ca3af;margin-top:1.5rem}}a{{color:#00d9ff;text-decor
 <div class="stat"><span class="stat-num">{ips}</span><span class="stat-label">IPs resolved</span></div>
 <div class="stat"><span class="stat-num">{companies}</span><span class="stat-label">Companies identified</span></div>
 <p>One person. Every report gets full attention.</p>
-<p><a href="/">&larr; whobelooking.org</a> &middot; <a href="/order">Request a report</a></p>
+<p><a href="/">&larr; whobelooking.cochranblock.org</a> &middot; <a href="https://github.com/cochranblock/whobelooking">Source on GitHub</a></p>
 </div></body></html>"#
     ))
 }

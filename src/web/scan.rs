@@ -44,7 +44,41 @@ fn rate_exceeded(ip: &str) -> bool {
         bucket.count = 0;
     }
     bucket.count += 1;
-    bucket.count > 500
+    bucket.count > 7500
+}
+
+// ---- spongemesh: scan queue / concurrency cap ---------------------------
+//
+// Probes are individually fast (≤8s timeout each, typically <300ms), so we
+// can afford to queue at peak rather than reject. tokio::Semaphore gives us
+// FIFO backpressure — when more than `MAX_CONCURRENT_PROBES` outbound HEAD
+// requests are in flight, additional /api/probe handlers `await` their permit
+// instead of failing. Browsers see slightly slower scans under load; nobody
+// gets a 503. The status endpoint exposes live capacity so the UI can show
+// "queued behind N probes".
+
+const MAX_CONCURRENT_PROBES: usize = 64;
+static PROBE_SEMAPHORE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+
+fn probe_semaphore() -> &'static tokio::sync::Semaphore {
+    PROBE_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_PROBES))
+}
+
+#[derive(Serialize)]
+pub struct ScanStatus {
+    capacity: usize,
+    in_flight: usize,
+    available: usize,
+}
+
+pub async fn status() -> Json<ScanStatus> {
+    let sem = probe_semaphore();
+    let available = sem.available_permits();
+    Json(ScanStatus {
+        capacity: MAX_CONCURRENT_PROBES,
+        in_flight: MAX_CONCURRENT_PROBES - available,
+        available,
+    })
 }
 
 // ---- SSRF guard ---------------------------------------------------------
@@ -342,6 +376,12 @@ pub async fn probe(Query(q): Query<ProbeQuery>, headers: HeaderMap) -> Json<Prob
         });
     }
 
+    // spongemesh: acquire one of MAX_CONCURRENT_PROBES global permits.
+    // If the cap is reached, this awaits FIFO until a permit is free.
+    // Held only across the actual outbound HEAD/GET — not the SSRF/rate
+    // checks above — so cheap rejections don't consume capacity.
+    let _permit = probe_semaphore().acquire().await.expect("semaphore");
+
     let t0 = Instant::now();
     match client().head(&q.url).send().await {
         Ok(resp) => Json(ProbeResult {
@@ -527,9 +567,10 @@ a:hover{text-decoration:underline}
 </head>
 <body>
 <h1>Automated Diagnostic Surface Area Scan</h1>
-<p class="sub" style="margin-bottom:.5rem">Real HEAD requests from our server — actual status codes, not browser guesses. <strong style="color:var(--cyan)">$5</strong></p>
+<p class="sub" style="margin-bottom:.5rem">Real HEAD requests against your domain — actual status codes, not browser guesses. <strong style="color:var(--green)">Free</strong></p>
 <p class="sub">Enter your domain and we'll probe 140+ attack paths and tell you exactly what's exposed.</p>
-<p class="sub" style="color:var(--green)">✓ No charge if your site is unreachable from our network — payment is authorized, then captured only on a real result.</p>
+
+<p class="sub" style="color:var(--green);margin-top:.4rem"><strong>Coming soon:</strong> browser-side scan — same probes, zero server cost.</p>
 
 <div class="input-row">
   <input type="text" id="url" placeholder="https://example.com" autocomplete="off" spellcheck="false">
@@ -568,9 +609,47 @@ a:hover{text-decoration:underline}
 <div id="results"></div>
 <div class="summary" id="summary"></div>
 
+<!-- Did-it-work feedback — emails the operator. -->
+<div id="feedback-box" style="margin-top:2rem;padding:1.25rem 1.5rem;border-radius:4px;background:var(--surface);border:1px solid rgba(0,217,255,.12)">
+  <div style="font-family:var(--serif);color:var(--cyan);font-size:.95rem;margin-bottom:.4rem">Did it work?</div>
+  <div style="font-size:.75rem;color:var(--muted);margin-bottom:.75rem">Tell me what you saw — false positives, missing paths, broken UI, or just "yes." It emails me directly.</div>
+  <textarea id="feedback-msg" rows="3" placeholder="What happened?" style="width:100%;background:var(--bg);border:1px solid rgba(0,217,255,.2);color:var(--text);padding:.55rem .75rem;font-family:var(--mono);font-size:13px;border-radius:3px;resize:vertical;outline:none;margin-bottom:.5rem"></textarea>
+  <input type="email" id="feedback-email" placeholder="your email (optional, so I can reply)" style="width:100%;background:var(--bg);border:1px solid rgba(0,217,255,.2);color:var(--text);padding:.55rem .75rem;font-family:var(--mono);font-size:13px;border-radius:3px;outline:none;margin-bottom:.5rem" autocomplete="email">
+  <button id="feedback-btn" onclick="sendFeedback()" style="background:var(--cyan);color:#050508;font-family:var(--mono);font-size:13px;font-weight:600;padding:.5rem 1rem;border:none;border-radius:3px;cursor:pointer">Send</button>
+  <span id="feedback-status" style="margin-left:.6rem;font-size:.75rem;color:var(--muted)"></span>
+</div>
+
 <script>
 const STRIPE_PK = '__STRIPE_PK__';
 let stripe = null, stripeElements = null, gateToken = null, pendingUrl = null, paymentIntentId = null;
+
+async function sendFeedback() {
+  const btn = document.getElementById('feedback-btn');
+  const status = document.getElementById('feedback-status');
+  const msg = document.getElementById('feedback-msg').value.trim();
+  if (!msg) { status.textContent = 'Type something first.'; status.style.color = 'var(--orange)'; return; }
+  const email = document.getElementById('feedback-email').value.trim();
+  const scanned = (document.getElementById('url') && document.getElementById('url').value) || '';
+  btn.disabled = true; btn.textContent = 'Sending…';
+  status.textContent = ''; status.style.color = 'var(--muted)';
+  try {
+    const resp = await fetch('/api/scan/feedback', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: msg, scanned_url: scanned, email: email})
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    document.getElementById('feedback-msg').value = '';
+    document.getElementById('feedback-email').value = '';
+    btn.textContent = 'Sent ✓';
+    status.textContent = 'Got it. I read every one.';
+    status.style.color = 'var(--green)';
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Send';
+    status.textContent = 'Failed — try again.';
+    status.style.color = 'var(--orange)';
+  }
+}
 
 function closePayModal() {
   document.getElementById('pay-overlay').style.display = 'none';
@@ -1003,6 +1082,21 @@ async function runScan(base) {
 document.getElementById('url').addEventListener('keydown', e => {
   if (e.key === 'Enter') startScan();
 });
+
+// Auto-start when ?url=… is in the query string. Lets us share direct links
+// like /scan?url=example.com — the scan kicks off on page load.
+(function autostart() {
+  try {
+    var qs = new URLSearchParams(location.search);
+    var u = qs.get('url') || qs.get('q') || qs.get('domain');
+    if (u) {
+      var input = document.getElementById('url');
+      input.value = u;
+      // Defer a tick so the page has a chance to paint the input value first.
+      setTimeout(startScan, 50);
+    }
+  } catch {}
+})();
 </script>
 </body>
 </html>

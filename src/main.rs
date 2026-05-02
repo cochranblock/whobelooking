@@ -139,7 +139,7 @@ enum Cmd {
     #[cfg(feature = "serve")]
     Serve {
         /// Port to listen on
-        #[arg(short, long, default_value = "8082", env = "PORT")]
+        #[arg(short, long, default_value = "8082", env = "WBL_PORT")]
         port: u16,
     },
     /// List all jobs in the queue
