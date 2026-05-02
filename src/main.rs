@@ -605,26 +605,31 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Serve { port } => {
             // Gemini Man: snapshot current log, kill old process, take over.
             // Hold an exclusive flock on `pid.lock` across the snapshot/kill/write
-            // window so two concurrent restarts can't race on the PID file.
-            let _pid_lock: Option<PidLock> = match acquire_pid_lock() {
-                Ok(Some(f)) => Some(f),
-                Ok(None) => {
-                    eprintln!("another whobelooking serve is starting (pid.lock held); exiting");
-                    return Ok(());
+            // window so two concurrent restarts can't race on the PID file. The
+            // lock is released at the end of this block — if it lived for the
+            // whole serve lifetime, the next deploy's new binary would see
+            // WouldBlock and bail out before reaching kill_old().
+            {
+                let _pid_lock: Option<PidLock> = match acquire_pid_lock() {
+                    Ok(Some(f)) => Some(f),
+                    Ok(None) => {
+                        eprintln!("another whobelooking serve is starting (pid.lock held); exiting");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::warn!("could not acquire pid.lock: {} — proceeding anyway", e);
+                        None
+                    }
+                };
+                logs::snapshot_pre_restart("whobelooking");
+                if let Some(old) = read_old_pid().filter(|&p| p != std::process::id()) {
+                    kill_old(old);
+                    // Old process serialized its counters to state.bin.zst on SIGTERM.
+                    // Restore them so Prometheus totals are continuous across handoffs.
+                    logs::load_state("whobelooking");
                 }
-                Err(e) => {
-                    tracing::warn!("could not acquire pid.lock: {} — proceeding anyway", e);
-                    None
-                }
-            };
-            logs::snapshot_pre_restart("whobelooking");
-            if let Some(old) = read_old_pid().filter(|&p| p != std::process::id()) {
-                kill_old(old);
-                // Old process serialized its counters to state.bin.zst on SIGTERM.
-                // Restore them so Prometheus totals are continuous across handoffs.
-                logs::load_state("whobelooking");
+                write_pid();
             }
-            write_pid();
             // IPC dispatcher — operator data over Unix socket. No HTTP /admin.
             ipc::spawn().await?;
 
