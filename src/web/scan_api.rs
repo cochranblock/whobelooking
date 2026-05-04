@@ -410,6 +410,184 @@ pub async fn email_post(
     }))
 }
 
+fn host_from_target(target: &str) -> &str {
+    let after = target
+        .strip_prefix("https://")
+        .or_else(|| target.strip_prefix("http://"))
+        .unwrap_or(target);
+    after.split('/').next().unwrap_or(after)
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn render_plain_email(result: &ScanResult, attached: &[&str]) -> String {
+    let s = &result.summary;
+    let target_host = host_from_target(&result.target);
+    let reachable = if s.reachable { "yes" } else { "no" };
+    let mut out = String::with_capacity(1024);
+    let _ = writeln!(out, "Surface-area scan: {}", target_host);
+    let _ = writeln!(out, "{}", "=".repeat(target_host.len() + 19));
+    out.push('\n');
+    let _ = writeln!(out, "  Target       {}", result.target);
+    let _ = writeln!(out, "  Reachable    {}", reachable);
+    let _ = writeln!(out, "  Probed       {}", s.total);
+    let _ = writeln!(out, "  Hits         {}  ({} critical)", s.hits, s.critical_hits);
+    let _ = writeln!(out, "  Elapsed      {} ms", result.elapsed_ms);
+
+    let accessible: Vec<&ProbeOutcome> = result.probes.iter().filter(|p| p.kind == "accessible").collect();
+    let walls: Vec<&ProbeOutcome> = result.probes.iter().filter(|p| p.kind == "wall").collect();
+
+    if !accessible.is_empty() {
+        out.push('\n');
+        out.push_str("Accessible (real exposures, 2xx)\n");
+        out.push_str("--------------------------------\n");
+        for p in &accessible {
+            let _ = writeln!(out, "  {:<10} {:<6} {}", p.sev, p.status, p.path);
+        }
+    }
+    if !walls.is_empty() {
+        out.push('\n');
+        out.push_str("Walls (server processed, 401/403 — usually a WAF/auth)\n");
+        out.push_str("------------------------------------------------------\n");
+        for p in &walls {
+            let _ = writeln!(out, "  {:<10} {:<6} {}", p.sev, p.status, p.path);
+        }
+    }
+    if accessible.is_empty() && walls.is_empty() {
+        out.push('\n');
+        out.push_str("No hits. Surface looks clean against the probe set.\n");
+    }
+
+    if !attached.is_empty() {
+        out.push('\n');
+        let _ = writeln!(out, "Attached: {}", attached.join(", "));
+    }
+    out.push('\n');
+    out.push_str("--\n");
+    out.push_str("whobelooking — free attack-surface scanner\n");
+    out.push_str("https://whobelooking.cochranblock.org\n");
+    out
+}
+
+fn render_html_email(result: &ScanResult, attached: &[&str]) -> String {
+    let s = &result.summary;
+    let target = html_escape(&result.target);
+    let target_host = html_escape(host_from_target(&result.target));
+    let reachable = if s.reachable { "yes" } else { "no" };
+
+    let sev_color = |sev: &str| match sev {
+        "critical" => "#ff6b35",
+        "high" => "#fbbf24",
+        "medium" => "#9d4edd",
+        "low" => "#9ca3af",
+        _ => "#00d9ff",
+    };
+
+    let row = |p: &ProbeOutcome| -> String {
+        format!(
+            "<tr>\
+              <td style=\"padding:6px 12px;border-bottom:1px solid #1f2937;color:{color};font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.04em\">{sev}</td>\
+              <td style=\"padding:6px 12px;border-bottom:1px solid #1f2937;color:#cbd5e1;font-family:ui-monospace,monospace\">{status}</td>\
+              <td style=\"padding:6px 12px;border-bottom:1px solid #1f2937;color:#e5e7eb;font-family:ui-monospace,monospace\">{path}</td>\
+              <td style=\"padding:6px 12px;border-bottom:1px solid #1f2937;color:#94a3b8\">{label}</td>\
+            </tr>",
+            color = sev_color(&p.sev),
+            sev = html_escape(&p.sev),
+            status = p.status,
+            path = html_escape(&p.path),
+            label = html_escape(&p.label),
+        )
+    };
+
+    let mut hit_rows = String::new();
+    let accessible: Vec<&ProbeOutcome> = result.probes.iter().filter(|p| p.kind == "accessible").collect();
+    let walls: Vec<&ProbeOutcome> = result.probes.iter().filter(|p| p.kind == "wall").collect();
+    let sev_rank = |s: &str| match s {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 4,
+    };
+    if !accessible.is_empty() {
+        let mut sorted = accessible.clone();
+        sorted.sort_by_key(|p| (sev_rank(&p.sev), p.path.clone()));
+        hit_rows.push_str(
+            "<tr><td colspan=\"4\" style=\"padding:18px 12px 6px;color:#ff6b35;font-weight:700;font-size:11px;letter-spacing:.08em;text-transform:uppercase\">accessible · 2xx</td></tr>",
+        );
+        for p in sorted { hit_rows.push_str(&row(p)); }
+    }
+    if !walls.is_empty() {
+        let mut sorted = walls.clone();
+        sorted.sort_by_key(|p| (sev_rank(&p.sev), p.path.clone()));
+        hit_rows.push_str(
+            "<tr><td colspan=\"4\" style=\"padding:18px 12px 6px;color:#fbbf24;font-weight:700;font-size:11px;letter-spacing:.08em;text-transform:uppercase\">wall · 401/403 (usually WAF / auth)</td></tr>",
+        );
+        for p in sorted { hit_rows.push_str(&row(p)); }
+    }
+
+    let no_hits_block = if accessible.is_empty() && walls.is_empty() {
+        "<p style=\"margin:18px 0 0;color:#10b981;font-size:14px\">No hits. Surface looks clean against the probe set.</p>"
+    } else {
+        ""
+    };
+
+    let attach_line = if attached.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<p style=\"margin:18px 0 0;color:#94a3b8;font-size:13px\">Attached: <span style=\"color:#cbd5e1\">{}</span></p>",
+            html_escape(&attached.join(", "))
+        )
+    };
+
+    format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head>\
+         <body style=\"margin:0;padding:24px;background:#050508;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5\">\
+         <div style=\"max-width:640px;margin:0 auto;background:#0d0d14;border:1px solid #1f2937;border-radius:8px;overflow:hidden\">\
+           <div style=\"padding:20px 24px;border-bottom:1px solid #1f2937;background:#0a0a10\">\
+             <div style=\"font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#00d9ff;font-weight:700\">whobelooking · surface-area scan</div>\
+             <div style=\"font-size:18px;font-weight:600;color:#fff;margin-top:4px;font-family:ui-monospace,monospace\">{target_host}</div>\
+           </div>\
+           <div style=\"padding:20px 24px\">\
+             <table cellspacing=\"0\" cellpadding=\"0\" style=\"width:100%;border-collapse:collapse;font-size:13px\">\
+               <tr><td style=\"color:#94a3b8;padding:4px 0;width:120px\">Target</td><td style=\"color:#cbd5e1;font-family:ui-monospace,monospace;word-break:break-all\">{target}</td></tr>\
+               <tr><td style=\"color:#94a3b8;padding:4px 0\">Reachable</td><td style=\"color:#cbd5e1\">{reachable}</td></tr>\
+               <tr><td style=\"color:#94a3b8;padding:4px 0\">Probed</td><td style=\"color:#cbd5e1\">{total}</td></tr>\
+               <tr><td style=\"color:#94a3b8;padding:4px 0\">Hits</td><td style=\"color:#cbd5e1\">{hits} <span style=\"color:#ff6b35\">({critical} critical)</span></td></tr>\
+               <tr><td style=\"color:#94a3b8;padding:4px 0\">Elapsed</td><td style=\"color:#cbd5e1\">{elapsed} ms</td></tr>\
+             </table>\
+             {no_hits_block}\
+             {hits_table}\
+             {attach_line}\
+           </div>\
+           <div style=\"padding:14px 24px;border-top:1px solid #1f2937;background:#0a0a10;color:#6b7280;font-size:12px\">\
+             whobelooking — free attack-surface scanner · <a href=\"https://whobelooking.cochranblock.org\" style=\"color:#00d9ff;text-decoration:none\">whobelooking.cochranblock.org</a>\
+           </div>\
+         </div></body></html>",
+        target_host = target_host,
+        target = target,
+        reachable = reachable,
+        total = s.total,
+        hits = s.hits,
+        critical = s.critical_hits,
+        elapsed = result.elapsed_ms,
+        no_hits_block = no_hits_block,
+        hits_table = if hit_rows.is_empty() { String::new() } else {
+            format!(
+                "<table cellspacing=\"0\" cellpadding=\"0\" style=\"width:100%;margin-top:12px;border-collapse:collapse;font-size:13px;background:#050508;border-radius:6px;overflow:hidden;border:1px solid #1f2937\">{}</table>",
+                hit_rows
+            )
+        },
+        attach_line = attach_line,
+    )
+}
+
 fn send_scan_email(to_addr: &str, result: &ScanResult, format: &str) -> Result<(), String> {
     use lettre::message::header::ContentType;
     use lettre::message::{Attachment, MultiPart, SinglePart};
@@ -424,47 +602,49 @@ fn send_scan_email(to_addr: &str, result: &ScanResult, format: &str) -> Result<(
     let user = std::env::var("SMTP_USER").map_err(|_| "SMTP_USER unset".to_string())?;
     let pass = std::env::var("SMTP_PASS").map_err(|_| "SMTP_PASS unset".to_string())?;
 
-    let summary = &result.summary;
-    let body_text = format!(
-        "whobelooking surface-area scan\n\
-         \n\
-         Target:        {}\n\
-         Reachable:     {}\n\
-         Total probed:  {}\n\
-         Hits:          {}\n\
-         Critical hits: {}\n\
-         Elapsed:       {}ms\n\
-         \n\
-         Hits ({}):\n",
-        result.target,
-        summary.reachable,
-        summary.total,
-        summary.hits,
-        summary.critical_hits,
-        result.elapsed_ms,
-        summary.hits,
-    );
-    let mut body = body_text;
-    for p in result.probes.iter().filter(|p| p.hit) {
-        let _ = writeln!(
-            body,
-            "  [{}] {} {} {} ({})",
-            p.sev, p.kind, p.status, p.path, p.label
-        );
-    }
-    body.push_str("\n--\nwhobelooking · https://whobelooking.cochranblock.org\n");
+    let want_json = matches!(format, "json" | "both" | "");
+    let want_csv = matches!(format, "csv" | "both" | "");
+    let want_json = if !matches!(format, "json" | "csv" | "both") { true } else { want_json };
+    let want_csv = if !matches!(format, "json" | "csv" | "both") { true } else { want_csv };
 
-    let subject = format!("[whobelooking] surface-scan: {}", result.target);
+    let mut attached: Vec<&str> = Vec::new();
+    if want_json { attached.push("whobelooking-scan.json"); }
+    if want_csv { attached.push("whobelooking-scan.csv"); }
+
+    let plain = render_plain_email(result, &attached);
+    let html = render_html_email(result, &attached);
+
+    let target_host = host_from_target(&result.target);
+    let subject = if result.summary.hits == 0 {
+        format!("[whobelooking] {} — clean", target_host)
+    } else {
+        format!(
+            "[whobelooking] {} — {} hit{}{}",
+            target_host,
+            result.summary.hits,
+            if result.summary.hits == 1 { "" } else { "s" },
+            if result.summary.critical_hits > 0 {
+                format!(" ({} critical)", result.summary.critical_hits)
+            } else {
+                String::new()
+            }
+        )
+    };
     let from_mbox = format!("whobelooking <{}>", user);
 
-    let mut multipart = MultiPart::mixed().singlepart(
-        SinglePart::builder()
-            .header(ContentType::TEXT_PLAIN)
-            .body(body),
-    );
+    let alt = MultiPart::alternative()
+        .singlepart(
+            SinglePart::builder()
+                .header(ContentType::TEXT_PLAIN)
+                .body(plain),
+        )
+        .singlepart(
+            SinglePart::builder()
+                .header(ContentType::TEXT_HTML)
+                .body(html),
+        );
 
-    let want_json = matches!(format, "json" | "both");
-    let want_csv = matches!(format, "csv" | "both") || (format != "json" && format != "both");
+    let mut multipart = MultiPart::mixed().multipart(alt);
 
     if want_json {
         let json_bytes = serde_json::to_vec_pretty(result)
