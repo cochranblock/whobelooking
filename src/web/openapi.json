@@ -1,0 +1,224 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "whobelooking surface-scan API",
+    "version": "0.2.0",
+    "description": "Free server-side attack-surface scanner. POST a public URL, get back a structured report of which sensitive paths responded. Companion Claude skill ships at .claude/skills/whobelooking-scan/.",
+    "contact": {
+      "name": "Cochran Block",
+      "email": "mcochran@cochranblock.org",
+      "url": "https://cochranblock.org"
+    },
+    "license": {
+      "name": "Unlicense",
+      "url": "https://unlicense.org/"
+    }
+  },
+  "servers": [
+    {"url": "https://whobelooking.cochranblock.org", "description": "Production"},
+    {"url": "https://whobelooking.org", "description": "Legacy alias (301 → cochranblock.org)"}
+  ],
+  "paths": {
+    "/api/scan/run": {
+      "post": {
+        "summary": "Run a full surface-area scan against a URL",
+        "description": "Server-side scan: probes ~80 well-known sensitive paths against the target host. SSRF-guarded, rate-limited. Returns one structured response with all probe outcomes.",
+        "operationId": "scanRunPost",
+        "tags": ["scan"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/ScanBody"},
+              "examples": {
+                "all": {"summary": "Every severity tier", "value": {"url": "https://example.com", "severity": "all"}},
+                "critical_only": {"summary": "Only critical paths", "value": {"url": "https://example.com", "severity": "critical"}}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {"description": "Scan completed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ScanResult"}}}},
+          "400": {"description": "Invalid URL"},
+          "403": {"description": "Private host (SSRF guard rejected RFC1918, loopback, link-local, doc-range, etc.)"},
+          "429": {"description": "Rate limited (5 full scans / minute / source IP)"}
+        }
+      },
+      "get": {
+        "summary": "Run a full surface-area scan via query string",
+        "operationId": "scanRunGet",
+        "tags": ["scan"],
+        "parameters": [
+          {"name": "url", "in": "query", "required": true, "schema": {"type": "string"}, "example": "https://example.com"},
+          {"name": "severity", "in": "query", "required": false, "schema": {"type": "string", "enum": ["critical", "high", "all"]}, "description": "critical=only critical; high=critical+high; all=every tier (default)"}
+        ],
+        "responses": {
+          "200": {"description": "Scan completed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ScanResult"}}}},
+          "400": {"description": "Invalid URL"},
+          "403": {"description": "Private host"},
+          "429": {"description": "Rate limited"}
+        }
+      }
+    },
+    "/api/scan/email": {
+      "post": {
+        "summary": "Run a scan and email the results",
+        "description": "Executes a full scan and emails CSV+JSON attachments (or one of the two) to the supplied address. Free, rate-limited 2/min/IP. Useful for delivering reports to non-technical recipients without exposing the API directly.",
+        "operationId": "scanEmail",
+        "tags": ["scan"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/EmailBody"},
+              "examples": {
+                "default": {"value": {"url": "https://example.com", "email": "you@example.com", "severity": "all", "format": "both"}}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {"description": "Queued for delivery", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EmailResponse"}}}},
+          "400": {"description": "Invalid email or URL"},
+          "403": {"description": "Private host"},
+          "429": {"description": "Rate limited"}
+        }
+      }
+    },
+    "/api/scan/probes": {
+      "get": {
+        "summary": "List the canonical probe set",
+        "description": "Returns the static list of paths the scanner checks, with severity tags. Useful for previewing what /api/scan/run will hit.",
+        "operationId": "scanProbes",
+        "tags": ["scan"],
+        "responses": {
+          "200": {"description": "Probe list", "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/Probe"}}}}}
+        }
+      }
+    },
+    "/api/scan/status": {
+      "get": {
+        "summary": "Live capacity/concurrency snapshot for the single-probe endpoint",
+        "operationId": "scanStatus",
+        "tags": ["scan"],
+        "responses": {
+          "200": {"description": "Capacity snapshot", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ScanStatus"}}}}
+        }
+      }
+    },
+    "/api/probe": {
+      "get": {
+        "summary": "Single HEAD probe (used by the browser /scan UI)",
+        "description": "Lower-level primitive: probes one full URL and returns just the status code and elapsed ms. /api/scan/run is preferred for programmatic use.",
+        "operationId": "probeOne",
+        "tags": ["scan"],
+        "parameters": [
+          {"name": "url", "in": "query", "required": true, "schema": {"type": "string"}, "description": "Full URL including path, e.g. https://example.com/.env"}
+        ],
+        "responses": {
+          "200": {"description": "Probe result", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SingleProbeResult"}}}}
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ScanBody": {
+        "type": "object",
+        "required": ["url"],
+        "properties": {
+          "url": {"type": "string", "example": "https://example.com"},
+          "severity": {"type": "string", "enum": ["critical", "high", "all"], "default": "all"},
+          "format": {"type": "string", "enum": ["json", "csv"], "default": "json", "description": "Response body format. csv returns text/csv; json returns the structured ScanResult."}
+        }
+      },
+      "EmailBody": {
+        "type": "object",
+        "required": ["url", "email"],
+        "properties": {
+          "url": {"type": "string", "example": "https://example.com"},
+          "email": {"type": "string", "format": "email", "example": "you@example.com"},
+          "severity": {"type": "string", "enum": ["critical", "high", "all"], "default": "all"},
+          "format": {"type": "string", "enum": ["csv", "json", "both"], "default": "both"}
+        }
+      },
+      "EmailResponse": {
+        "type": "object",
+        "required": ["ok", "queued"],
+        "properties": {
+          "ok": {"type": "boolean"},
+          "queued": {"type": "boolean"}
+        }
+      },
+      "Probe": {
+        "type": "object",
+        "required": ["path", "label", "sev"],
+        "properties": {
+          "path": {"type": "string", "example": "/.env"},
+          "label": {"type": "string", "example": ".env"},
+          "sev": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]}
+        }
+      },
+      "ProbeOutcome": {
+        "type": "object",
+        "required": ["path", "label", "sev", "status", "ms", "hit", "kind"],
+        "properties": {
+          "path": {"type": "string"},
+          "label": {"type": "string"},
+          "sev": {"type": "string"},
+          "status": {"type": "integer", "description": "HTTP status code; 0 means the host was unreachable from us"},
+          "ms": {"type": "integer", "description": "Round-trip time in ms"},
+          "err": {"type": "string", "nullable": true, "description": "Error class when status==0: timeout, no route, dns fail, tls error, unreachable"},
+          "hit": {"type": "boolean", "description": "True if status is 2xx, 401, or 403"},
+          "kind": {
+            "type": "string",
+            "enum": ["accessible", "wall", "redirect", "missing", "server_error", "unreachable"],
+            "description": "Coarse category. accessible=2xx (real exposure); wall=401/403 (server processed, auth required, often a WAF); redirect=3xx; missing=other 4xx; server_error=5xx; unreachable=connection failed."
+          }
+        }
+      },
+      "ScanSummary": {
+        "type": "object",
+        "required": ["total", "hits", "critical_hits", "reachable"],
+        "properties": {
+          "total": {"type": "integer"},
+          "hits": {"type": "integer", "description": "Probes returning 2xx, 401, or 403"},
+          "critical_hits": {"type": "integer"},
+          "reachable": {"type": "boolean", "description": "True if at least 50% of probes returned a real status code"}
+        }
+      },
+      "ScanResult": {
+        "type": "object",
+        "required": ["target", "started_at", "elapsed_ms", "probes", "summary"],
+        "properties": {
+          "target": {"type": "string"},
+          "started_at": {"type": "integer", "description": "Unix epoch seconds"},
+          "elapsed_ms": {"type": "integer"},
+          "probes": {"type": "array", "items": {"$ref": "#/components/schemas/ProbeOutcome"}},
+          "summary": {"$ref": "#/components/schemas/ScanSummary"}
+        }
+      },
+      "ScanStatus": {
+        "type": "object",
+        "required": ["capacity", "in_flight", "available"],
+        "properties": {
+          "capacity": {"type": "integer", "description": "Max concurrent outbound probes the server allows"},
+          "in_flight": {"type": "integer"},
+          "available": {"type": "integer"}
+        }
+      },
+      "SingleProbeResult": {
+        "type": "object",
+        "required": ["status", "ms"],
+        "properties": {
+          "status": {"type": "integer"},
+          "ms": {"type": "integer"},
+          "err": {"type": "string", "nullable": true}
+        }
+      }
+    }
+  },
+  "tags": [
+    {"name": "scan", "description": "Surface-area scan endpoints. Free, no auth, rate-limited per source IP."}
+  ]
+}

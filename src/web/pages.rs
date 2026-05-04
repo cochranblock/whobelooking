@@ -845,8 +845,55 @@ pub async fn health() -> &'static str {
 }
 
 pub async fn robots() -> &'static str {
-    "User-agent: *\nAllow: /\n\nUser-agent: GPTBot\nAllow: /\n\nUser-agent: ChatGPT-User\nAllow: /\n\nUser-agent: Google-Extended\nAllow: /\n\nUser-agent: Applebot-Extended\nAllow: /\n\nUser-agent: anthropic-ai\nAllow: /\n\nSitemap: https://whobelooking.org/sitemap.xml"
+    "User-agent: *\nAllow: /\n\nUser-agent: GPTBot\nAllow: /\n\nUser-agent: ChatGPT-User\nAllow: /\n\nUser-agent: Google-Extended\nAllow: /\n\nUser-agent: Applebot-Extended\nAllow: /\n\nUser-agent: anthropic-ai\nAllow: /\n\nUser-agent: ClaudeBot\nAllow: /\n\nUser-agent: PerplexityBot\nAllow: /\n\n# AI agents: see /llms.txt for site overview, /openapi.json for the surface-scan API spec, /docs for Swagger UI.\nSitemap: https://whobelooking.cochranblock.org/sitemap.xml"
 }
+
+pub async fn llms_txt() -> (axum::http::HeaderMap, &'static str) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "text/markdown; charset=utf-8".parse().unwrap(),
+    );
+    (headers, LLMS_TXT)
+}
+
+const LLMS_TXT: &str = "# whobelooking
+
+> Free, server-side attack-surface scanner. Submit a public URL, get back a structured report of which sensitive paths (.env, configs, admin panels, leaked artifacts, framework debug endpoints) responded. Companion visitor-intelligence platform identifies which companies are silently evaluating a site.
+
+The surface-scan API is **free**, **no auth**, and machine-callable. Designed for AI agents, CI/CD pipelines, security tooling, and human researchers.
+
+## Surface-scan API
+
+- [OpenAPI spec](https://whobelooking.cochranblock.org/openapi.json): OpenAPI 3.0.3 JSON describing every endpoint, request shape, and response schema. CORS-open. Drop into Postman, Stoplight, openapi-generator, or an MCP wrapper.
+- [Swagger UI](https://whobelooking.cochranblock.org/docs): interactive try-it-out console for the same spec.
+- [POST /api/scan/run](https://whobelooking.cochranblock.org/api/scan/run): full server-side scan, one call. Body: `{\"url\":\"https://example.com\",\"severity\":\"all\"}`. Severity: `critical` | `high` | `all`.
+- [GET /api/scan/run](https://whobelooking.cochranblock.org/api/scan/run): same, query-string form. Params: `url`, `severity`.
+- [GET /api/scan/probes](https://whobelooking.cochranblock.org/api/scan/probes): canonical list of paths the scanner checks, with severity tags.
+- [GET /api/scan/status](https://whobelooking.cochranblock.org/api/scan/status): live concurrency/capacity snapshot.
+
+## Claude Code skill
+
+- [/skill](https://whobelooking.cochranblock.org/skill): the canonical SKILL.md so any Claude Code session can invoke this scanner.
+- [/install-skill.sh](https://whobelooking.cochranblock.org/install-skill.sh): one-liner installer that drops SKILL.md into `~/.claude/skills/whobelooking-scan/`. Run with `curl -sSL https://whobelooking.cochranblock.org/install-skill.sh | bash`.
+
+Constraints: public hosts only (RFC1918, loopback, link-local, doc-range rejected by an SSRF guard); 5 full scans per minute per source IP; only run against domains the caller owns or has authorization to test.
+
+## Browser scanner
+
+- [/scan](https://whobelooking.cochranblock.org/scan): interactive UI doing the same probes from the browser, with same-wifi detection.
+
+## About
+
+- [/](https://whobelooking.cochranblock.org/): visitor-intelligence platform overview.
+- [/about](https://whobelooking.cochranblock.org/about): product page.
+- [GitHub](https://github.com/cochranblock/whobelooking): source repository (Unlicense / public domain).
+
+## Contact
+
+- mcochran@cochranblock.org
+- Cochran Block, LLC: CAGE 1CQ66, UEI W7X3HAQL9CF9, SDVOSB pending
+";
 
 pub async fn not_found(uri: axum::http::Uri) -> (axum::http::StatusCode, Html<&'static str>) {
     let _ = uri; // consumed for type matching

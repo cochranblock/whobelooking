@@ -1253,37 +1253,40 @@ fn test_crypto_large() -> Result<(), String> {
     Ok(())
 }
 
-// --- Order form content ---
+// --- Order form content (now: free / Unlicense pivot) ---
+// Order form was removed when whobelooking went Unlicense / public domain.
+// /order now redirects to the public GitHub repo. These tests guard against
+// regressions that would re-introduce paid-tier checkout flow.
 
 fn test_order_vault() -> Result<(), String> {
-    // Order form must emphasize white glove setup call
-    let html = include_str!("../web/pages.rs");
-    if !html.contains("10-minute setup call") {
-        return Err("order form missing white glove setup call mention".into());
+    let router = include_str!("../web/router.rs");
+    if !router.contains("github.com/cochranblock/whobelooking") {
+        return Err("/order should redirect to public GitHub repo".into());
+    }
+    if !router.contains("\"/order\"") {
+        return Err("/order redirect route missing from router".into());
     }
     Ok(())
 }
 
 fn test_order_eye() -> Result<(), String> {
-    // Order form must NOT ask for credentials upfront — white glove handles it
     let html = include_str!("../web/pages.rs");
     if html.contains("toggleVis") || html.contains("cf_zone") || html.contains("cf_token") {
         return Err(
-            "order form still contains credential fields — should be white glove only".into(),
+            "pages.rs still contains old credential-capture form — should be removed".into(),
         );
     }
     Ok(())
 }
 
 fn test_order_cf_fields() -> Result<(), String> {
-    // Order form must clearly state no payment at submission
-    let html = include_str!("../web/pages.rs");
-    if !html.contains("No payment now") && !html.contains("No payment until download") {
-        return Err("order form missing no-payment-at-submit messaging".into());
+    let pages = include_str!("../web/pages.rs");
+    if pages.contains("name=\"cf_zone\"") || pages.contains("name=\"cf_token\"") {
+        return Err("pages.rs still has paid-tier credential form fields".into());
     }
-    // Must mention supported platforms
-    if !html.contains("Cloudflare") || !html.contains("CloudFront") {
-        return Err("order form missing supported platform list".into());
+    let router = include_str!("../web/router.rs");
+    if !router.contains("/order/checkout") {
+        return Err("/order/checkout legacy redirect route missing".into());
     }
     Ok(())
 }

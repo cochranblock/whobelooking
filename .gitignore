@@ -1,4 +1,5 @@
 /target
 .env
-.env
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/skills/**

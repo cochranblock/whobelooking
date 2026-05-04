@@ -8,7 +8,7 @@ use axum::{
 };
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
-use super::{admin, checkout, detect, metrics, pages, scan};
+use super::{admin, checkout, detect, metrics, openapi, pages, scan, scan_api};
 
 pub fn build() -> Router {
     Router::new()
@@ -44,6 +44,7 @@ pub fn build() -> Router {
         .route("/queue", get(pages::queue_status))
         .route("/health", get(pages::health))
         .route("/robots.txt", get(pages::robots))
+        .route("/llms.txt", get(pages::llms_txt))
         // Detect — in-browser WASM column-type detector + classifier.
         // Customer logs never leave the customer; we just serve the static bundle.
         .route("/detect", get(detect::index))
@@ -59,6 +60,15 @@ pub fn build() -> Router {
         .route("/api/scan/gate", post(scan::gate))
         .route("/api/scan/finalize", post(scan::finalize))
         .route("/api/scan/feedback", post(super::feedback::submit))
+        .route("/api/scan/run", post(scan_api::run_post).get(scan_api::run_get))
+        .route("/api/scan/probes", get(scan_api::probes_list))
+        .route("/api/scan/email", post(scan_api::email_post))
+        .route("/openapi.json", get(openapi::json))
+        .route("/docs", get(openapi::ui))
+        .route("/docs/", get(openapi::ui))
+        .route("/skill", get(openapi::skill_md))
+        .route("/skill.md", get(openapi::skill_md))
+        .route("/install-skill.sh", get(openapi::install_skill_sh))
         // Admin (token-gated)
         .route("/admin", get(admin::dashboard))
         .route("/metrics", get(metrics::endpoint))
