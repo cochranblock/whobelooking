@@ -620,11 +620,12 @@ fn test_demo_no_full_ips() -> Result<(), String> {
 }
 
 fn test_demo_has_cta() -> Result<(), String> {
-    if !DEMO.contains("/order") {
-        return Err("demo CTA must link to /order".into());
+    // Free / Unlicense pivot: home page CTA links to GitHub, no price.
+    if !DEMO.contains("github.com/cochranblock/whobelooking") {
+        return Err("demo CTA must link to public GitHub repo".into());
     }
-    if !DEMO.contains("$150") {
-        return Err("demo must show starting price".into());
+    if DEMO.contains("$150") || DEMO.contains("$350") || DEMO.contains("$750") {
+        return Err("demo still has paid-tier price strings".into());
     }
     Ok(())
 }
@@ -887,18 +888,21 @@ fn test_linkedin_shares() -> Result<(), String> {
 }
 
 // --- Legal: licensing must be correct ---
+// Free / Unlicense pivot. Whobelooking is now public domain. Tests guard
+// against accidentally re-introducing the old "All Rights Reserved" copy.
 
-fn test_all_rights_reserved() -> Result<(), String> {
-    if !DEMO.contains("All Rights Reserved") && !DEMO.contains("all rights reserved") {
-        return Err("demo must contain All Rights Reserved".into());
+fn test_no_all_rights_reserved() -> Result<(), String> {
+    let lower = DEMO.to_lowercase();
+    if lower.contains("all rights reserved") {
+        return Err("demo must NOT contain 'All Rights Reserved' — whobelooking is Unlicense".into());
     }
     Ok(())
 }
 
-fn test_no_unlicense() -> Result<(), String> {
+fn test_unlicense_or_free() -> Result<(), String> {
     let lower = DEMO.to_lowercase();
-    if lower.contains("unlicense") || lower.contains("public domain") {
-        return Err("demo must NOT contain Unlicense or public domain references".into());
+    if !lower.contains("unlicense") && !lower.contains("public domain") && !lower.contains("free") {
+        return Err("demo must mention Unlicense / public domain / free".into());
     }
     Ok(())
 }
@@ -1432,8 +1436,8 @@ const TESTS: &[(&str, TestFn)] = &[
     ("content_resume_download_story", test_resume_story),
     ("content_linkedin_56_shares", test_linkedin_shares),
     // Legal
-    ("legal_all_rights_reserved", test_all_rights_reserved),
-    ("legal_no_unlicense", test_no_unlicense),
+    ("legal_no_all_rights_reserved", test_no_all_rights_reserved),
+    ("legal_unlicense_or_free", test_unlicense_or_free),
     // Order flow
     ("order_creates_pending_atomic", test_order_creates_pending),
     ("order_capacity_rejects_at_5", test_order_capacity_limit),

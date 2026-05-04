@@ -601,9 +601,9 @@ a:hover{text-decoration:underline}
 
 <!-- Funnel CTA — shown after scan completes with findings -->
 <div class="cta-block" id="cta-block">
-  <a href="/order" class="cta-primary">Find out who's probing these paths against your site →</a>
-  <a href="https://cochranblock.org/book" class="cta-secondary">Hire me to close these security gaps →</a>
-  <p class="cta-sub">Full visitor intelligence report starting at $150 &mdash; reviewed by a USCYBERCOM operator.</p>
+  <a href="/api/scan/email" class="cta-primary">Email these results (CSV + JSON) →</a>
+  <a href="https://github.com/cochranblock/whobelooking" class="cta-secondary">Run it yourself — free, Unlicense →</a>
+  <p class="cta-sub">Free. Unlicense. Run it yourself, hit the API, or have the report emailed.</p>
 </div>
 
 <div id="results"></div>
