@@ -34,7 +34,7 @@ fn rate_exceeded(ip: &str) -> bool {
     let mut map = RATE
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .unwrap();
+        .expect("scan rate-limiter mutex poisoned");
     let bucket = map.entry(ip.to_string()).or_insert(RateBucket {
         minute: now_min,
         count: 0,
@@ -137,7 +137,9 @@ fn client() -> &'static reqwest::Client {
             // status code — no credentials exchanged.
             .danger_accept_invalid_certs(true)
             .danger_accept_invalid_hostnames(true)
-            .user_agent("Mozilla/5.0 (compatible; whobelooking-scan/1.0; +https://whobelooking.org/scan)")
+            .user_agent(
+                "Mozilla/5.0 (compatible; whobelooking-scan/1.0; +https://whobelooking.org/scan)",
+            )
             .build()
             .expect("reqwest client")
     })
@@ -190,7 +192,10 @@ pub async fn pay() -> Result<Json<PayResponse>, (StatusCode, &'static str)> {
         .form(&[
             ("amount", "500"),
             ("currency", "usd"),
-            ("description", "Automated Diagnostic Surface Area Scan — whobelooking.org"),
+            (
+                "description",
+                "Automated Diagnostic Surface Area Scan — whobelooking.org",
+            ),
             // Manual capture: authorize $5 now, only charge on successful scan.
             ("capture_method", "manual"),
         ])
@@ -406,7 +411,9 @@ pub async fn probe(Query(q): Query<ProbeQuery>, headers: HeaderMap) -> Json<Prob
                 "no route"
             } else if format!("{:?}", e).to_ascii_lowercase().contains("dns") {
                 "dns fail"
-            } else if format!("{:?}", e).to_ascii_lowercase().contains("certificate")
+            } else if format!("{:?}", e)
+                .to_ascii_lowercase()
+                .contains("certificate")
                 || format!("{:?}", e).to_ascii_lowercase().contains("tls")
             {
                 "tls error"

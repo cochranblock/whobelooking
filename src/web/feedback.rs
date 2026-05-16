@@ -54,7 +54,11 @@ pub async fn submit(
         if let Err(e) = send_feedback(&message, &scanned_url, &email, &ip_for_log) {
             tracing::warn!("scan-feedback email failed: {}", e);
         } else {
-            tracing::info!("scan-feedback sent (ip={}, scanned={})", ip_for_log, scanned_url);
+            tracing::info!(
+                "scan-feedback sent (ip={}, scanned={})",
+                ip_for_log,
+                scanned_url
+            );
         }
     });
 
@@ -89,7 +93,13 @@ fn send_feedback(message: &str, scanned_url: &str, email: &str, ip: &str) -> Res
 
     let subject = format!(
         "[whobelooking/feedback] {}",
-        message.lines().next().unwrap_or("(empty first line)").chars().take(70).collect::<String>()
+        message
+            .lines()
+            .next()
+            .unwrap_or("(empty first line)")
+            .chars()
+            .take(70)
+            .collect::<String>()
     );
     let body = format!(
         "Did-it-work feedback from whobelooking.cochranblock.org/scan\n\
@@ -105,7 +115,11 @@ fn send_feedback(message: &str, scanned_url: &str, email: &str, ip: &str) -> Res
 
     let from_mbox = format!("whobelooking feedback <{}>", user);
     let mut builder = Message::builder()
-        .from(from_mbox.parse().map_err(|e| format!("from parse: {}", e))?)
+        .from(
+            from_mbox
+                .parse()
+                .map_err(|e| format!("from parse: {}", e))?,
+        )
         .to(to.parse().map_err(|e| format!("to parse: {}", e))?)
         .subject(subject)
         .header(ContentType::TEXT_PLAIN);

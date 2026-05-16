@@ -8,7 +8,7 @@ use axum::{
 };
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
-use super::{admin, checkout, detect, metrics, openapi, pages, scan, scan_api};
+use super::{admin, detect, enrichment, metrics, openapi, pages, scan, scan_api, try_page};
 
 pub fn build() -> Router {
     Router::new()
@@ -45,6 +45,14 @@ pub fn build() -> Router {
         .route("/health", get(pages::health))
         .route("/robots.txt", get(pages::robots))
         .route("/llms.txt", get(pages::llms_txt))
+        // /try — drop your log, get the demo experience entirely in your browser.
+        // Server never sees a line of customer data; we just serve the static page.
+        .route("/try", get(try_page::index))
+        .route("/try/", get(try_page::index))
+        // /api/enrichment.json — public IP→org snapshot from the RDAP cache.
+        // Pre-warms the in-browser /try lookups so common ranges (Microsoft,
+        // Google, AWS) resolve instantly without each visitor re-doing RDAP.
+        .route("/api/enrichment.json", get(enrichment::snapshot))
         // Detect — in-browser WASM column-type detector + classifier.
         // Customer logs never leave the customer; we just serve the static bundle.
         .route("/detect", get(detect::index))
@@ -60,7 +68,10 @@ pub fn build() -> Router {
         .route("/api/scan/gate", post(scan::gate))
         .route("/api/scan/finalize", post(scan::finalize))
         .route("/api/scan/feedback", post(super::feedback::submit))
-        .route("/api/scan/run", post(scan_api::run_post).get(scan_api::run_get))
+        .route(
+            "/api/scan/run",
+            post(scan_api::run_post).get(scan_api::run_get),
+        )
         .route("/api/scan/probes", get(scan_api::probes_list))
         .route("/api/scan/email", post(scan_api::email_post))
         .route("/openapi.json", get(openapi::json))
@@ -87,14 +98,25 @@ async fn redirect_legacy_hosts(
     req: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    if let Some(host) = req.headers().get(axum::http::header::HOST).and_then(|h| h.to_str().ok()) {
+    if let Some(host) = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+    {
         let h = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
         let legacy = matches!(
             h.as_str(),
-            "whobelooking.org" | "www.whobelooking.org" | "whobelooking.com" | "www.whobelooking.com"
+            "whobelooking.org"
+                | "www.whobelooking.org"
+                | "whobelooking.com"
+                | "www.whobelooking.com"
         );
         if legacy {
-            let pq = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+            let pq = req
+                .uri()
+                .path_and_query()
+                .map(|p| p.as_str())
+                .unwrap_or("/");
             let target = format!("https://whobelooking.cochranblock.org{}", pq);
             return axum::response::Redirect::permanent(&target).into_response();
         }

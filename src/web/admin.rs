@@ -34,42 +34,6 @@ fn store() -> Option<Store> {
     }
 }
 
-pub fn pending_count() -> usize {
-    store().map(|s| s.pending_count()).unwrap_or(0)
-}
-
-pub fn has_capacity() -> bool {
-    pending_count() < MAX_PENDING
-}
-
-pub fn create_order(
-    id: &str,
-    email: &str,
-    site_url: &str,
-    source_type: &str,
-    tier: &str,
-    client_ip: &str,
-) -> bool {
-    let Some(s) = store() else {
-        crate::web::metrics::ORDER_CREATES_REJECTED
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return false;
-    };
-    match s.create(id, email, site_url, source_type, tier, client_ip, "web") {
-        Ok(_) => {
-            crate::web::metrics::ORDER_CREATES_OK
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            true
-        }
-        Err(e) => {
-            tracing::warn!("create_order({}) failed: {}", id, e);
-            crate::web::metrics::ORDER_CREATES_REJECTED
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            false
-        }
-    }
-}
-
 pub async fn dashboard(Query(q): Query<AdminQuery>) -> Html<String> {
     if !check_token(&q) {
         return Html("<h1 style='color:#ff6b35;font-family:monospace;background:#050508;height:100vh;display:flex;align-items:center;justify-content:center;margin:0'>unauthorized</h1>".into());

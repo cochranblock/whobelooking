@@ -3,7 +3,7 @@
 
 [package]
 name = "wbl-detect"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Column-type detector + threat classifier — runs in the browser as WebAssembly. Customer logs never leave the customer's machine."
@@ -12,10 +12,13 @@ license = "LicenseRef-Proprietary"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# serde_json deliberately dropped — see crates/wbl-detect/src/json_lite.rs.
+# The crate only consumes flat string-keyed JSON (CF Logpush + enrichment
+# overlay); a 200-line scanner is ~30 KB smaller in WASM than pulling
+# `serde_json` for the same two shapes.
 [dependencies]
-regex-lite = "0.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+regex-lite = { workspace = true }
+serde = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "=0.2.114"
@@ -27,3 +30,15 @@ default = []
 panic-hook = ["dep:console_error_panic_hook"]
 
 # Note: profile config lives at workspace root.
+
+# wasm-pack post-processing. The bundled `wasm-opt` ships an older WASM
+# validator that rejects bulk-memory ops by default; modern rustc emits
+# `memory.copy` everywhere, so enable the feature. Then run aggressive
+# size optimisation (`-Oz`) — this is "make it tiny."
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz", "--all-features"]
+[package.metadata.wasm-pack.profile.release.wasm-bindgen]
+debug-js-glue = false
+demangle-name-section = false
+dwarf-debug-info = false
+omit-default-module-path = false

@@ -4,7 +4,10 @@
 //! `/install-skill.sh`. External clients can discover, exercise, and
 //! install against the public surface-scan API.
 
-use axum::{http::header, response::{Html, IntoResponse}};
+use axum::{
+    http::header,
+    response::{Html, IntoResponse},
+};
 
 const OPENAPI: &str = include_str!("openapi.json");
 const SKILL_MD: &str = include_str!("../../.claude/skills/whobelooking-scan/SKILL.md");

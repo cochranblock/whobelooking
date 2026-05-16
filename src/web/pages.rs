@@ -466,8 +466,8 @@ body::before {{
 </div>
 
 <div class="footer">
-  All Rights Reserved &mdash; The Cochran Block, LLC &mdash; CAGE 1CQ66 &mdash; UEI W7X3HAQL9CF9<br>
-  whobelooking v0.2.0
+  Unlicense &mdash; public domain &mdash; The Cochran Block, LLC &mdash; CAGE 1CQ66 &mdash; UEI W7X3HAQL9CF9<br>
+  whobelooking v0.2.0 &middot; <a href="/try" style="color:inherit">/try in your browser</a>
 </div>
 
 </div>
@@ -516,7 +516,6 @@ body::before {{
 </body></html>"##
     ))
 }
-
 
 pub async fn queue_status() -> Html<String> {
     let hours = queue::hours_this_week();
@@ -852,7 +851,9 @@ pub async fn llms_txt() -> (axum::http::HeaderMap, &'static str) {
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
         axum::http::header::CONTENT_TYPE,
-        "text/markdown; charset=utf-8".parse().unwrap(),
+        "text/markdown; charset=utf-8"
+            .parse()
+            .expect("static header value"),
     );
     (headers, LLMS_TXT)
 }

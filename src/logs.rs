@@ -66,6 +66,7 @@ pub fn init(project: &str) -> std::io::Result<Guard> {
 }
 
 /// Path for the bincode+zstd counter snapshot handed across Gemini Man restarts.
+#[cfg(feature = "serve")]
 fn state_path(project: &str) -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))

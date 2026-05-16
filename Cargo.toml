@@ -8,7 +8,7 @@ resolver = "2"
 # Shared metadata so future workspace members inherit edition / msrv / license
 # without copy-paste drift. Use `[package] *.workspace = true` in member crates.
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Unlicense"
@@ -27,7 +27,7 @@ tracing = "0.1"
 
 [package]
 name = "whobelooking"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Visitor intelligence platform. Any IP source → rDNS → /24 scan → whois → company ID → enrichment flywheel → intelligence report. One binary. Zero cloud."
@@ -57,7 +57,7 @@ serde_json = "1"
 kova-ipc = { git = "https://github.com/cochranblock/kova-ipc.git", branch = "main" }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
-hickory-resolver = "0.25"
+hickory-resolver = "0.26"
 sled = "0.34"
 dirs = "5"
 zstd = "0.13"
@@ -80,12 +80,31 @@ wbl-detect = { path = "crates/wbl-detect" }
 exopack = { git = "ssh://git@github.com/cochranblock/exopack", features = ["triple_sims", "standards_check"], optional = true }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "rustls-tls", "tokio1-rustls-tls"], optional = true }
 
+# OpenTelemetry — opt-in instrumentation. Behind the `otel` feature flag so
+# deploys that don't run a collector pay zero binary-size cost. Versions
+# track the 0.27 / 0.28 line that's stable as of mid-2026; the SDK and
+# OTLP exporter must move in lockstep, and tracing-opentelemetry bridges
+# the existing `tracing::info!` spans into OTEL spans without rewriting
+# every call-site.
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics", "logs"], optional = true }
+tracing-opentelemetry = { version = "0.28", optional = true }
+opentelemetry-semantic-conventions = { version = "0.27", optional = true }
+
 [features]
 default = []
 serve = ["dep:axum", "dep:tower-http", "dep:lettre"]
 browser = ["dep:chromiumoxide", "dep:futures"]
 tests = ["dep:exopack"]
 standards = ["dep:exopack"]
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:opentelemetry-semantic-conventions",
+]
 
 [profile.release]
 opt-level = "z"

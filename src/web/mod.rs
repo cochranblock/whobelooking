@@ -2,8 +2,8 @@
 //! Web server for whobelooking.org
 
 pub mod admin;
-pub mod checkout;
 pub mod detect;
+pub mod enrichment;
 pub mod feedback;
 pub mod metrics;
 pub mod openapi;
@@ -11,4 +11,5 @@ pub mod pages;
 pub mod router;
 pub mod scan;
 pub mod scan_api;
+pub mod try_page;
 pub mod visits;

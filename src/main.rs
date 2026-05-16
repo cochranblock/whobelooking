@@ -16,6 +16,8 @@ use whobelooking::orders;
 #[cfg(feature = "serve")]
 mod ipc;
 mod logs;
+#[cfg(feature = "serve")]
+mod otel;
 mod queue;
 #[cfg(feature = "serve")]
 mod web;
@@ -613,7 +615,9 @@ async fn main() -> anyhow::Result<()> {
                 let _pid_lock: Option<PidLock> = match acquire_pid_lock() {
                     Ok(Some(f)) => Some(f),
                     Ok(None) => {
-                        eprintln!("another whobelooking serve is starting (pid.lock held); exiting");
+                        eprintln!(
+                            "another whobelooking serve is starting (pid.lock held); exiting"
+                        );
                         return Ok(());
                     }
                     Err(e) => {
@@ -632,6 +636,18 @@ async fn main() -> anyhow::Result<()> {
             }
             // IPC dispatcher — operator data over Unix socket. No HTTP /admin.
             ipc::spawn().await?;
+
+            // OpenTelemetry — only emits if the `otel` feature is on AND
+            // the operator has set `OTEL_EXPORTER_OTLP_ENDPOINT` (or
+            // accepts the localhost:4317 default). Guard is held through
+            // the serve lifetime so spans + metrics flush on shutdown.
+            let _otel_guard = match otel::init("whobelooking") {
+                Ok(g) => Some(g),
+                Err(e) => {
+                    tracing::warn!("otel init failed (continuing without): {}", e);
+                    None
+                }
+            };
 
             let app = web::router::build();
             let addr = format!("0.0.0.0:{}", port);
@@ -3222,7 +3238,7 @@ Generated: <code>whobelooking intel</code> — chromiumoxide PDF via <code>whobe
 {top_rows}
 </table>
 
-<div class=footer>All Rights Reserved — The Cochran Block, LLC — operator IP filtered via ignore-list — {label}</div>
+<div class=footer>Unlicense — public domain — The Cochran Block, LLC — operator IP filtered via ignore-list — {label}</div>
 </body></html>"#,
             label = label,
             hours = hours,
@@ -3240,7 +3256,8 @@ Generated: <code>whobelooking intel</code> — chromiumoxide PDF via <code>whobe
 
 mod dns {
     use hickory_resolver::TokioResolver;
-    use hickory_resolver::lookup::ReverseLookup;
+    use hickory_resolver::lookup::Lookup;
+    use hickory_resolver::proto::rr::RData;
     use std::net::IpAddr;
     use std::str::FromStr;
     use std::time::Duration;
@@ -3272,18 +3289,28 @@ mod dns {
     ];
 
     fn make_resolver() -> TokioResolver {
-        TokioResolver::builder_tokio()
-            .unwrap_or_else(|_| {
-                TokioResolver::builder_with_config(Default::default(), Default::default())
-            })
-            .build()
+        // hickory 0.26: builder_tokio() and build() are both fallible. Falling
+        // back to a default config keeps lookups working when /etc/resolv.conf
+        // is missing or malformed (containers, minimal images), which is the
+        // same posture as 0.25 where build() was infallible.
+        let builder = TokioResolver::builder_tokio().unwrap_or_else(|_| {
+            TokioResolver::builder_with_config(Default::default(), Default::default())
+        });
+        builder.build().unwrap_or_else(|_| {
+            TokioResolver::builder_with_config(Default::default(), Default::default())
+                .build()
+                .expect("default-config resolver must build")
+        })
     }
 
-    fn hostname_from_lookup(lookup: ReverseLookup) -> Option<String> {
-        lookup
-            .iter()
-            .next()
-            .map(|n| n.to_string().trim_end_matches('.').to_string())
+    fn hostname_from_lookup(lookup: Lookup) -> Option<String> {
+        // 0.26 returns a generic Lookup (not a ReverseLookup type). Walk the
+        // answer records, pick the first PTR's name, strip the trailing dot.
+        // `data` is a public field on Record in 0.26 (was a method via RecordRef).
+        lookup.answers().iter().find_map(|r| match &r.data {
+            RData::PTR(n) => Some(n.to_string().trim_end_matches('.').to_string()),
+            _ => None,
+        })
     }
 
     pub async fn rdns_batch(ips: &[String]) -> Vec<(String, Option<String>)> {
@@ -4717,118 +4744,482 @@ mod scan_cli {
     fn probes() -> &'static [Probe] {
         &[
             // CRITICAL
-            Probe { path: "/.env",                          label: ".env",                        sev: "critical" },
-            Probe { path: "/.env.local",                    label: ".env.local",                  sev: "critical" },
-            Probe { path: "/.env.production",               label: ".env.production",             sev: "critical" },
-            Probe { path: "/.env.development",              label: ".env.development",            sev: "critical" },
-            Probe { path: "/.env.backup",                   label: ".env.backup",                 sev: "critical" },
-            Probe { path: "/.env.bak",                      label: ".env.bak",                    sev: "critical" },
-            Probe { path: "/config.php",                    label: "config.php",                  sev: "critical" },
-            Probe { path: "/configuration.php",             label: "configuration.php",           sev: "critical" },
-            Probe { path: "/wp-config.php",                 label: "wp-config.php",               sev: "critical" },
-            Probe { path: "/wp-config.php.bak",             label: "wp-config.php.bak",           sev: "critical" },
-            Probe { path: "/config.yml",                    label: "config.yml",                  sev: "critical" },
-            Probe { path: "/config.yaml",                   label: "config.yaml",                 sev: "critical" },
-            Probe { path: "/secrets.json",                  label: "secrets.json",                sev: "critical" },
-            Probe { path: "/credentials.json",              label: "credentials.json",            sev: "critical" },
-            Probe { path: "/serviceAccountKey.json",        label: "GCP service account",         sev: "critical" },
-            Probe { path: "/.aws/credentials",              label: "AWS credentials",             sev: "critical" },
-            Probe { path: "/.ssh/id_rsa",                   label: "SSH private key",             sev: "critical" },
-            Probe { path: "/.ssh/id_ed25519",               label: "SSH Ed25519 key",             sev: "critical" },
-            Probe { path: "/private.key",                   label: "private.key",                 sev: "critical" },
-            Probe { path: "/server.key",                    label: "server.key",                  sev: "critical" },
-            Probe { path: "/.git/HEAD",                     label: "Git HEAD",                    sev: "critical" },
-            Probe { path: "/.git/config",                   label: "Git config",                  sev: "critical" },
-            Probe { path: "/.git/COMMIT_EDITMSG",           label: "Git last commit msg",         sev: "critical" },
-            Probe { path: "/database.sql",                  label: "database.sql",                sev: "critical" },
-            Probe { path: "/db.sql",                        label: "db.sql",                      sev: "critical" },
-            Probe { path: "/backup.sql",                    label: "backup.sql",                  sev: "critical" },
-            Probe { path: "/dump.sql",                      label: "dump.sql",                    sev: "critical" },
-            Probe { path: "/phpinfo.php",                   label: "phpinfo",                     sev: "critical" },
-            Probe { path: "/info.php",                      label: "info.php",                    sev: "critical" },
-            Probe { path: "/test.php",                      label: "test.php",                    sev: "high"     },
-            Probe { path: "/wp-login.php",                  label: "WordPress login",             sev: "critical" },
+            Probe {
+                path: "/.env",
+                label: ".env",
+                sev: "critical",
+            },
+            Probe {
+                path: "/.env.local",
+                label: ".env.local",
+                sev: "critical",
+            },
+            Probe {
+                path: "/.env.production",
+                label: ".env.production",
+                sev: "critical",
+            },
+            Probe {
+                path: "/.env.development",
+                label: ".env.development",
+                sev: "critical",
+            },
+            Probe {
+                path: "/.env.backup",
+                label: ".env.backup",
+                sev: "critical",
+            },
+            Probe {
+                path: "/.env.bak",
+                label: ".env.bak",
+                sev: "critical",
+            },
+            Probe {
+                path: "/config.php",
+                label: "config.php",
+                sev: "critical",
+            },
+            Probe {
+                path: "/configuration.php",
+                label: "configuration.php",
+                sev: "critical",
+            },
+            Probe {
+                path: "/wp-config.php",
+                label: "wp-config.php",
+                sev: "critical",
+            },
+            Probe {
+                path: "/wp-config.php.bak",
+                label: "wp-config.php.bak",
+                sev: "critical",
+            },
+            Probe {
+                path: "/config.yml",
+                label: "config.yml",
+                sev: "critical",
+            },
+            Probe {
+                path: "/config.yaml",
+                label: "config.yaml",
+                sev: "critical",
+            },
+            Probe {
+                path: "/secrets.json",
+                label: "secrets.json",
+                sev: "critical",
+            },
+            Probe {
+                path: "/credentials.json",
+                label: "credentials.json",
+                sev: "critical",
+            },
+            Probe {
+                path: "/serviceAccountKey.json",
+                label: "GCP service account",
+                sev: "critical",
+            },
+            Probe {
+                path: "/.aws/credentials",
+                label: "AWS credentials",
+                sev: "critical",
+            },
+            Probe {
+                path: "/.ssh/id_rsa",
+                label: "SSH private key",
+                sev: "critical",
+            },
+            Probe {
+                path: "/.ssh/id_ed25519",
+                label: "SSH Ed25519 key",
+                sev: "critical",
+            },
+            Probe {
+                path: "/private.key",
+                label: "private.key",
+                sev: "critical",
+            },
+            Probe {
+                path: "/server.key",
+                label: "server.key",
+                sev: "critical",
+            },
+            Probe {
+                path: "/.git/HEAD",
+                label: "Git HEAD",
+                sev: "critical",
+            },
+            Probe {
+                path: "/.git/config",
+                label: "Git config",
+                sev: "critical",
+            },
+            Probe {
+                path: "/.git/COMMIT_EDITMSG",
+                label: "Git last commit msg",
+                sev: "critical",
+            },
+            Probe {
+                path: "/database.sql",
+                label: "database.sql",
+                sev: "critical",
+            },
+            Probe {
+                path: "/db.sql",
+                label: "db.sql",
+                sev: "critical",
+            },
+            Probe {
+                path: "/backup.sql",
+                label: "backup.sql",
+                sev: "critical",
+            },
+            Probe {
+                path: "/dump.sql",
+                label: "dump.sql",
+                sev: "critical",
+            },
+            Probe {
+                path: "/phpinfo.php",
+                label: "phpinfo",
+                sev: "critical",
+            },
+            Probe {
+                path: "/info.php",
+                label: "info.php",
+                sev: "critical",
+            },
+            Probe {
+                path: "/test.php",
+                label: "test.php",
+                sev: "high",
+            },
+            Probe {
+                path: "/wp-login.php",
+                label: "WordPress login",
+                sev: "critical",
+            },
             // HIGH
-            Probe { path: "/phpmyadmin",                    label: "phpMyAdmin",                  sev: "high"     },
-            Probe { path: "/phpmyadmin/",                   label: "phpMyAdmin/",                 sev: "high"     },
-            Probe { path: "/pma",                           label: "PMA shortcut",                sev: "high"     },
-            Probe { path: "/adminer.php",                   label: "Adminer",                     sev: "high"     },
-            Probe { path: "/.cursor/mcp.json",              label: "Cursor MCP config",           sev: "high"     },
-            Probe { path: "/.cursor/settings.json",         label: "Cursor settings",             sev: "high"     },
-            Probe { path: "/.vscode/settings.json",         label: "VS Code settings",            sev: "high"     },
-            Probe { path: "/api/v1/users",                  label: "User list API",               sev: "high"     },
-            Probe { path: "/api/v1/admin",                  label: "Admin API",                   sev: "high"     },
-            Probe { path: "/api/admin",                     label: "Admin API (alt)",             sev: "high"     },
-            Probe { path: "/api/users",                     label: "Users API",                   sev: "high"     },
-            Probe { path: "/api/keys",                      label: "Keys API",                    sev: "high"     },
-            Probe { path: "/api/v1/keys",                   label: "Keys API v1",                 sev: "high"     },
-            Probe { path: "/api/config",                    label: "Config API",                  sev: "high"     },
-            Probe { path: "/backup/",                       label: "Backup dir",                  sev: "high"     },
-            Probe { path: "/backups/",                      label: "Backups dir",                 sev: "high"     },
-            Probe { path: "/backup.zip",                    label: "backup.zip",                  sev: "high"     },
-            Probe { path: "/backup.tar.gz",                 label: "backup.tar.gz",               sev: "high"     },
-            Probe { path: "/site.tar.gz",                   label: "site.tar.gz",                 sev: "high"     },
-            Probe { path: "/logs/",                         label: "Logs dir",                    sev: "high"     },
-            Probe { path: "/log/",                          label: "Log dir",                     sev: "high"     },
-            Probe { path: "/error.log",                     label: "error.log",                   sev: "high"     },
-            Probe { path: "/access.log",                    label: "access.log",                  sev: "high"     },
-            Probe { path: "/debug.log",                     label: "debug.log",                   sev: "high"     },
-            Probe { path: "/storage/logs/laravel.log",      label: "Laravel log",                 sev: "high"     },
-            Probe { path: "/.openai",                       label: ".openai dir",                 sev: "high"     },
-            Probe { path: "/.openai/config.json",           label: "OpenAI config",               sev: "high"     },
-            Probe { path: "/openai.json",                   label: "openai.json",                 sev: "high"     },
+            Probe {
+                path: "/phpmyadmin",
+                label: "phpMyAdmin",
+                sev: "high",
+            },
+            Probe {
+                path: "/phpmyadmin/",
+                label: "phpMyAdmin/",
+                sev: "high",
+            },
+            Probe {
+                path: "/pma",
+                label: "PMA shortcut",
+                sev: "high",
+            },
+            Probe {
+                path: "/adminer.php",
+                label: "Adminer",
+                sev: "high",
+            },
+            Probe {
+                path: "/.cursor/mcp.json",
+                label: "Cursor MCP config",
+                sev: "high",
+            },
+            Probe {
+                path: "/.cursor/settings.json",
+                label: "Cursor settings",
+                sev: "high",
+            },
+            Probe {
+                path: "/.vscode/settings.json",
+                label: "VS Code settings",
+                sev: "high",
+            },
+            Probe {
+                path: "/api/v1/users",
+                label: "User list API",
+                sev: "high",
+            },
+            Probe {
+                path: "/api/v1/admin",
+                label: "Admin API",
+                sev: "high",
+            },
+            Probe {
+                path: "/api/admin",
+                label: "Admin API (alt)",
+                sev: "high",
+            },
+            Probe {
+                path: "/api/users",
+                label: "Users API",
+                sev: "high",
+            },
+            Probe {
+                path: "/api/keys",
+                label: "Keys API",
+                sev: "high",
+            },
+            Probe {
+                path: "/api/v1/keys",
+                label: "Keys API v1",
+                sev: "high",
+            },
+            Probe {
+                path: "/api/config",
+                label: "Config API",
+                sev: "high",
+            },
+            Probe {
+                path: "/backup/",
+                label: "Backup dir",
+                sev: "high",
+            },
+            Probe {
+                path: "/backups/",
+                label: "Backups dir",
+                sev: "high",
+            },
+            Probe {
+                path: "/backup.zip",
+                label: "backup.zip",
+                sev: "high",
+            },
+            Probe {
+                path: "/backup.tar.gz",
+                label: "backup.tar.gz",
+                sev: "high",
+            },
+            Probe {
+                path: "/site.tar.gz",
+                label: "site.tar.gz",
+                sev: "high",
+            },
+            Probe {
+                path: "/logs/",
+                label: "Logs dir",
+                sev: "high",
+            },
+            Probe {
+                path: "/log/",
+                label: "Log dir",
+                sev: "high",
+            },
+            Probe {
+                path: "/error.log",
+                label: "error.log",
+                sev: "high",
+            },
+            Probe {
+                path: "/access.log",
+                label: "access.log",
+                sev: "high",
+            },
+            Probe {
+                path: "/debug.log",
+                label: "debug.log",
+                sev: "high",
+            },
+            Probe {
+                path: "/storage/logs/laravel.log",
+                label: "Laravel log",
+                sev: "high",
+            },
+            Probe {
+                path: "/.openai",
+                label: ".openai dir",
+                sev: "high",
+            },
+            Probe {
+                path: "/.openai/config.json",
+                label: "OpenAI config",
+                sev: "high",
+            },
+            Probe {
+                path: "/openai.json",
+                label: "openai.json",
+                sev: "high",
+            },
             // MEDIUM
-            Probe { path: "/admin/",                        label: "Admin panel",                 sev: "medium"   },
-            Probe { path: "/administrator/",                label: "Joomla admin",                sev: "medium"   },
-            Probe { path: "/wp-admin/",                     label: "WordPress admin",             sev: "medium"   },
-            Probe { path: "/server-status",                 label: "Apache status",               sev: "medium"   },
-            Probe { path: "/server-info",                   label: "Apache info",                 sev: "medium"   },
-            Probe { path: "/graphql",                       label: "GraphQL",                     sev: "medium"   },
-            Probe { path: "/swagger.json",                  label: "Swagger docs",                sev: "medium"   },
-            Probe { path: "/openapi.json",                  label: "OpenAPI docs",                sev: "medium"   },
-            Probe { path: "/api-docs",                      label: "API docs",                    sev: "medium"   },
-            Probe { path: "/api/docs",                      label: "API docs (alt)",              sev: "medium"   },
-            Probe { path: "/xmlrpc.php",                    label: "XML-RPC",                     sev: "medium"   },
-            Probe { path: "/.DS_Store",                     label: ".DS_Store",                   sev: "medium"   },
-            Probe { path: "/.htaccess",                     label: ".htaccess",                   sev: "medium"   },
-            Probe { path: "/docker-compose.yml",            label: "Docker Compose",              sev: "medium"   },
-            Probe { path: "/.travis.yml",                   label: "Travis CI config",            sev: "medium"   },
-            Probe { path: "/Jenkinsfile",                   label: "Jenkinsfile",                 sev: "medium"   },
-            Probe { path: "/.circleci/config.yml",          label: "CircleCI config",             sev: "medium"   },
-            Probe { path: "/.gitlab-ci.yml",                label: "GitLab CI config",            sev: "medium"   },
-            Probe { path: "/install.php",                   label: "Install script",              sev: "medium"   },
-            Probe { path: "/console",                       label: "Console",                     sev: "medium"   },
-            Probe { path: "/.gitignore",                    label: ".gitignore",                  sev: "medium"   },
-            Probe { path: "/package-lock.json",             label: "package-lock.json",           sev: "medium"   },
-            Probe { path: "/requirements.txt",              label: "requirements.txt",            sev: "medium"   },
-            Probe { path: "/CHANGELOG.md",                  label: "CHANGELOG",                   sev: "medium"   },
+            Probe {
+                path: "/admin/",
+                label: "Admin panel",
+                sev: "medium",
+            },
+            Probe {
+                path: "/administrator/",
+                label: "Joomla admin",
+                sev: "medium",
+            },
+            Probe {
+                path: "/wp-admin/",
+                label: "WordPress admin",
+                sev: "medium",
+            },
+            Probe {
+                path: "/server-status",
+                label: "Apache status",
+                sev: "medium",
+            },
+            Probe {
+                path: "/server-info",
+                label: "Apache info",
+                sev: "medium",
+            },
+            Probe {
+                path: "/graphql",
+                label: "GraphQL",
+                sev: "medium",
+            },
+            Probe {
+                path: "/swagger.json",
+                label: "Swagger docs",
+                sev: "medium",
+            },
+            Probe {
+                path: "/openapi.json",
+                label: "OpenAPI docs",
+                sev: "medium",
+            },
+            Probe {
+                path: "/api-docs",
+                label: "API docs",
+                sev: "medium",
+            },
+            Probe {
+                path: "/api/docs",
+                label: "API docs (alt)",
+                sev: "medium",
+            },
+            Probe {
+                path: "/xmlrpc.php",
+                label: "XML-RPC",
+                sev: "medium",
+            },
+            Probe {
+                path: "/.DS_Store",
+                label: ".DS_Store",
+                sev: "medium",
+            },
+            Probe {
+                path: "/.htaccess",
+                label: ".htaccess",
+                sev: "medium",
+            },
+            Probe {
+                path: "/docker-compose.yml",
+                label: "Docker Compose",
+                sev: "medium",
+            },
+            Probe {
+                path: "/.travis.yml",
+                label: "Travis CI config",
+                sev: "medium",
+            },
+            Probe {
+                path: "/Jenkinsfile",
+                label: "Jenkinsfile",
+                sev: "medium",
+            },
+            Probe {
+                path: "/.circleci/config.yml",
+                label: "CircleCI config",
+                sev: "medium",
+            },
+            Probe {
+                path: "/.gitlab-ci.yml",
+                label: "GitLab CI config",
+                sev: "medium",
+            },
+            Probe {
+                path: "/install.php",
+                label: "Install script",
+                sev: "medium",
+            },
+            Probe {
+                path: "/console",
+                label: "Console",
+                sev: "medium",
+            },
+            Probe {
+                path: "/.gitignore",
+                label: ".gitignore",
+                sev: "medium",
+            },
+            Probe {
+                path: "/package-lock.json",
+                label: "package-lock.json",
+                sev: "medium",
+            },
+            Probe {
+                path: "/requirements.txt",
+                label: "requirements.txt",
+                sev: "medium",
+            },
+            Probe {
+                path: "/CHANGELOG.md",
+                label: "CHANGELOG",
+                sev: "medium",
+            },
             // LOW / INFO
-            Probe { path: "/robots.txt",                    label: "robots.txt",                  sev: "info"     },
-            Probe { path: "/sitemap.xml",                   label: "Sitemap",                     sev: "info"     },
-            Probe { path: "/",                              label: "Root",                        sev: "info"     },
+            Probe {
+                path: "/robots.txt",
+                label: "robots.txt",
+                sev: "info",
+            },
+            Probe {
+                path: "/sitemap.xml",
+                label: "Sitemap",
+                sev: "info",
+            },
+            Probe {
+                path: "/",
+                label: "Root",
+                sev: "info",
+            },
         ]
     }
 
     fn verdict(status: u16) -> &'static str {
-        if status == 0 { return "unreachable"; }
-        if status >= 200 && status < 300 { return "EXPOSED"; }
-        if status == 401 || status == 403 { return "auth-wall"; }
-        if status >= 300 && status < 400 { return "redirect"; }
-        if status >= 500 { return "server-error"; }
+        if status == 0 {
+            return "unreachable";
+        }
+        if (200..300).contains(&status) {
+            return "EXPOSED";
+        }
+        if status == 401 || status == 403 {
+            return "auth-wall";
+        }
+        if (300..400).contains(&status) {
+            return "redirect";
+        }
+        if status >= 500 {
+            return "server-error";
+        }
         "clean"
     }
 
     fn is_finding(status: u16) -> bool {
-        (status >= 200 && status < 300) || status == 401 || status == 403
+        (200..300).contains(&status) || status == 401 || status == 403
     }
 
     fn sev_order(sev: &str) -> u8 {
-        match sev { "critical" => 0, "high" => 1, "medium" => 2, "low" => 3, _ => 4 }
+        match sev {
+            "critical" => 0,
+            "high" => 1,
+            "medium" => 2,
+            "low" => 3,
+            _ => 4,
+        }
     }
 
     pub async fn run(url: &str, as_json: bool) -> anyhow::Result<()> {
         let base = url.trim_end_matches('/');
-        let base = if base.starts_with("http") { base.to_string() } else { format!("https://{}", base) };
+        let base = if base.starts_with("http") {
+            base.to_string()
+        } else {
+            format!("https://{}", base)
+        };
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(8))
@@ -4865,11 +5256,14 @@ mod scan_cli {
 
         let mut findings: Vec<Finding> = Vec::with_capacity(total);
         while let Some(r) = set.join_next().await {
-            if let Ok(f) = r { findings.push(f); }
+            if let Ok(f) = r {
+                findings.push(f);
+            }
         }
 
         findings.sort_by(|a, b| {
-            sev_order(&a.sev).cmp(&sev_order(&b.sev))
+            sev_order(&a.sev)
+                .cmp(&sev_order(&b.sev))
                 .then(b.status.cmp(&a.status))
         });
 
@@ -4880,7 +5274,11 @@ mod scan_cli {
 
         // Terminal output
         let hits: Vec<&Finding> = findings.iter().filter(|f| is_finding(f.status)).collect();
-        let crit: Vec<&Finding> = hits.iter().filter(|f| f.sev == "critical").copied().collect();
+        let crit: Vec<&Finding> = hits
+            .iter()
+            .filter(|f| f.sev == "critical")
+            .copied()
+            .collect();
 
         eprintln!();
         eprintln!("  whobelooking scan — {}", base);
@@ -4891,17 +5289,31 @@ mod scan_cli {
             eprintln!("  \x1b[32m✓ No exposed paths found.\x1b[0m");
         } else {
             if !crit.is_empty() {
-                eprintln!("  \x1b[1;31m⚠  {} CRITICAL FINDING{}\x1b[0m", crit.len(), if crit.len() > 1 { "S" } else { "" });
+                eprintln!(
+                    "  \x1b[1;31m⚠  {} CRITICAL FINDING{}\x1b[0m",
+                    crit.len(),
+                    if crit.len() > 1 { "S" } else { "" }
+                );
                 for f in &crit {
-                    eprintln!("  \x1b[31m  {} — {} (HTTP {})\x1b[0m", f.path, f.label, f.status);
+                    eprintln!(
+                        "  \x1b[31m  {} — {} (HTTP {})\x1b[0m",
+                        f.path, f.label, f.status
+                    );
                 }
                 eprintln!();
             }
-            eprintln!("  \x1b[33m{} path{} answered\x1b[0m", hits.len(), if hits.len() > 1 { "s" } else { "" });
+            eprintln!(
+                "  \x1b[33m{} path{} answered\x1b[0m",
+                hits.len(),
+                if hits.len() > 1 { "s" } else { "" }
+            );
         }
 
         eprintln!();
-        eprintln!("  {:<40}  {:<10}  {:<10}  {:>6}  {:>6}", "PATH", "LABEL", "VERDICT", "STATUS", "MS");
+        eprintln!(
+            "  {:<40}  {:<10}  {:<10}  {:>6}  {:>6}",
+            "PATH", "LABEL", "VERDICT", "STATUS", "MS"
+        );
         eprintln!("  {}", "-".repeat(80));
 
         let mut last_sev = "";
@@ -4911,18 +5323,23 @@ mod scan_cli {
                 last_sev = &f.sev;
             }
             let color = match f.verdict.as_str() {
-                "EXPOSED"      => "\x1b[1;31m",
-                "auth-wall"    => "\x1b[33m",
-                "redirect"     => "\x1b[2m",
+                "EXPOSED" => "\x1b[1;31m",
+                "auth-wall" => "\x1b[33m",
+                "redirect" => "\x1b[2m",
                 "server-error" => "\x1b[2;33m",
-                _              => "\x1b[2m",
+                _ => "\x1b[2m",
             };
-            eprintln!("  {}{:<40}  {:<10}  {:<10}  {:>6}  {:>6}\x1b[0m",
+            eprintln!(
+                "  {}{:<40}  {:<10}  {:<10}  {:>6}  {:>6}\x1b[0m",
                 color,
                 &f.path[..f.path.len().min(39)],
                 &f.label[..f.label.len().min(10)],
                 &f.verdict[..f.verdict.len().min(10)],
-                if f.status == 0 { "-".to_string() } else { f.status.to_string() },
+                if f.status == 0 {
+                    "-".to_string()
+                } else {
+                    f.status.to_string()
+                },
                 f.ms,
             );
         }

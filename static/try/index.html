@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>whobelooking /try — visitor intelligence, in your browser</title>
+<meta name="description" content="Drop your access log. The WASM engine parses, classifies, identifies, and renders a standalone HTML report — entirely on your machine. Nothing uploads.">
+<meta property="og:title" content="whobelooking /try — visitor intelligence in your browser">
+<meta property="og:description" content="Drop your log. Get a standalone HTML report. Nothing uploaded. Free.">
+__WBL_FONTS_LINK__
+<style>
+:root {
+  --bg: #050508;
+  --surface: #0d0d14;
+  --surface2: #14141f;
+  --border: rgba(0, 217, 255, 0.15);
+  --border-strong: rgba(0, 217, 255, 0.4);
+  --text: #e8e8e8;
+  --muted: #9ca3af;
+  --accent: #00d9ff;
+  --orange: #ff6b35;
+  --teal: #00ffcc;
+  --glow: rgba(0, 217, 255, 0.35);
+  --mono: 'JetBrains Mono','SF Mono',Consolas,monospace;
+  --display: 'Orbitron',sans-serif;
+}
+*,*::before,*::after { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--mono); font-size:13px; line-height:1.5; min-height:100vh; overflow-x:hidden; }
+body::after {
+  content:''; position:fixed; inset:0;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+  pointer-events:none; z-index:9999;
+}
+.drop-shell {
+  min-height:100vh; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; padding:32px 20px; gap:28px;
+}
+.drop-brand { font-family:var(--display); font-weight:700; font-size:11px; letter-spacing:.4em; color:var(--accent); }
+.drop-tagline { font-size:18px; color:var(--text); text-align:center; max-width:520px; line-height:1.4; }
+.drop-tagline em { color:var(--teal); font-style:normal; }
+.drop-zone {
+  width:min(640px, 100%); min-height:240px; padding:48px 32px;
+  border:2px dashed var(--border-strong); border-radius:8px; background:var(--surface);
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;
+  cursor:pointer; transition:all .2s ease;
+}
+.drop-zone:hover, .drop-zone.dragover {
+  border-color:var(--accent); background:var(--surface2); box-shadow:0 0 40px var(--glow);
+}
+.drop-zone-icon { font-size:32px; color:var(--accent); opacity:.7; }
+.drop-zone-title { font-family:var(--display); font-size:14px; font-weight:600; letter-spacing:.2em; text-transform:uppercase; }
+.drop-zone-sub { font-size:11px; color:var(--muted); letter-spacing:.1em; }
+.drop-zone-browse { color:var(--accent); text-decoration:underline; cursor:pointer; }
+.drop-zone-formats { font-size:10px; color:var(--muted); letter-spacing:.15em; text-transform:uppercase; margin-top:8px; }
+.drop-zone-formats span { color:var(--accent); }
+#file-input { display:none; }
+.drop-fineprint { max-width:540px; text-align:center; font-size:11px; color:var(--muted); line-height:1.6; }
+.drop-fineprint strong { color:var(--teal); }
+.drop-trust { display:flex; gap:24px; flex-wrap:wrap; justify-content:center; font-size:10px; color:var(--muted); letter-spacing:.15em; text-transform:uppercase; }
+.drop-trust span { display:flex; align-items:center; gap:6px; }
+.drop-trust .dot { width:6px; height:6px; border-radius:50%; background:var(--teal); }
+.wasm-stamp { font-size:10px; color:var(--muted); letter-spacing:.15em; text-transform:uppercase; margin-top:8px; }
+.wasm-stamp .ok { color:var(--teal); }
+.wasm-stamp .err { color:var(--orange); }
+
+/* Report mode ─────────────────────────────────────────── */
+.report-shell { display:none; flex-direction:column; min-height:100vh; }
+.report-shell.active { display:flex; }
+.report-toolbar {
+  display:flex; align-items:center; gap:12px; padding:8px 16px;
+  background:var(--surface); border-bottom:1px solid var(--border);
+  font-size:11px; color:var(--muted); letter-spacing:.05em;
+}
+.report-toolbar .brand { font-weight:800; color:var(--accent); }
+.report-toolbar .source { color:var(--text); }
+.report-toolbar .status { color:var(--teal); margin-left:auto; }
+.report-toolbar .status .dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--teal); margin-right:6px; animation:pulse 2s infinite; }
+.report-toolbar button {
+  font-family:var(--mono); font-size:10px; padding:6px 12px; border-radius:2px;
+  border:1px solid var(--border); background:transparent; color:var(--text);
+  letter-spacing:.1em; text-transform:uppercase; cursor:pointer; transition:all .15s;
+}
+.report-toolbar button:hover { border-color:var(--accent); color:var(--accent); }
+.report-toolbar button.primary { background:var(--accent); color:var(--bg); border-color:var(--accent); }
+.report-toolbar button.primary:hover { background:var(--teal); border-color:var(--teal); }
+iframe.report-frame { flex:1; width:100%; border:0; background:var(--bg); }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+</style>
+</head>
+<body>
+
+<!-- DROP MODE ─────────────────────────────────────────── -->
+<div class="drop-shell" id="drop-shell">
+  __WBL_AIRGAP_NOTICE__
+  <div class="drop-brand">whobelooking · /try</div>
+  <div class="drop-tagline">
+    Drop your access log.<br>
+    The <em>WASM engine</em> does the work in this tab.<br>
+    <span style="font-size:13px;color:var(--muted);">Nothing uploads. The output is one standalone HTML file you can save.</span>
+  </div>
+
+  <label class="drop-zone" id="drop-zone" for="file-input">
+    <div class="drop-zone-icon">⬆</div>
+    <div class="drop-zone-title">Drop log file here</div>
+    <div class="drop-zone-sub">or <span class="drop-zone-browse">browse files</span></div>
+    <div class="drop-zone-formats">
+      <span>whobelooking</span> · <span>nginx</span> · <span>apache</span> · <span>cloudflare jsonl/csv</span>
+    </div>
+  </label>
+  <input type="file" id="file-input" accept=".log,.txt,.csv,.gz,.jsonl,.json">
+
+  <div class="wasm-stamp" id="wasm-stamp">loading WASM engine…</div>
+
+  <div class="drop-fineprint">
+    <strong>Your data never leaves your browser.</strong>
+    Parsing, IP rollup, classification, rDNS lookup, RDAP whois, and HTML rendering all run on your machine.
+    The server in front of this page never sees a single line of your logs.
+  </div>
+
+  <div class="drop-trust">
+    <span><span class="dot"></span>NO UPLOAD</span>
+    <span><span class="dot"></span>NO COOKIE</span>
+    <span><span class="dot"></span>NO TRACKING</span>
+    <span><span class="dot"></span>UNLICENSE</span>
+  </div>
+</div>
+
+<!-- REPORT MODE ───────────────────────────────────────── -->
+<div class="report-shell" id="report-shell">
+  <div class="report-toolbar">
+    <span class="brand">whobelooking</span>
+    <span>·</span>
+    <span class="source" id="r-source">…</span>
+    <span class="status"><span class="dot"></span><span id="r-status">parsing…</span></span>
+    <button id="btn-download" class="primary">⤓ Download report.html</button>
+    <button id="btn-reset">⟲ New log</button>
+  </div>
+  <iframe class="report-frame" id="r-frame" sandbox="allow-same-origin"></iframe>
+</div>
+
+<script type="module">
+// ─────────────────────────────────────────────────────────────────────
+// JS glue ONLY. Three jobs:
+//   1. Load the WASM module.
+//   2. Read the dropped file as text, feed it to ReportSession.
+//   3. Walk the IPs that need enrichment — make DoH PTR + RDAP fetches
+//      from the browser (network has to go through JS, browsers don't
+//      let WASM open sockets), then hand the result back to WASM and
+//      ask it to render the final HTML.
+// All parsing, classification, aggregation, and HTML rendering happens
+// inside the WASM module (`wbl-detect` crate).
+// ─────────────────────────────────────────────────────────────────────
+import init, { ReportSession, renderReport } from "/detect/wbl_detect.js";
+
+const stamp = document.getElementById("wasm-stamp");
+let wasmReady;
+try {
+  wasmReady = init("/detect/wbl_detect_bg.wasm").then(() => {
+    stamp.innerHTML = '<span class="ok">●</span> WASM engine ready · 210 KB';
+  });
+} catch (e) {
+  stamp.innerHTML = '<span class="err">●</span> WASM load failed — ' + e.message;
+}
+
+const SNAPSHOT_IPS = new Map();
+const SNAPSHOT_CIDRS = new Map();
+let snapshotLoaded = false;
+
+async function loadSnapshot() {
+  if (snapshotLoaded) return;
+  snapshotLoaded = true;
+  // Server-templated endpoint — set via WBL_ENRICHMENT_URL env var. Defaults
+  // to same-origin /api/enrichment.json; an airgap deploy can point at an
+  // internal mirror, or set it to a non-existent path to skip enrichment.
+  // No cross-origin fallback: the old code fetched from a hardcoded
+  // cochranblock.org URL, which leaked the user's IP/UA/Referer even when
+  // their log content stayed local. Now only the configured URL is tried.
+  const url = "__WBL_ENRICHMENT_URL__";
+  try {
+    const r = await fetch(url, { credentials: "omit" });
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j?.ips) for (const [k, v] of Object.entries(j.ips)) SNAPSHOT_IPS.set(k, v);
+    if (j?.cidrs) for (const [k, v] of Object.entries(j.cidrs)) SNAPSHOT_CIDRS.set(k, v);
+  } catch {}
+}
+loadSnapshot();
+
+const CACHE_TTL_MS = 7 * 86400 * 1000;
+function cacheGet(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const j = JSON.parse(raw);
+    if (!j?.exp || j.exp < Date.now()) { localStorage.removeItem(key); return null; }
+    return j.v;
+  } catch { return null; }
+}
+function cachePut(key, v) {
+  try { localStorage.setItem(key, JSON.stringify({ exp: Date.now() + CACHE_TTL_MS, v })); } catch {}
+}
+
+function reverseArpa(ip) {
+  return ip.split(".").reverse().join(".") + ".in-addr.arpa";
+}
+function slash24(ip) {
+  const p = ip.split(".");
+  return `${p[0]}.${p[1]}.${p[2]}.0/24`;
+}
+
+async function dohPtr(ip) {
+  const k = "wbl:rdns:" + ip;
+  const hit = cacheGet(k);
+  if (hit !== null) return hit;
+  try {
+    // Templated by the server — WBL_DOH_URL env var. The endpoint must
+    // accept the Cloudflare DoH JSON API shape (?name=&type=PTR returning
+    // {Answer:[{type, data}]}). Most local DoH resolvers and DoH proxies
+    // implement this; if yours doesn't, we fall through to empty rDNS
+    // for that IP and the report just shows the bare address.
+    const r = await fetch("__WBL_DOH_URL__?name=" + encodeURIComponent(reverseArpa(ip)) + "&type=PTR", {
+      headers: { "Accept": "application/dns-json" },
+    });
+    if (!r.ok) { cachePut(k, ""); return ""; }
+    const j = await r.json();
+    const ans = (j.Answer || []).find(a => a.type === 12);
+    const ptr = ans ? String(ans.data || "").replace(/\.$/, "") : "";
+    cachePut(k, ptr);
+    return ptr;
+  } catch { cachePut(k, ""); return ""; }
+}
+
+function extractOrg(j) {
+  if (!j) return { name: "", country: "" };
+  const country = j.country || "";
+  for (const e of (j.entities || [])) {
+    const roles = (e.roles || []).map(r => String(r).toLowerCase());
+    if (!roles.some(r => ["registrant","administrative","technical"].includes(r))) continue;
+    const vcard = e.vcardArray;
+    if (Array.isArray(vcard) && vcard.length >= 2) {
+      for (const it of vcard[1] || []) {
+        if (Array.isArray(it) && it[0] === "fn" && typeof it[3] === "string" && it[3].trim()) {
+          return { name: it[3].trim(), country };
+        }
+      }
+    }
+  }
+  if (j.name) return { name: String(j.name).trim(), country };
+  return { name: "", country };
+}
+
+async function rdapLookup(ip) {
+  const cidr = slash24(ip);
+  if (SNAPSHOT_IPS.has(ip)) return { name: SNAPSHOT_IPS.get(ip), country: "" };
+  if (SNAPSHOT_CIDRS.has(cidr)) return { name: SNAPSHOT_CIDRS.get(cidr), country: "" };
+  const k = "wbl:rdap:" + cidr;
+  const hit = cacheGet(k);
+  if (hit !== null) return hit;
+  try {
+    // Templated — WBL_RDAP_BASE env var, default https://rdap.org. The
+    // base must serve the standard RDAP /ip/<addr> path; airgap deploys
+    // can run an internal RDAP mirror (the data fits in <100 MB; ARIN
+    // publishes daily bulk dumps).
+    const r = await fetch("__WBL_RDAP_BASE__/ip/" + ip, { redirect: "follow" });
+    if (r.ok) {
+      const out = extractOrg(await r.json());
+      cachePut(k, out);
+      return out;
+    }
+  } catch {}
+  cachePut(k, { name: "", country: "" });
+  return { name: "", country: "" };
+}
+
+async function runPool(items, limit, fn) {
+  const q = items.slice();
+  let active = 0;
+  return new Promise(resolve => {
+    const next = () => {
+      while (active < limit && q.length) {
+        active++;
+        Promise.resolve(fn(q.shift()))
+          .catch(() => {})
+          .finally(() => { active--; if (!q.length && active === 0) resolve(); else next(); });
+      }
+      if (!q.length && active === 0) resolve();
+    };
+    next();
+  });
+}
+
+async function enrichAndRender(session, fileName) {
+  const setStatus = msg => document.getElementById("r-status").textContent = msg;
+
+  // Phase 1 — fast paint. Render with no enrichment so the user sees
+  // something immediately while we kick off the network work.
+  setStatus("rendering first pass…");
+  document.getElementById("r-frame").srcdoc = session.renderHtml();
+
+  await loadSnapshot();
+  const ips = session.ipsToEnrich();
+  if (!ips || ips.length === 0) {
+    setStatus("ready · no IPs to resolve");
+    document.getElementById("r-frame").srcdoc = session.renderHtml();
+    return;
+  }
+
+  // Phase 2 — DoH PTR for every IP in parallel (cheap).
+  const enrichment = {};
+  let done = 0;
+  await runPool(ips, 16, async ip => {
+    const rdns = await dohPtr(ip);
+    enrichment[ip] = { rdns, org: "", org_country: "" };
+    done++;
+    if (done % 8 === 0 || done === ips.length) setStatus(`rDNS ${done}/${ips.length}`);
+  });
+
+  // Phase 3 — RDAP per /24 (de-duplicated).
+  const cidrToIps = new Map();
+  for (const ip of ips) {
+    const c = slash24(ip);
+    if (!cidrToIps.has(c)) cidrToIps.set(c, []);
+    cidrToIps.get(c).push(ip);
+  }
+  const cidrs = [...cidrToIps.keys()];
+  done = 0;
+  await runPool(cidrs, 8, async cidr => {
+    const sampleIp = cidrToIps.get(cidr)[0];
+    const org = await rdapLookup(sampleIp);
+    for (const ip of cidrToIps.get(cidr)) {
+      enrichment[ip].org = org.name || "";
+      enrichment[ip].org_country = org.country || "";
+    }
+    done++;
+    if (done % 4 === 0 || done === cidrs.length) setStatus(`RDAP ${done}/${cidrs.length}`);
+  });
+
+  // Phase 4 — push enrichment into WASM, re-render.
+  setStatus("rendering final…");
+  session.applyEnrichment(JSON.stringify(enrichment));
+  const html = session.renderHtml();
+  document.getElementById("r-frame").srcdoc = html;
+  // Hand the same string to the download button.
+  lastHtml = html;
+  setStatus("ready");
+}
+
+let lastHtml = "";
+
+function showFatal(msg) {
+  document.getElementById("drop-shell").style.display = "none";
+  document.getElementById("report-shell").classList.add("active");
+  document.getElementById("r-status").textContent = "error";
+  document.getElementById("r-frame").srcdoc =
+    `<!DOCTYPE html><html><body style="background:#050508;color:#e8e8e8;font-family:JetBrains Mono,monospace;padding:48px;">
+       <div style="color:#ff6b35;font-size:11px;letter-spacing:.2em;text-transform:uppercase;margin-bottom:16px;">/try · error</div>
+       <div style="font-size:14px;color:#fff;">${msg.replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]))}</div>
+       <div style="margin-top:24px;font-size:11px;color:#9ca3af;">Hit <strong style="color:#00d9ff;">New log</strong> above to start over.</div>
+     </body></html>`;
+  lastHtml = "";
+}
+
+async function handleFile(file) {
+  await wasmReady;
+
+  document.getElementById("drop-shell").style.display = "none";
+  document.getElementById("report-shell").classList.add("active");
+  document.getElementById("r-source").textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB`;
+  document.getElementById("r-status").textContent = "reading…";
+
+  let text;
+  try {
+    text = await file.text();
+  } catch (e) {
+    showFatal(`Couldn't read file: ${e?.message ?? e}`);
+    return;
+  }
+
+  // Hard cap mirrors the WASM-side MAX_INPUT_BYTES (512 MiB). Catching it
+  // here keeps the constructor exception out of the console and gives a
+  // friendlier message than the underlying "input too large: ..." text.
+  let session;
+  try {
+    session = new ReportSession(text, file.name);
+  } catch (e) {
+    const msg = e?.message ?? String(e);
+    showFatal(`Couldn't process this log — ${msg}`);
+    return;
+  }
+  const stats = session.stats();
+  document.getElementById("r-source").textContent =
+    `${file.name} · ${stats.parsed.toLocaleString()} events · ${stats.unique_ips} IPs · ${stats.format}`;
+
+  // Cache the first-render HTML in case the user hits download before enrichment finishes.
+  lastHtml = session.renderHtml();
+
+  await enrichAndRender(session, file.name);
+}
+
+function downloadReport() {
+  if (!lastHtml) return;
+  const blob = new Blob([lastHtml], { type: "text/html;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  const src = document.getElementById("r-source").textContent.split(" · ")[0] || "report";
+  a.download = src.replace(/\.[^.]+$/, "") + "-whobelooking.html";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// DOM wiring ──────────────────────────────────────────────────────────
+const dropZone = document.getElementById("drop-zone");
+const fileInput = document.getElementById("file-input");
+
+["dragenter", "dragover"].forEach(ev =>
+  dropZone.addEventListener(ev, e => { e.preventDefault(); dropZone.classList.add("dragover"); }),
+);
+["dragleave", "drop"].forEach(ev =>
+  dropZone.addEventListener(ev, e => { e.preventDefault(); dropZone.classList.remove("dragover"); }),
+);
+dropZone.addEventListener("drop", e => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  if (f) handleFile(f);
+});
+fileInput.addEventListener("change", e => {
+  const f = e.target.files[0];
+  if (f) handleFile(f);
+});
+
+document.getElementById("btn-download").addEventListener("click", downloadReport);
+document.getElementById("btn-reset").addEventListener("click", () => {
+  document.getElementById("report-shell").classList.remove("active");
+  document.getElementById("drop-shell").style.display = "flex";
+  fileInput.value = "";
+  lastHtml = "";
+});
+</script>
+</body>
+</html>

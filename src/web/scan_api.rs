@@ -13,7 +13,12 @@
 //! TODO: dedupe SSRF guard / probe list with `scan.rs` once the API surface
 //! settles. Currently duplicated so the existing browser scan stays untouched.
 
-use axum::{Json, extract::Query, http::{HeaderMap, StatusCode, header}, response::IntoResponse};
+use axum::{
+    Json,
+    extract::Query,
+    http::{HeaderMap, StatusCode, header},
+    response::IntoResponse,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -32,86 +37,406 @@ pub struct Probe {
 
 // Seed list. Port the rest from the JS PROBES array in `scan.rs` as needed.
 pub const PROBES: &[Probe] = &[
-    Probe { path: "/.env",                 label: ".env",                 sev: "critical" },
-    Probe { path: "/.env.production",      label: ".env.production",      sev: "critical" },
-    Probe { path: "/.env.local",           label: ".env.local",           sev: "critical" },
-    Probe { path: "/.env.staging",         label: ".env.staging",         sev: "critical" },
-    Probe { path: "/.env.backup",          label: ".env.backup",          sev: "critical" },
-    Probe { path: "/.git/config",          label: "Git config",           sev: "critical" },
-    Probe { path: "/.git/HEAD",            label: "Git HEAD",             sev: "critical" },
-    Probe { path: "/wp-config.php",        label: "WordPress config",     sev: "critical" },
-    Probe { path: "/wp-config.php.bak",    label: "WordPress config bak", sev: "critical" },
-    Probe { path: "/configuration.php",    label: "Joomla config",        sev: "critical" },
-    Probe { path: "/config.json",          label: "config.json",          sev: "critical" },
-    Probe { path: "/config.yml",           label: "config.yml",           sev: "critical" },
-    Probe { path: "/credentials.json",     label: "credentials.json",     sev: "critical" },
-    Probe { path: "/secrets.yml",          label: "secrets.yml",          sev: "critical" },
-    Probe { path: "/secrets.json",         label: "secrets.json",         sev: "critical" },
-    Probe { path: "/database.yml",         label: "Rails database.yml",   sev: "critical" },
-    Probe { path: "/application.yml",      label: "Spring application.yml", sev: "critical" },
-    Probe { path: "/settings.py",          label: "Django settings",      sev: "critical" },
-    Probe { path: "/backup.sql",           label: "SQL backup",           sev: "critical" },
-    Probe { path: "/database.sql",         label: "database.sql",         sev: "critical" },
-    Probe { path: "/dump.sql",             label: "dump.sql",             sev: "critical" },
-    Probe { path: "/backup.zip",           label: "Zip backup",           sev: "critical" },
-    Probe { path: "/backup.tar.gz",        label: "Tarball backup",       sev: "critical" },
-    Probe { path: "/db.sqlite3",           label: "SQLite3 database",     sev: "critical" },
-    Probe { path: "/id_rsa",               label: "SSH private key",      sev: "critical" },
-    Probe { path: "/.ssh/id_rsa",          label: ".ssh/id_rsa",          sev: "critical" },
-    Probe { path: "/server.key",           label: "server.key",           sev: "critical" },
-    Probe { path: "/.htpasswd",            label: ".htpasswd",            sev: "critical" },
-    Probe { path: "/.npmrc",               label: ".npmrc tokens",        sev: "critical" },
-    Probe { path: "/storage/logs/laravel.log", label: "Laravel log",      sev: "critical" },
-    Probe { path: "/wp-content/debug.log", label: "WordPress debug log",  sev: "critical" },
-    Probe { path: "/phpmyadmin/",          label: "phpMyAdmin",           sev: "high"     },
-    Probe { path: "/info.php",             label: "phpinfo",              sev: "high"     },
-    Probe { path: "/phpinfo.php",          label: "phpinfo (alt)",        sev: "high"     },
-    Probe { path: "/actuator",             label: "Spring actuator",      sev: "high"     },
-    Probe { path: "/actuator/env",         label: "Spring env dump",      sev: "high"     },
-    Probe { path: "/actuator/mappings",    label: "Spring route map",     sev: "high"     },
-    Probe { path: "/actuator/httptrace",   label: "Spring HTTP trace",    sev: "high"     },
-    Probe { path: "/api/admin",            label: "API /admin",           sev: "high"     },
-    Probe { path: "/api/v1/admin",         label: "API v1 /admin",        sev: "high"     },
-    Probe { path: "/api/users",            label: "API /users",           sev: "high"     },
-    Probe { path: "/api/config",           label: "API /config",          sev: "high"     },
-    Probe { path: "/wp-json/wp/v2/users",  label: "WordPress user enum",  sev: "high"     },
-    Probe { path: "/rails/info/routes",    label: "Rails routes",         sev: "high"     },
-    Probe { path: "/debug/pprof",          label: "Go pprof",             sev: "high"     },
-    Probe { path: "/elmah.axd",            label: "ELMAH log",            sev: "high"     },
-    Probe { path: "/_profiler/",           label: "Symfony profiler",     sev: "high"     },
-    Probe { path: "/admin/",               label: "Admin panel",          sev: "medium"   },
-    Probe { path: "/administrator/",       label: "Joomla admin",         sev: "medium"   },
-    Probe { path: "/wp-admin/",            label: "WordPress admin",      sev: "medium"   },
-    Probe { path: "/server-status",        label: "Apache status",        sev: "medium"   },
-    Probe { path: "/server-info",          label: "Apache info",          sev: "medium"   },
-    Probe { path: "/swagger.json",         label: "Swagger docs",         sev: "medium"   },
-    Probe { path: "/openapi.json",         label: "OpenAPI docs",         sev: "medium"   },
-    Probe { path: "/api-docs",             label: "API docs",             sev: "medium"   },
-    Probe { path: "/graphql",              label: "GraphQL",              sev: "medium"   },
-    Probe { path: "/xmlrpc.php",           label: "XML-RPC",              sev: "medium"   },
-    Probe { path: "/.DS_Store",            label: ".DS_Store",            sev: "medium"   },
-    Probe { path: "/.htaccess",            label: ".htaccess",            sev: "medium"   },
-    Probe { path: "/docker-compose.yml",   label: "Docker Compose",       sev: "medium"   },
-    Probe { path: "/.gitlab-ci.yml",       label: "GitLab CI config",     sev: "medium"   },
-    Probe { path: "/.travis.yml",          label: "Travis CI config",     sev: "medium"   },
-    Probe { path: "/Jenkinsfile",          label: "Jenkinsfile",          sev: "medium"   },
-    Probe { path: "/install.php",          label: "Install script",       sev: "medium"   },
-    Probe { path: "/console",              label: "Console",              sev: "medium"   },
-    Probe { path: "/.gitignore",           label: ".gitignore",           sev: "medium"   },
-    Probe { path: "/package.json",         label: "package.json",         sev: "medium"   },
-    Probe { path: "/composer.json",        label: "composer.json",        sev: "medium"   },
-    Probe { path: "/Dockerfile",           label: "Dockerfile",           sev: "low"      },
-    Probe { path: "/VERSION",              label: "VERSION file",         sev: "low"      },
-    Probe { path: "/README.md",            label: "README",               sev: "low"      },
-    Probe { path: "/crossdomain.xml",      label: "crossdomain.xml",      sev: "low"      },
-    Probe { path: "/wp-login.php",         label: "WordPress login",      sev: "info"     },
-    Probe { path: "/login",                label: "Login page",           sev: "info"     },
-    Probe { path: "/cpanel",               label: "cPanel",               sev: "info"     },
-    Probe { path: "/webmail",              label: "Webmail",              sev: "info"     },
-    Probe { path: "/actuator/health",      label: "Spring health",        sev: "info"     },
-    Probe { path: "/",                     label: "Root",                 sev: "info"     },
-    Probe { path: "/robots.txt",           label: "robots.txt",           sev: "info"     },
-    Probe { path: "/sitemap.xml",          label: "Sitemap",              sev: "info"     },
+    Probe {
+        path: "/.env",
+        label: ".env",
+        sev: "critical",
+    },
+    Probe {
+        path: "/.env.production",
+        label: ".env.production",
+        sev: "critical",
+    },
+    Probe {
+        path: "/.env.local",
+        label: ".env.local",
+        sev: "critical",
+    },
+    Probe {
+        path: "/.env.staging",
+        label: ".env.staging",
+        sev: "critical",
+    },
+    Probe {
+        path: "/.env.backup",
+        label: ".env.backup",
+        sev: "critical",
+    },
+    Probe {
+        path: "/.git/config",
+        label: "Git config",
+        sev: "critical",
+    },
+    Probe {
+        path: "/.git/HEAD",
+        label: "Git HEAD",
+        sev: "critical",
+    },
+    Probe {
+        path: "/wp-config.php",
+        label: "WordPress config",
+        sev: "critical",
+    },
+    Probe {
+        path: "/wp-config.php.bak",
+        label: "WordPress config bak",
+        sev: "critical",
+    },
+    Probe {
+        path: "/configuration.php",
+        label: "Joomla config",
+        sev: "critical",
+    },
+    Probe {
+        path: "/config.json",
+        label: "config.json",
+        sev: "critical",
+    },
+    Probe {
+        path: "/config.yml",
+        label: "config.yml",
+        sev: "critical",
+    },
+    Probe {
+        path: "/credentials.json",
+        label: "credentials.json",
+        sev: "critical",
+    },
+    Probe {
+        path: "/secrets.yml",
+        label: "secrets.yml",
+        sev: "critical",
+    },
+    Probe {
+        path: "/secrets.json",
+        label: "secrets.json",
+        sev: "critical",
+    },
+    Probe {
+        path: "/database.yml",
+        label: "Rails database.yml",
+        sev: "critical",
+    },
+    Probe {
+        path: "/application.yml",
+        label: "Spring application.yml",
+        sev: "critical",
+    },
+    Probe {
+        path: "/settings.py",
+        label: "Django settings",
+        sev: "critical",
+    },
+    Probe {
+        path: "/backup.sql",
+        label: "SQL backup",
+        sev: "critical",
+    },
+    Probe {
+        path: "/database.sql",
+        label: "database.sql",
+        sev: "critical",
+    },
+    Probe {
+        path: "/dump.sql",
+        label: "dump.sql",
+        sev: "critical",
+    },
+    Probe {
+        path: "/backup.zip",
+        label: "Zip backup",
+        sev: "critical",
+    },
+    Probe {
+        path: "/backup.tar.gz",
+        label: "Tarball backup",
+        sev: "critical",
+    },
+    Probe {
+        path: "/db.sqlite3",
+        label: "SQLite3 database",
+        sev: "critical",
+    },
+    Probe {
+        path: "/id_rsa",
+        label: "SSH private key",
+        sev: "critical",
+    },
+    Probe {
+        path: "/.ssh/id_rsa",
+        label: ".ssh/id_rsa",
+        sev: "critical",
+    },
+    Probe {
+        path: "/server.key",
+        label: "server.key",
+        sev: "critical",
+    },
+    Probe {
+        path: "/.htpasswd",
+        label: ".htpasswd",
+        sev: "critical",
+    },
+    Probe {
+        path: "/.npmrc",
+        label: ".npmrc tokens",
+        sev: "critical",
+    },
+    Probe {
+        path: "/storage/logs/laravel.log",
+        label: "Laravel log",
+        sev: "critical",
+    },
+    Probe {
+        path: "/wp-content/debug.log",
+        label: "WordPress debug log",
+        sev: "critical",
+    },
+    Probe {
+        path: "/phpmyadmin/",
+        label: "phpMyAdmin",
+        sev: "high",
+    },
+    Probe {
+        path: "/info.php",
+        label: "phpinfo",
+        sev: "high",
+    },
+    Probe {
+        path: "/phpinfo.php",
+        label: "phpinfo (alt)",
+        sev: "high",
+    },
+    Probe {
+        path: "/actuator",
+        label: "Spring actuator",
+        sev: "high",
+    },
+    Probe {
+        path: "/actuator/env",
+        label: "Spring env dump",
+        sev: "high",
+    },
+    Probe {
+        path: "/actuator/mappings",
+        label: "Spring route map",
+        sev: "high",
+    },
+    Probe {
+        path: "/actuator/httptrace",
+        label: "Spring HTTP trace",
+        sev: "high",
+    },
+    Probe {
+        path: "/api/admin",
+        label: "API /admin",
+        sev: "high",
+    },
+    Probe {
+        path: "/api/v1/admin",
+        label: "API v1 /admin",
+        sev: "high",
+    },
+    Probe {
+        path: "/api/users",
+        label: "API /users",
+        sev: "high",
+    },
+    Probe {
+        path: "/api/config",
+        label: "API /config",
+        sev: "high",
+    },
+    Probe {
+        path: "/wp-json/wp/v2/users",
+        label: "WordPress user enum",
+        sev: "high",
+    },
+    Probe {
+        path: "/rails/info/routes",
+        label: "Rails routes",
+        sev: "high",
+    },
+    Probe {
+        path: "/debug/pprof",
+        label: "Go pprof",
+        sev: "high",
+    },
+    Probe {
+        path: "/elmah.axd",
+        label: "ELMAH log",
+        sev: "high",
+    },
+    Probe {
+        path: "/_profiler/",
+        label: "Symfony profiler",
+        sev: "high",
+    },
+    Probe {
+        path: "/admin/",
+        label: "Admin panel",
+        sev: "medium",
+    },
+    Probe {
+        path: "/administrator/",
+        label: "Joomla admin",
+        sev: "medium",
+    },
+    Probe {
+        path: "/wp-admin/",
+        label: "WordPress admin",
+        sev: "medium",
+    },
+    Probe {
+        path: "/server-status",
+        label: "Apache status",
+        sev: "medium",
+    },
+    Probe {
+        path: "/server-info",
+        label: "Apache info",
+        sev: "medium",
+    },
+    Probe {
+        path: "/swagger.json",
+        label: "Swagger docs",
+        sev: "medium",
+    },
+    Probe {
+        path: "/openapi.json",
+        label: "OpenAPI docs",
+        sev: "medium",
+    },
+    Probe {
+        path: "/api-docs",
+        label: "API docs",
+        sev: "medium",
+    },
+    Probe {
+        path: "/graphql",
+        label: "GraphQL",
+        sev: "medium",
+    },
+    Probe {
+        path: "/xmlrpc.php",
+        label: "XML-RPC",
+        sev: "medium",
+    },
+    Probe {
+        path: "/.DS_Store",
+        label: ".DS_Store",
+        sev: "medium",
+    },
+    Probe {
+        path: "/.htaccess",
+        label: ".htaccess",
+        sev: "medium",
+    },
+    Probe {
+        path: "/docker-compose.yml",
+        label: "Docker Compose",
+        sev: "medium",
+    },
+    Probe {
+        path: "/.gitlab-ci.yml",
+        label: "GitLab CI config",
+        sev: "medium",
+    },
+    Probe {
+        path: "/.travis.yml",
+        label: "Travis CI config",
+        sev: "medium",
+    },
+    Probe {
+        path: "/Jenkinsfile",
+        label: "Jenkinsfile",
+        sev: "medium",
+    },
+    Probe {
+        path: "/install.php",
+        label: "Install script",
+        sev: "medium",
+    },
+    Probe {
+        path: "/console",
+        label: "Console",
+        sev: "medium",
+    },
+    Probe {
+        path: "/.gitignore",
+        label: ".gitignore",
+        sev: "medium",
+    },
+    Probe {
+        path: "/package.json",
+        label: "package.json",
+        sev: "medium",
+    },
+    Probe {
+        path: "/composer.json",
+        label: "composer.json",
+        sev: "medium",
+    },
+    Probe {
+        path: "/Dockerfile",
+        label: "Dockerfile",
+        sev: "low",
+    },
+    Probe {
+        path: "/VERSION",
+        label: "VERSION file",
+        sev: "low",
+    },
+    Probe {
+        path: "/README.md",
+        label: "README",
+        sev: "low",
+    },
+    Probe {
+        path: "/crossdomain.xml",
+        label: "crossdomain.xml",
+        sev: "low",
+    },
+    Probe {
+        path: "/wp-login.php",
+        label: "WordPress login",
+        sev: "info",
+    },
+    Probe {
+        path: "/login",
+        label: "Login page",
+        sev: "info",
+    },
+    Probe {
+        path: "/cpanel",
+        label: "cPanel",
+        sev: "info",
+    },
+    Probe {
+        path: "/webmail",
+        label: "Webmail",
+        sev: "info",
+    },
+    Probe {
+        path: "/actuator/health",
+        label: "Spring health",
+        sev: "info",
+    },
+    Probe {
+        path: "/",
+        label: "Root",
+        sev: "info",
+    },
+    Probe {
+        path: "/robots.txt",
+        label: "robots.txt",
+        sev: "info",
+    },
+    Probe {
+        path: "/sitemap.xml",
+        label: "Sitemap",
+        sev: "info",
+    },
 ];
 
 #[derive(Deserialize)]
@@ -231,7 +556,7 @@ fn scan_rate_exceeded(ip: &str) -> bool {
     let mut map = SCAN_RATE
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .unwrap();
+        .expect("scan rate-limiter mutex poisoned");
     let bucket = map.entry(ip.to_string()).or_insert(ScanBucket {
         minute: now_min,
         count: 0,
@@ -301,22 +626,170 @@ pub async fn run_get(
 }
 
 fn format_response(result: ScanResult, format: Option<&str>) -> axum::response::Response {
-    if matches!(format, Some("csv")) {
-        let csv = result_to_csv(&result);
-        (
-            [
-                (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
-                (
-                    header::CONTENT_DISPOSITION,
-                    "attachment; filename=\"whobelooking-scan.csv\"",
-                ),
-            ],
-            csv,
-        )
-            .into_response()
-    } else {
-        Json(result).into_response()
+    match format {
+        Some("csv") => {
+            let csv = result_to_csv(&result);
+            (
+                [
+                    (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        "attachment; filename=\"whobelooking-scan.csv\"",
+                    ),
+                ],
+                csv,
+            )
+                .into_response()
+        }
+        Some("html") => {
+            let html = render_scan_html(&result);
+            // Inline (not attachment) — same WASM-rendered look as `/try`'s
+            // output, so the API "outputs a .html file essentially as a
+            // product" the way the user asked. Callers who want it as a
+            // download can curl > file.html themselves.
+            (
+                [
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
+                html,
+            )
+                .into_response()
+        }
+        _ => Json(result).into_response(),
     }
+}
+
+/// Standalone HTML view of a surface-area scan. Same cyberpunk aesthetic as
+/// `/try`'s report and the `demo.html` landing — keeps the brand experience
+/// consistent regardless of whether the user fed us logs or a URL.
+fn render_scan_html(r: &ScanResult) -> String {
+    use std::fmt::Write;
+    let s = &r.summary;
+    let target = html_escape(&r.target);
+    let target_host = html_escape(host_from_target(&r.target));
+    let reachable = if s.reachable { "yes" } else { "no" };
+    let mut accessible: Vec<&ProbeOutcome> =
+        r.probes.iter().filter(|p| p.kind == "accessible").collect();
+    let mut walls: Vec<&ProbeOutcome> = r.probes.iter().filter(|p| p.kind == "wall").collect();
+    let sev_rank = |s: &str| match s {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 4,
+    };
+    accessible.sort_by_key(|p| (sev_rank(&p.sev), p.path.clone()));
+    walls.sort_by_key(|p| (sev_rank(&p.sev), p.path.clone()));
+
+    let sev_color = |sev: &str| match sev {
+        "critical" => "var(--orange)",
+        "high" => "#fbbf24",
+        "medium" => "var(--purple)",
+        "low" => "var(--muted)",
+        _ => "var(--accent)",
+    };
+
+    let mut rows = String::new();
+    let emit_row = |out: &mut String, p: &ProbeOutcome| {
+        let _ = write!(
+            out,
+            r#"<tr><td style="padding:6px 12px;border-bottom:1px solid var(--border);color:{c};font-weight:700;font-size:10px;letter-spacing:.08em;text-transform:uppercase">{sev}</td>
+              <td style="padding:6px 12px;border-bottom:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:11px">{status}</td>
+              <td style="padding:6px 12px;border-bottom:1px solid var(--border);color:var(--accent);font-family:var(--mono);font-size:11px">{path}</td>
+              <td style="padding:6px 12px;border-bottom:1px solid var(--border);color:var(--muted);font-size:11px">{label}</td></tr>"#,
+            c = sev_color(&p.sev),
+            sev = html_escape(&p.sev),
+            status = p.status,
+            path = html_escape(&p.path),
+            label = html_escape(&p.label),
+        );
+    };
+    if !accessible.is_empty() {
+        rows.push_str(r#"<tr><td colspan="4" style="padding:16px 12px 6px;color:var(--orange);font-weight:700;font-size:10px;letter-spacing:.12em;text-transform:uppercase">Accessible · 2xx — real exposure</td></tr>"#);
+        for p in &accessible {
+            emit_row(&mut rows, p);
+        }
+    }
+    if !walls.is_empty() {
+        rows.push_str(r#"<tr><td colspan="4" style="padding:16px 12px 6px;color:#fbbf24;font-weight:700;font-size:10px;letter-spacing:.12em;text-transform:uppercase">Wall · 401/403 — server processed (WAF/auth)</td></tr>"#);
+        for p in &walls {
+            emit_row(&mut rows, p);
+        }
+    }
+
+    let no_hits = if accessible.is_empty() && walls.is_empty() {
+        r#"<div class="empty">No hits. Surface looks clean against the probe set.</div>"#
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    let mut html = String::with_capacity(8 * 1024);
+    let _ = write!(
+        html,
+        r##"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{target_host} — whobelooking surface scan</title>
+<meta name="generator" content="whobelooking /api/scan/run">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {{
+  --bg:#050508; --surface:#0d0d14; --border:rgba(0,217,255,.15); --text:#e8e8e8;
+  --muted:#9ca3af; --accent:#00d9ff; --orange:#ff6b35; --teal:#00ffcc; --purple:#9d4edd;
+  --mono:'JetBrains Mono','SF Mono',Consolas,monospace;
+  --display:'Orbitron',sans-serif;
+}}
+*,*::before,*::after{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;line-height:1.5;padding:24px;min-height:100vh}}
+.frame{{max-width:840px;margin:0 auto;background:var(--surface);border:1px solid var(--border);border-radius:6px;overflow:hidden}}
+.head{{padding:20px 24px;border-bottom:1px solid var(--border);background:#0a0a10}}
+.kicker{{font-family:var(--display);font-size:10px;color:var(--accent);letter-spacing:.18em;text-transform:uppercase;font-weight:700}}
+.title{{font-family:var(--mono);font-size:20px;color:#fff;margin-top:4px;font-weight:600;word-break:break-all}}
+.kv{{padding:18px 24px;font-size:12px}}
+.kv table{{width:100%;border-collapse:collapse}}
+.kv td{{padding:4px 0}}
+.kv td.k{{color:var(--muted);width:140px;letter-spacing:.05em;text-transform:uppercase;font-size:10px}}
+.kv td.v{{color:var(--text);font-family:var(--mono)}}
+.hits{{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;background:#0a0a10;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}}
+.empty{{padding:24px;color:var(--teal);font-size:13px;text-align:center;letter-spacing:.05em;background:#0a0a10;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}}
+.foot{{padding:14px 24px;border-top:1px solid var(--border);background:#0a0a10;color:var(--muted);font-size:10px;letter-spacing:.12em;text-transform:uppercase}}
+.foot a{{color:var(--accent);text-decoration:none}}
+</style></head><body>
+<div class="frame">
+  <div class="head">
+    <div class="kicker">whobelooking · surface-area scan</div>
+    <div class="title">{target_host}</div>
+  </div>
+  <div class="kv">
+    <table>
+      <tr><td class="k">Target</td><td class="v">{target}</td></tr>
+      <tr><td class="k">Reachable</td><td class="v">{reachable}</td></tr>
+      <tr><td class="k">Probed</td><td class="v">{total}</td></tr>
+      <tr><td class="k">Hits</td><td class="v">{hits} <span style="color:var(--orange)">({critical} critical)</span></td></tr>
+      <tr><td class="k">Elapsed</td><td class="v">{elapsed} ms</td></tr>
+    </table>
+  </div>
+  {no_hits}
+  {hits_table}
+  <div class="foot">whobelooking · Unlicense · <a href="https://github.com/cochranblock/whobelooking">github.com/cochranblock/whobelooking</a></div>
+</div></body></html>"##,
+        target_host = target_host,
+        target = target,
+        reachable = reachable,
+        total = s.total,
+        hits = s.hits,
+        critical = s.critical_hits,
+        elapsed = r.elapsed_ms,
+        no_hits = no_hits,
+        hits_table = if rows.is_empty() {
+            String::new()
+        } else {
+            format!("<table class=\"hits\">{}</table>", rows)
+        },
+    );
+    html
 }
 
 fn csv_escape(s: &str) -> String {
@@ -362,7 +835,7 @@ fn email_rate_exceeded(ip: &str) -> bool {
     let mut map = EMAIL_RATE
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .unwrap();
+        .expect("email rate-limiter mutex poisoned");
     let bucket = map.entry(ip.to_string()).or_insert(EmailBucket {
         minute: now_min,
         count: 0,
@@ -436,10 +909,18 @@ fn render_plain_email(result: &ScanResult, attached: &[&str]) -> String {
     let _ = writeln!(out, "  Target       {}", result.target);
     let _ = writeln!(out, "  Reachable    {}", reachable);
     let _ = writeln!(out, "  Probed       {}", s.total);
-    let _ = writeln!(out, "  Hits         {}  ({} critical)", s.hits, s.critical_hits);
+    let _ = writeln!(
+        out,
+        "  Hits         {}  ({} critical)",
+        s.hits, s.critical_hits
+    );
     let _ = writeln!(out, "  Elapsed      {} ms", result.elapsed_ms);
 
-    let accessible: Vec<&ProbeOutcome> = result.probes.iter().filter(|p| p.kind == "accessible").collect();
+    let accessible: Vec<&ProbeOutcome> = result
+        .probes
+        .iter()
+        .filter(|p| p.kind == "accessible")
+        .collect();
     let walls: Vec<&ProbeOutcome> = result.probes.iter().filter(|p| p.kind == "wall").collect();
 
     if !accessible.is_empty() {
@@ -505,7 +986,11 @@ fn render_html_email(result: &ScanResult, attached: &[&str]) -> String {
     };
 
     let mut hit_rows = String::new();
-    let accessible: Vec<&ProbeOutcome> = result.probes.iter().filter(|p| p.kind == "accessible").collect();
+    let accessible: Vec<&ProbeOutcome> = result
+        .probes
+        .iter()
+        .filter(|p| p.kind == "accessible")
+        .collect();
     let walls: Vec<&ProbeOutcome> = result.probes.iter().filter(|p| p.kind == "wall").collect();
     let sev_rank = |s: &str| match s {
         "critical" => 0,
@@ -520,7 +1005,9 @@ fn render_html_email(result: &ScanResult, attached: &[&str]) -> String {
         hit_rows.push_str(
             "<tr><td colspan=\"4\" style=\"padding:18px 12px 6px;color:#ff6b35;font-weight:700;font-size:11px;letter-spacing:.08em;text-transform:uppercase\">accessible · 2xx</td></tr>",
         );
-        for p in sorted { hit_rows.push_str(&row(p)); }
+        for p in sorted {
+            hit_rows.push_str(&row(p));
+        }
     }
     if !walls.is_empty() {
         let mut sorted = walls.clone();
@@ -528,7 +1015,9 @@ fn render_html_email(result: &ScanResult, attached: &[&str]) -> String {
         hit_rows.push_str(
             "<tr><td colspan=\"4\" style=\"padding:18px 12px 6px;color:#fbbf24;font-weight:700;font-size:11px;letter-spacing:.08em;text-transform:uppercase\">wall · 401/403 (usually WAF / auth)</td></tr>",
         );
-        for p in sorted { hit_rows.push_str(&row(p)); }
+        for p in sorted {
+            hit_rows.push_str(&row(p));
+        }
     }
 
     let no_hits_block = if accessible.is_empty() && walls.is_empty() {
@@ -578,7 +1067,9 @@ fn render_html_email(result: &ScanResult, attached: &[&str]) -> String {
         critical = s.critical_hits,
         elapsed = result.elapsed_ms,
         no_hits_block = no_hits_block,
-        hits_table = if hit_rows.is_empty() { String::new() } else {
+        hits_table = if hit_rows.is_empty() {
+            String::new()
+        } else {
             format!(
                 "<table cellspacing=\"0\" cellpadding=\"0\" style=\"width:100%;margin-top:12px;border-collapse:collapse;font-size:13px;background:#050508;border-radius:6px;overflow:hidden;border:1px solid #1f2937\">{}</table>",
                 hit_rows
@@ -604,12 +1095,24 @@ fn send_scan_email(to_addr: &str, result: &ScanResult, format: &str) -> Result<(
 
     let want_json = matches!(format, "json" | "both" | "");
     let want_csv = matches!(format, "csv" | "both" | "");
-    let want_json = if !matches!(format, "json" | "csv" | "both") { true } else { want_json };
-    let want_csv = if !matches!(format, "json" | "csv" | "both") { true } else { want_csv };
+    let want_json = if !matches!(format, "json" | "csv" | "both") {
+        true
+    } else {
+        want_json
+    };
+    let want_csv = if !matches!(format, "json" | "csv" | "both") {
+        true
+    } else {
+        want_csv
+    };
 
     let mut attached: Vec<&str> = Vec::new();
-    if want_json { attached.push("whobelooking-scan.json"); }
-    if want_csv { attached.push("whobelooking-scan.csv"); }
+    if want_json {
+        attached.push("whobelooking-scan.json");
+    }
+    if want_csv {
+        attached.push("whobelooking-scan.csv");
+    }
 
     let plain = render_plain_email(result, &attached);
     let html = render_html_email(result, &attached);
@@ -647,21 +1150,21 @@ fn send_scan_email(to_addr: &str, result: &ScanResult, format: &str) -> Result<(
     let mut multipart = MultiPart::mixed().multipart(alt);
 
     if want_json {
-        let json_bytes = serde_json::to_vec_pretty(result)
-            .map_err(|e| format!("json serialize: {}", e))?;
-        multipart = multipart.singlepart(
-            Attachment::new("whobelooking-scan.json".to_string()).body(
+        let json_bytes =
+            serde_json::to_vec_pretty(result).map_err(|e| format!("json serialize: {}", e))?;
+        multipart =
+            multipart.singlepart(Attachment::new("whobelooking-scan.json".to_string()).body(
                 json_bytes,
-                ContentType::parse("application/json").unwrap(),
-            ),
-        );
+                ContentType::parse("application/json").expect("static content type"),
+            ));
     }
     if want_csv {
         let csv_bytes = result_to_csv(result).into_bytes();
-        multipart = multipart.singlepart(
-            Attachment::new("whobelooking-scan.csv".to_string())
-                .body(csv_bytes, ContentType::parse("text/csv").unwrap()),
-        );
+        multipart =
+            multipart.singlepart(Attachment::new("whobelooking-scan.csv".to_string()).body(
+                csv_bytes,
+                ContentType::parse("text/csv").expect("static content type"),
+            ));
     }
 
     let msg = Message::builder()
@@ -705,7 +1208,11 @@ async fn run_inner(
     }
 
     let selected: Vec<Probe> = match severity.unwrap_or("all") {
-        "critical" => PROBES.iter().copied().filter(|p| p.sev == "critical").collect(),
+        "critical" => PROBES
+            .iter()
+            .copied()
+            .filter(|p| p.sev == "critical")
+            .collect(),
         "high" => PROBES
             .iter()
             .copied()
@@ -786,11 +1293,24 @@ async fn run_inner(
         .filter(|o| o.err.is_none() && o.status != 0)
         .count();
     let reachable = total > 0 && reachable_count * 2 >= total;
+    let elapsed_ms = t0.elapsed().as_millis() as u64;
+
+    // OTEL metrics — no-op if `otel` feature is off, real OTLP emission
+    // when on. `host` lives on the scan_summary attribute so operators
+    // can slice by target without per-IP cardinality explosion.
+    let m = crate::otel::metrics::instruments();
+    let host_label = host_from_target(&normalized).to_string();
+    m.scan_runs_add(1, &[("target.host", &host_label)]);
+    m.scan_duration_record(elapsed_ms, &[("target.host", &host_label)]);
+    m.scan_probes_record(total as u64, &[("target.host", &host_label)]);
+    if hits > 0 {
+        m.scan_hits_add(hits as u64, &[("target.host", &host_label)]);
+    }
 
     Ok(Json(ScanResult {
         target: normalized,
         started_at,
-        elapsed_ms: t0.elapsed().as_millis() as u64,
+        elapsed_ms,
         probes: outcomes,
         summary: ScanSummary {
             total,

@@ -402,10 +402,10 @@ mod tests {
             std::process::id(),
             now_nanos()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = sled::open(dir.join("orders.db")).unwrap();
-        let orders = db.open_tree("orders").unwrap();
-        let audit = db.open_tree("audit").unwrap();
+        std::fs::create_dir_all(&dir).expect("tmp_store: create tmpdir");
+        let db = sled::open(dir.join("orders.db")).expect("tmp_store: open sled db");
+        let orders = db.open_tree("orders").expect("tmp_store: open orders tree");
+        let audit = db.open_tree("audit").expect("tmp_store: open audit tree");
         Store { db, orders, audit }
     }
 
@@ -414,13 +414,15 @@ mod tests {
         let s = tmp_store();
         let o = s
             .create("o1", "a@b", "site", "csv", "starter", "1.2.3.4", "test")
-            .unwrap();
+            .expect("create o1 must succeed on fresh store");
         assert_eq!(o.state, OrderState::Pending);
         let o2 = s
             .transition("o1", OrderState::Approved, "test", None)
-            .unwrap();
+            .expect("Pending → Approved is a legal transition");
         assert_eq!(o2.state, OrderState::Approved);
-        let o3 = s.transition("o1", OrderState::Ready, "test", None).unwrap();
+        let o3 = s
+            .transition("o1", OrderState::Ready, "test", None)
+            .expect("Approved → Ready is a legal transition");
         assert_eq!(o3.state, OrderState::Ready);
     }
 
@@ -428,11 +430,11 @@ mod tests {
     fn illegal_transition_rejected() {
         let s = tmp_store();
         s.create("o1", "a@b", "site", "csv", "starter", "1.2.3.4", "test")
-            .unwrap();
+            .expect("create o1 must succeed on fresh store");
         // Pending → Ready is not legal; must go through Approved.
         let err = s
             .transition("o1", OrderState::Ready, "test", None)
-            .unwrap_err();
+            .expect_err("Pending → Ready must reject as IllegalTransition");
         assert!(matches!(err, Error::IllegalTransition(_, _)));
     }
 
@@ -440,14 +442,14 @@ mod tests {
     fn double_transition_returns_conflict() {
         let s = tmp_store();
         s.create("o1", "a@b", "site", "csv", "starter", "1.2.3.4", "test")
-            .unwrap();
+            .expect("create o1 must succeed on fresh store");
         s.transition("o1", OrderState::Approved, "test", None)
-            .unwrap();
+            .expect("Pending → Approved is a legal transition");
         // Second attempt to transition Pending→Approved fails because state
         // is already Approved (illegal transition Approved→Approved).
         let err = s
             .transition("o1", OrderState::Approved, "test", None)
-            .unwrap_err();
+            .expect_err("Approved → Approved must reject as IllegalTransition");
         assert!(matches!(err, Error::IllegalTransition(_, _)));
     }
 
@@ -464,13 +466,13 @@ mod tests {
                 "1.2.3.4",
                 "test",
             )
-            .unwrap();
+            .expect("MAX_PENDING creates must all succeed");
         }
         let err = s
             .create(
                 "overflow", "a@b", "site", "csv", "starter", "1.2.3.4", "test",
             )
-            .unwrap_err();
+            .expect_err("MAX_PENDING+1 create must reject as AtCapacity");
         assert!(matches!(err, Error::AtCapacity(_)));
     }
 
@@ -478,17 +480,19 @@ mod tests {
     fn audit_records_each_step() {
         let s = tmp_store();
         s.create("o1", "a@b", "site", "csv", "starter", "1.2.3.4", "test")
-            .unwrap();
+            .expect("create o1 must succeed on fresh store");
         s.transition("o1", OrderState::Approved, "operator-a", None)
-            .unwrap();
+            .expect("Pending → Approved is a legal transition");
         s.transition(
             "o1",
             OrderState::Ready,
             "operator-b",
             Some("uploaded report.pdf".into()),
         )
-        .unwrap();
-        let history = s.audit_for("o1").unwrap();
+        .expect("Approved → Ready is a legal transition");
+        let history = s
+            .audit_for("o1")
+            .expect("audit_for o1 returns history after transitions");
         assert_eq!(history.len(), 3);
         assert_eq!(history[0].to, OrderState::Pending);
         assert_eq!(history[1].to, OrderState::Approved);
