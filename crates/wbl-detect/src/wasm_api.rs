@@ -19,6 +19,9 @@
 //!      * `render_report(text, source_label)` — parse + aggregate + render in
 //!        one call, no enrichment. Used for the fast first paint before the
 //!        JS layer has resolved any DoH/RDAP.
+//!      * `getProbes()` — canonical surface-area probe list as a JS array of
+//!        `{path, label, sev}`. The `/scan` page calls this once at startup
+//!        instead of keeping a separate hard-coded JS array.  (f406)
 
 use crate::aggregate::{f401, f402, f403, t108};
 use crate::parse::f400;
@@ -230,4 +233,15 @@ pub fn render_report(text: &str, source_label: &str) -> String {
     let parsed = f400(text);
     let report = f401(&parsed.events);
     f405(&report, source_label)
+}
+
+/// Canonical surface-area probe list — `{path, label, sev}` objects.
+/// The `/scan` page calls this once at startup so the browser drives its
+/// own probe list without a separate hard-coded JS array.
+///
+/// f406 = get_probes
+#[wasm_bindgen(js_name = getProbes)]
+pub fn f406() -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(crate::probes::PROBES)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }

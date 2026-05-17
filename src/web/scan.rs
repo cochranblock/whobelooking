@@ -577,7 +577,7 @@ a:hover{text-decoration:underline}
 <p class="sub" style="margin-bottom:.5rem">Real HEAD requests against your domain — actual status codes, not browser guesses. <strong style="color:var(--green)">Free</strong></p>
 <p class="sub">Enter your domain and we'll probe 140+ attack paths and tell you exactly what's exposed.</p>
 
-<p class="sub" style="color:var(--green);margin-top:.4rem"><strong>Coming soon:</strong> browser-side scan — same probes, zero server cost.</p>
+<p class="sub" style="color:var(--green);margin-top:.4rem">135 probe paths. Browser drives the scan via WASM — same probe list as the API, no extra server load.</p>
 
 <div class="input-row">
   <input type="text" id="url" placeholder="https://example.com" autocomplete="off" spellcheck="false">
@@ -626,9 +626,19 @@ a:hover{text-decoration:underline}
   <span id="feedback-status" style="margin-left:.6rem;font-size:.75rem;color:var(--muted)"></span>
 </div>
 
-<script>
+<script type="module">
+import init, { getProbes } from "/detect/wbl_detect.js";
+
 const STRIPE_PK = '__STRIPE_PK__';
 let stripe = null, stripeElements = null, gateToken = null, pendingUrl = null, paymentIntentId = null;
+
+let PROBES = [];
+const wasmReady = init("/detect/wbl_detect_bg.wasm").then(() => {
+  PROBES = getProbes();
+}).catch(() => {
+  // WASM failed — page still functions but probe list is empty.
+  console.error("whobelooking: WASM init failed; probe list unavailable");
+});
 
 async function sendFeedback() {
   const btn = document.getElementById('feedback-btn');
@@ -723,152 +733,8 @@ async function finalizeCharge(success) {
   } catch {}
 }
 
-const PROBES = [
-  // ---- CRITICAL — secrets, keys, raw data ----
-  { path:'/.env',                        label:'.env',                        sev:'critical' },
-  { path:'/.env.local',                  label:'.env.local',                  sev:'critical' },
-  { path:'/.env.production',             label:'.env.production',             sev:'critical' },
-  { path:'/.env.development',            label:'.env.development',            sev:'critical' },
-  { path:'/.env.staging',                label:'.env.staging',                sev:'critical' },
-  { path:'/.env.backup',                 label:'.env.backup',                 sev:'critical' },
-  { path:'/.env.bak',                    label:'.env.bak',                    sev:'critical' },
-  { path:'/web.config',                  label:'web.config',                  sev:'critical' },
-  { path:'/config.php',                  label:'PHP config',                  sev:'critical' },
-  { path:'/config.php.bak',             label:'PHP config backup',           sev:'critical' },
-  { path:'/wp-config.php',              label:'WordPress config',            sev:'critical' },
-  { path:'/wp-config.php.bak',          label:'WordPress config backup',     sev:'critical' },
-  { path:'/configuration.php',          label:'Joomla config',               sev:'critical' },
-  { path:'/config.yml',                  label:'config.yml',                  sev:'critical' },
-  { path:'/config.yaml',                 label:'config.yaml',                 sev:'critical' },
-  { path:'/config.json',                 label:'config.json',                 sev:'critical' },
-  { path:'/settings.py',                 label:'Django settings',             sev:'critical' },
-  { path:'/local_settings.py',           label:'Django local settings',       sev:'critical' },
-  { path:'/database.yml',                label:'Rails database.yml',          sev:'critical' },
-  { path:'/config/database.yml',         label:'Rails config/database.yml',   sev:'critical' },
-  { path:'/application.yml',             label:'Spring application.yml',      sev:'critical' },
-  { path:'/application.properties',      label:'Spring application.properties',sev:'critical' },
-  { path:'/credentials.json',            label:'credentials.json',            sev:'critical' },
-  { path:'/secrets.json',                label:'secrets.json',                sev:'critical' },
-  { path:'/secrets.yml',                 label:'secrets.yml',                 sev:'critical' },
-  { path:'/secrets.yaml',                label:'secrets.yaml',                sev:'critical' },
-  { path:'/.git/HEAD',                   label:'Git HEAD',                    sev:'critical' },
-  { path:'/.git/config',                 label:'Git config',                  sev:'critical' },
-  { path:'/.git/COMMIT_EDITMSG',         label:'Git last commit msg',         sev:'critical' },
-  { path:'/.gitconfig',                  label:'.gitconfig',                  sev:'critical' },
-  { path:'/backup.sql',                  label:'SQL backup',                  sev:'critical' },
-  { path:'/db.sql',                      label:'db.sql',                      sev:'critical' },
-  { path:'/database.sql',                label:'database.sql',                sev:'critical' },
-  { path:'/dump.sql',                    label:'dump.sql',                    sev:'critical' },
-  { path:'/backup.tar.gz',               label:'Tarball backup',              sev:'critical' },
-  { path:'/backup.zip',                  label:'Zip backup',                  sev:'critical' },
-  { path:'/site.tar.gz',                 label:'Site archive',                sev:'critical' },
-  { path:'/www.tar.gz',                  label:'www archive',                 sev:'critical' },
-  { path:'/database.sqlite',             label:'SQLite database',             sev:'critical' },
-  { path:'/db.sqlite3',                  label:'SQLite3 database',            sev:'critical' },
-  { path:'/id_rsa',                      label:'SSH private key',             sev:'critical' },
-  { path:'/.ssh/id_rsa',                 label:'.ssh/id_rsa',                 sev:'critical' },
-  { path:'/private.key',                 label:'private.key',                 sev:'critical' },
-  { path:'/server.key',                  label:'server.key',                  sev:'critical' },
-  { path:'/.npmrc',                      label:'.npmrc (registry tokens)',     sev:'critical' },
-  { path:'/.htpasswd',                   label:'.htpasswd',                   sev:'critical' },
-  { path:'/storage/logs/laravel.log',    label:'Laravel log',                 sev:'critical' },
-  { path:'/laravel.log',                 label:'Laravel log (root)',          sev:'critical' },
-  { path:'/wp-content/debug.log',        label:'WordPress debug log',         sev:'critical' },
-  // ---- HIGH — admin surfaces, info leaks, framework internals ----
-  { path:'/phpmyadmin/',                 label:'phpMyAdmin',                  sev:'high'     },
-  { path:'/pma/',                        label:'phpMyAdmin (pma)',             sev:'high'     },
-  { path:'/info.php',                    label:'phpinfo',                     sev:'high'     },
-  { path:'/phpinfo.php',                 label:'phpinfo (alt)',                sev:'high'     },
-  { path:'/test.php',                    label:'test.php',                    sev:'high'     },
-  { path:'/actuator',                    label:'Spring actuator',             sev:'high'     },
-  { path:'/actuator/env',               label:'Spring env dump',             sev:'high'     },
-  { path:'/actuator/beans',             label:'Spring beans',                sev:'high'     },
-  { path:'/actuator/mappings',           label:'Spring route map',            sev:'high'     },
-  { path:'/actuator/httptrace',          label:'Spring HTTP trace',           sev:'high'     },
-  { path:'/actuator/loggers',            label:'Spring loggers',              sev:'high'     },
-  { path:'/actuator/configprops',        label:'Spring config props',         sev:'high'     },
-  { path:'/api/users',                   label:'API /users',                  sev:'high'     },
-  { path:'/api/v1/users',               label:'API v1 /users',               sev:'high'     },
-  { path:'/api/admin',                   label:'API /admin',                  sev:'high'     },
-  { path:'/api/v1/admin',               label:'API v1 /admin',               sev:'high'     },
-  { path:'/api/config',                  label:'API /config',                 sev:'high'     },
-  { path:'/api/v1/config',              label:'API v1 /config',              sev:'high'     },
-  { path:'/.svn/entries',               label:'SVN entries',                 sev:'high'     },
-  { path:'/.svn/wc.db',                 label:'SVN database',                sev:'high'     },
-  { path:'/package.json',               label:'package.json',                sev:'high'     },
-  { path:'/composer.json',              label:'composer.json',               sev:'high'     },
-  { path:'/_profiler/',                  label:'Symfony profiler',            sev:'high'     },
-  { path:'/elmah.axd',                  label:'ELMAH error log (ASP.NET)',    sev:'high'     },
-  { path:'/trace.axd',                  label:'ASP.NET trace',               sev:'high'     },
-  { path:'/wp-json/wp/v2/users',        label:'WordPress user enum',         sev:'high'     },
-  { path:'/rails/info/routes',          label:'Rails routes',                sev:'high'     },
-  { path:'/rails/info/properties',      label:'Rails properties',            sev:'high'     },
-  { path:'/debug/pprof',                label:'Go pprof',                    sev:'high'     },
-  { path:'/debug/',                      label:'Debug panel',                 sev:'high'     },
-  // ---- MEDIUM — CI/CD, dev files, admin panels ----
-  { path:'/admin/',                      label:'Admin panel',                 sev:'medium'   },
-  { path:'/administrator/',              label:'Joomla admin',                sev:'medium'   },
-  { path:'/wp-admin/',                   label:'WordPress admin',             sev:'medium'   },
-  { path:'/server-status',              label:'Apache status',               sev:'medium'   },
-  { path:'/server-info',                label:'Apache info',                 sev:'medium'   },
-  { path:'/graphql',                     label:'GraphQL',                     sev:'medium'   },
-  { path:'/swagger.json',               label:'Swagger docs',                sev:'medium'   },
-  { path:'/openapi.json',               label:'OpenAPI docs',                sev:'medium'   },
-  { path:'/api-docs',                    label:'API docs',                    sev:'medium'   },
-  { path:'/api/docs',                    label:'API docs (alt)',              sev:'medium'   },
-  { path:'/xmlrpc.php',                  label:'XML-RPC',                     sev:'medium'   },
-  { path:'/.DS_Store',                   label:'.DS_Store',                   sev:'medium'   },
-  { path:'/.htaccess',                   label:'.htaccess',                   sev:'medium'   },
-  { path:'/docker-compose.yml',          label:'Docker Compose',              sev:'medium'   },
-  { path:'/docker-compose.yaml',         label:'Docker Compose (yaml)',       sev:'medium'   },
-  { path:'/docker-compose.override.yml', label:'Docker Compose override',     sev:'medium'   },
-  { path:'/.travis.yml',                 label:'Travis CI config',            sev:'medium'   },
-  { path:'/Jenkinsfile',                 label:'Jenkinsfile',                 sev:'medium'   },
-  { path:'/.circleci/config.yml',        label:'CircleCI config',             sev:'medium'   },
-  { path:'/.gitlab-ci.yml',             label:'GitLab CI config',            sev:'medium'   },
-  { path:'/bitbucket-pipelines.yml',     label:'Bitbucket Pipelines',         sev:'medium'   },
-  { path:'/azure-pipelines.yml',         label:'Azure Pipelines',             sev:'medium'   },
-  { path:'/install.php',                 label:'Install script',              sev:'medium'   },
-  { path:'/setup.php',                   label:'Setup script',                sev:'medium'   },
-  { path:'/install/',                    label:'Install dir',                 sev:'medium'   },
-  { path:'/console',                     label:'Console',                     sev:'medium'   },
-  { path:'/.gitignore',                  label:'.gitignore',                  sev:'medium'   },
-  { path:'/.gitmodules',                 label:'.gitmodules',                 sev:'medium'   },
-  { path:'/package-lock.json',           label:'package-lock.json',           sev:'medium'   },
-  { path:'/yarn.lock',                   label:'yarn.lock',                   sev:'medium'   },
-  { path:'/requirements.txt',            label:'requirements.txt',            sev:'medium'   },
-  { path:'/Gemfile',                     label:'Gemfile',                     sev:'medium'   },
-  { path:'/Makefile',                    label:'Makefile',                    sev:'medium'   },
-  { path:'/cgi-bin/test-cgi',           label:'CGI test',                    sev:'medium'   },
-  { path:'/CHANGELOG.md',               label:'CHANGELOG',                   sev:'medium'   },
-  { path:'/CHANGELOG.txt',              label:'CHANGELOG.txt',               sev:'medium'   },
-  // ---- LOW — version disclosure, old files ----
-  { path:'/Dockerfile',                  label:'Dockerfile',                  sev:'low'      },
-  { path:'/VERSION',                     label:'VERSION file',                sev:'low'      },
-  { path:'/version.txt',                label:'version.txt',                 sev:'low'      },
-  { path:'/README.md',                   label:'README',                      sev:'low'      },
-  { path:'/INSTALL.txt',                label:'INSTALL.txt',                 sev:'low'      },
-  { path:'/crossdomain.xml',            label:'crossdomain.xml',             sev:'low'      },
-  { path:'/clientaccesspolicy.xml',      label:'clientaccesspolicy.xml',      sev:'low'      },
-  { path:'/wp-includes/wlwmanifest.xml', label:'WordPress manifest',          sev:'low'      },
-  // ---- INFO — baseline ----
-  { path:'/wp-login.php',               label:'WordPress login',             sev:'info'     },
-  { path:'/wp-admin/',                   label:'WordPress admin',             sev:'info'     },
-  { path:'/login',                       label:'Login page',                  sev:'info'     },
-  { path:'/signin',                      label:'Sign-in page',                sev:'info'     },
-  { path:'/cms',                         label:'CMS panel',                   sev:'info'     },
-  { path:'/backend',                     label:'Backend panel',               sev:'info'     },
-  { path:'/portal',                      label:'Portal',                      sev:'info'     },
-  { path:'/cpanel',                      label:'cPanel',                      sev:'info'     },
-  { path:'/webmail',                     label:'Webmail',                     sev:'info'     },
-  { path:'/actuator/health',             label:'Spring health',               sev:'info'     },
-  { path:'/',                            label:'Root',                        sev:'info'     },
-  { path:'/robots.txt',                  label:'robots.txt',                  sev:'info'     },
-  { path:'/sitemap.xml',                 label:'Sitemap',                     sev:'info'     },
-];
 
 const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
-const sorted = [...PROBES].sort((a,b)=>SEV_ORDER[a.sev]-SEV_ORDER[b.sev]);
 
 function statusClass(r) {
   if (!r || r.err || r.status === 0) return 's-clean';
@@ -921,6 +787,8 @@ async function startScan() {
   if (!raw) return;
   if (!raw.startsWith('http')) raw = 'https://' + raw;
   const url = raw.replace(/\/$/, '');
+  await wasmReady;
+  if (PROBES.length === 0) { alert('Probe list unavailable — reload and try again.'); return; }
   if (STRIPE_PK && !gateToken) { showPayModal(url); return; }
   runScan(url);
 }
@@ -937,6 +805,7 @@ async function runScan(base) {
   btn.disabled = true;
   btn.textContent = 'Scanning…';
 
+  const sorted = [...PROBES].sort((a,b)=>SEV_ORDER[a.sev]-SEV_ORDER[b.sev]);
   const wifiPromise = wifiCheck(base);
   const resultsEl = document.getElementById('results');
   const rows = {};
@@ -1104,6 +973,11 @@ document.getElementById('url').addEventListener('keydown', e => {
     }
   } catch {}
 })();
+
+// Expose to inline event handlers (onclick="…") — required for type="module".
+window.startScan = startScan;
+window.closePayModal = closePayModal;
+window.sendFeedback = sendFeedback;
 </script>
 </body>
 </html>

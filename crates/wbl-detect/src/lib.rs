@@ -24,6 +24,7 @@
 //!   * `f403 = ips_needing_enrichment` — list of IPs the browser must DoH+RDAP
 //!   * `f404 = classify_ip`            — IP → IpClass priority lattice
 //!   * `f405 = render_html`            — full standalone HTML document
+//!   * `f406 = get_probes`             — canonical surface-area probe list → JS array (WASM)
 //!
 //! ### Types
 //!   * `t100 = Event`             — one parsed log line
@@ -61,6 +62,7 @@
 pub mod aggregate;
 pub mod classify;
 pub mod parse;
+pub mod probes;
 pub mod report;
 pub mod schema;
 
