@@ -1126,14 +1126,13 @@ fn test_demo_cta_points_to_try() -> Result<(), String> {
     Ok(())
 }
 
-// --- Order flow tests (sled-backed atomic queue) ---
+// --- Order flow tests (redb-backed atomic queue) ---
 
 use whobelooking::orders::{Error as OrdersError, OrderState, Store};
 
 /// Build an isolated `Store` rooted at a fresh tmpdir so tests don't trip
-/// over the production sled DB or each other. Mirrors the in-tree test in
-/// `src/orders.rs` but accessible from the P16 binary so failures show up
-/// in the gate, not just `cargo test --lib`.
+/// over the production redb or each other. Uses `open_at` to bypass the
+/// process-wide OnceLock that `Store::open()` uses for the web server.
 fn fresh_store() -> Result<(Store, std::path::PathBuf), String> {
     let dir = std::env::temp_dir().join(format!(
         "wbl-bin-orders-{}-{}",
@@ -1144,14 +1143,7 @@ fn fresh_store() -> Result<(Store, std::path::PathBuf), String> {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    // Override XDG_DATA_HOME so `Store::open` lands inside our tmpdir.
-    // SAFETY: tests are single-threaded inside this gate (we run the catalog
-    // sequentially in run_all_tests) and the env var is restored after the
-    // store is opened by callers in this same session.
-    unsafe {
-        std::env::set_var("XDG_DATA_HOME", &dir);
-    }
-    let store = Store::open().map_err(|e| e.to_string())?;
+    let store = Store::open_at(&dir.join("orders.redb")).map_err(|e| e.to_string())?;
     Ok((store, dir))
 }
 
