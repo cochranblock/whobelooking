@@ -156,7 +156,7 @@ const stamp = document.getElementById("wasm-stamp");
 let wasmReady;
 try {
   wasmReady = init("/detect/wbl_detect_bg.wasm").then(() => {
-    stamp.innerHTML = '<span class="ok">●</span> WASM engine ready · 210 KB';
+    stamp.innerHTML = '<span class="ok">●</span> WASM engine ready · 221 KB';
   });
 } catch (e) {
   stamp.innerHTML = '<span class="err">●</span> WASM load failed — ' + e.message;
