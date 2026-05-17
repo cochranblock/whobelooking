@@ -16,10 +16,13 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use redb::{Database, TableDefinition};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const RDAP_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rdap");
 
 #[derive(serde::Serialize)]
 struct Snapshot {
@@ -50,7 +53,7 @@ fn rdap_db_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("whobelooking")
-        .join("rdap_cache.db")
+        .join("rdap_cache.redb")
 }
 
 /// Pull the most informative org-ish string out of a stored `rdap::Info`.
@@ -70,7 +73,7 @@ fn org_from_info_bytes(value: &[u8]) -> Option<String> {
 }
 
 fn build_snapshot() -> Result<CachedBody, String> {
-    let db = sled::open(rdap_db_path()).map_err(|e| format!("sled open: {}", e))?;
+    let db = Database::create(rdap_db_path()).map_err(|e| format!("redb open: {}", e))?;
 
     let mut snap = Snapshot {
         version: 1,
@@ -82,30 +85,58 @@ fn build_snapshot() -> Result<CachedBody, String> {
         cidrs: BTreeMap::new(),
     };
 
-    for kv in db.scan_prefix(b"ip:").flatten() {
-        let Ok(k) = std::str::from_utf8(&kv.0) else {
-            continue;
+    {
+        let txn = db.begin_read().map_err(|e| format!("begin_read: {}", e))?;
+        let tbl = match txn.open_table(RDAP_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                // Empty cache — fall through to serialize empty snapshot.
+                drop(txn);
+                drop(db);
+                let entry_count = 0;
+                let json = serde_json::to_vec(&snap).map_err(|e| format!("serialize: {}", e))?;
+                let etag = format!("\"snap-v1-{}-{}\"", snap.generated_at, entry_count);
+                return Ok(CachedBody {
+                    built_at: Instant::now(),
+                    json,
+                    etag,
+                    entry_count,
+                });
+            }
+            Err(e) => return Err(format!("open table: {}", e)),
         };
-        let Some(ip) = k.strip_prefix("ip:") else {
-            continue;
-        };
-        if let Some(org) = org_from_info_bytes(&kv.1) {
-            snap.ips.insert(ip.to_string(), org);
+
+        if let Ok(range) = tbl.range(b"ip:".as_ref()..) {
+            for entry in range.flatten() {
+                let (k, v) = entry;
+                if !k.value().starts_with(b"ip:") {
+                    break;
+                }
+                let key = String::from_utf8_lossy(k.value()).into_owned();
+                if let Some(ip) = key.strip_prefix("ip:") {
+                    if let Some(org) = org_from_info_bytes(v.value()) {
+                        snap.ips.insert(ip.to_string(), org);
+                    }
+                }
+            }
         }
-    }
-    for kv in db.scan_prefix(b"cidr:").flatten() {
-        let Ok(k) = std::str::from_utf8(&kv.0) else {
-            continue;
-        };
-        let Some(cidr) = k.strip_prefix("cidr:") else {
-            continue;
-        };
-        if let Some(org) = org_from_info_bytes(&kv.1) {
-            snap.cidrs.insert(cidr.to_string(), org);
+        if let Ok(range) = tbl.range(b"cidr:".as_ref()..) {
+            for entry in range.flatten() {
+                let (k, v) = entry;
+                if !k.value().starts_with(b"cidr:") {
+                    break;
+                }
+                let key = String::from_utf8_lossy(k.value()).into_owned();
+                if let Some(cidr) = key.strip_prefix("cidr:") {
+                    if let Some(org) = org_from_info_bytes(v.value()) {
+                        snap.cidrs.insert(cidr.to_string(), org);
+                    }
+                }
+            }
         }
     }
 
-    // Drop the sled handle now so the file lock releases before we return
+    // Drop the redb handle so the file lock releases before we return
     // (the next CLI `whobelooking report` invocation needs to grab it).
     drop(db);
 

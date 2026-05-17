@@ -58,7 +58,7 @@ kova-ipc = { git = "https://github.com/cochranblock/kova-ipc.git", branch = "mai
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 hickory-resolver = "0.26"
-sled = "0.34"
+redb = "2"
 dirs = "5"
 zstd = "0.13"
 bincode = { version = "2", features = ["serde"] }

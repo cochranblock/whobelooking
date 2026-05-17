@@ -1036,11 +1036,45 @@ async fn main() -> anyhow::Result<()> {
 }
 
 mod scout {
+    use redb::{Database, TableDefinition};
     use serde::{Deserialize, Serialize};
+
+    const SCOUT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("scout");
+
+    fn db_get(db: &Database, key: &str) -> Option<Vec<u8>> {
+        let txn = db.begin_read().ok()?;
+        let tbl = txn.open_table(SCOUT_TABLE).ok()?;
+        tbl.get(key.as_bytes()).ok()?.map(|g| g.value().to_vec())
+    }
+
+    fn db_insert_is_new(db: &Database, key: &str, val: &[u8]) -> bool {
+        (|| -> anyhow::Result<bool> {
+            let txn = db.begin_write()?;
+            let is_new = {
+                let mut tbl = txn.open_table(SCOUT_TABLE)?;
+                tbl.insert(key.as_bytes(), val)?.is_none()
+            };
+            txn.commit()?;
+            Ok(is_new)
+        })()
+        .unwrap_or(false)
+    }
+
+    fn db_put(db: &Database, key: &str, val: &[u8]) {
+        let _ = (|| -> anyhow::Result<()> {
+            let txn = db.begin_write()?;
+            {
+                let mut tbl = txn.open_table(SCOUT_TABLE)?;
+                tbl.insert(key.as_bytes(), val)?;
+            }
+            txn.commit()?;
+            Ok(())
+        })();
+    }
 
     // === Common Open Opportunity Schema ===
     // 4 record types, each with fields that match their source data cleanly.
-    // Stored in separate sled trees so queries don't mix concerns.
+    // Stored in a single redb table with key prefixes per record type.
 
     /// Biddable opportunities — things you can respond to TODAY
     /// Sources: SAM.gov, Grants.gov, SBIR.gov
@@ -1109,11 +1143,12 @@ mod scout {
         pub new_count: u32,
     }
 
-    fn open_db() -> sled::Db {
+    fn open_db() -> Database {
         let dir = dirs::data_local_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
             .join("whobelooking");
-        sled::open(dir).expect("open sled db")
+        let _ = std::fs::create_dir_all(&dir);
+        Database::create(dir.join("scout.redb")).expect("open redb scout")
     }
 
     fn compress(data: &[u8]) -> Vec<u8> {
@@ -1124,28 +1159,26 @@ mod scout {
         zstd::decode_all(data).unwrap_or_else(|_| data.to_vec())
     }
 
-    /// Cache helper — returns `true` if the row is new to the sled tree, `false` if
-    /// already present.  Serialization or sled write errors collapse to `false` so
+    /// Cache helper — returns `true` if the row is new, `false` if
+    /// already present.  Serialization or redb write errors collapse to `false` so
     /// the scout can keep working through transient I/O hiccups.
-    fn cache_put<T: serde::Serialize>(db: &sled::Db, key: &str, value: &T) -> bool {
+    fn cache_put<T: serde::Serialize>(db: &Database, key: &str, value: &T) -> bool {
         let Ok(buf) = serde_json::to_vec(value) else {
             return false;
         };
-        db.insert(key, compress(&buf))
-            .map(|prev| prev.is_none())
-            .unwrap_or(false)
+        db_insert_is_new(db, key, &compress(&buf))
     }
 
-    fn cache_bid(db: &sled::Db, b: &Bid) -> bool {
+    fn cache_bid(db: &Database, b: &Bid) -> bool {
         cache_put(db, &format!("bid:{}:{}", b.source, b.id), b)
     }
-    fn cache_award(db: &sled::Db, a: &Award) -> bool {
+    fn cache_award(db: &Database, a: &Award) -> bool {
         cache_put(db, &format!("award:{}:{}", a.source, a.id), a)
     }
-    fn cache_signal(db: &sled::Db, s: &Signal) -> bool {
+    fn cache_signal(db: &Database, s: &Signal) -> bool {
         cache_put(db, &format!("signal:{}:{}", s.source, s.id), s)
     }
-    fn cache_rate(db: &sled::Db, r: &Rate) -> bool {
+    fn cache_rate(db: &Database, r: &Rate) -> bool {
         cache_put(db, &format!("rate:{}", r.id), r)
     }
 
@@ -1176,7 +1209,7 @@ mod scout {
     }
 
     /// Enrich a batch of bids — fetch full descriptions in parallel, cap concurrency
-    async fn enrich_bids(bids: &mut [Bid], db: &sled::Db) {
+    async fn enrich_bids(bids: &mut [Bid], db: &Database) {
         let Ok(client) = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
@@ -1191,9 +1224,9 @@ mod scout {
                 continue;
             }
 
-            // Check sled for cached enrichment
+            // Check redb for cached enrichment
             let ekey = format!("enriched:{}:{}", b.source, b.id);
-            if let Ok(Some(cached)) = db.get(&ekey) {
+            if let Some(cached) = db_get(db, &ekey) {
                 let text = String::from_utf8_lossy(&decompress(&cached)).to_string();
                 if !text.is_empty() {
                     b.description = text;
@@ -1211,7 +1244,7 @@ mod scout {
                     } else {
                         clean
                     };
-                    let _ = db.insert(&ekey, compress(trimmed.as_bytes()));
+                    db_put(db, &ekey, &compress(trimmed.as_bytes()));
                     b.description = trimmed;
                 }
             }
@@ -1238,7 +1271,7 @@ mod scout {
                             } else {
                                 clean
                             };
-                            let _ = db.insert(&ekey, compress(trimmed.as_bytes()));
+                            db_put(db, &ekey, &compress(trimmed.as_bytes()));
                             b.description = trimmed;
                         }
                     }
@@ -1268,7 +1301,7 @@ mod scout {
         // SAM.gov Opportunities
         if let Some(key) = sam_key {
             eprintln!("[sam.gov] querying...");
-            match sam::query(key, naics, keyword).await {
+            match sam::query(key, naics, keyword, &db).await {
                 Ok(bids) => {
                     eprintln!("[sam.gov] {} bids", bids.len());
                     for b in bids {
@@ -1642,12 +1675,7 @@ mod scout {
         // Summary
         let top_matches = scored_bids.iter().filter(|(s, _)| *s >= 30).count();
         println!("\n  === SCOUT SUMMARY ===");
-        println!(
-            "  {} total records | {} new | {} cached",
-            total,
-            rpt.new_count,
-            db.len()
-        );
+        println!("  {} total records | {} new this run", total, rpt.new_count);
         println!(
             "  {} open bids | {} strong matches [!!+]",
             rpt.bids.len(),
@@ -1669,7 +1697,6 @@ mod scout {
             println!("  [!  ] = worth a look");
         }
 
-        db.flush()?;
         Ok(())
     }
 
@@ -1756,24 +1783,24 @@ mod scout {
             api_key: &str,
             naics: &[&str],
             keyword: Option<&str>,
+            db: &super::Database,
         ) -> anyhow::Result<Vec<Bid>> {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
             let _naics_set: std::collections::HashSet<&str> = naics.iter().copied().collect();
             // Query each NAICS code separately, paginate until exhausted or 200 per code
-            // Rate limit guard: skip codes fetched in last 24h (sled key: "sam_last:{code}")
+            // Rate limit guard: skip codes fetched in last 24h (redb key: "sam_last:{code}")
             let mut all_opps = Vec::new();
             let page_size = 100;
-            let db = super::open_db();
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             for code in naics {
                 let cache_key = format!("sam_last:{}", code);
-                if let Ok(Some(ts_bytes)) = db.get(&cache_key) {
-                    let ts = u64::from_le_bytes(ts_bytes.as_ref().try_into().unwrap_or([0; 8]));
+                if let Some(ts_bytes) = super::db_get(db, &cache_key) {
+                    let ts = u64::from_le_bytes(ts_bytes.as_slice().try_into().unwrap_or([0; 8]));
                     if now - ts < 86400 {
                         eprintln!("[sam.gov] {} cached (<24h), skipping API call", code);
                         continue;
@@ -1826,8 +1853,7 @@ mod scout {
                     }
                 }
                 // Stamp this NAICS as fetched
-                let _ = db.insert(&cache_key, &now.to_le_bytes());
-                let _ = db.flush();
+                super::db_put(db, &cache_key, &now.to_le_bytes());
             }
 
             Ok(all_opps)
@@ -2769,10 +2795,13 @@ mod parse_logs {
 /// the cached `Info` without an HTTP call.  Same `Info` is also stored
 /// under `ip:{exact}` so direct hits stay O(1); CIDR scan is the fallback.
 mod rdap {
+    use redb::{Database, ReadableTableMetadata, TableDefinition};
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
     use std::path::PathBuf;
     use whobelooking::cidr;
+
+    const RDAP_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rdap");
 
     #[derive(Serialize, Deserialize, Default, Clone)]
     pub struct Info {
@@ -2790,7 +2819,7 @@ mod rdap {
         dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("whobelooking")
-            .join("rdap_cache.db")
+            .join("rdap_cache.redb")
     }
 
     fn legacy_json_path() -> PathBuf {
@@ -2800,38 +2829,40 @@ mod rdap {
             .join("rdap_cache.json")
     }
 
-    /// Open the sled-backed RDAP cache. If absent, attempt to migrate from
+    /// Open the redb-backed RDAP cache. If absent, attempt to migrate from
     /// the legacy `rdap_cache.json` file (preserves existing /24 lookups
     /// across upgrades). Failure to open returns `None` so the caller can
     /// still proceed without persistence.
-    ///
-    /// sled gives us atomic single-writer semantics across the Gemini Man
-    /// restart window — old + new whobelooking can both read, only one can
-    /// write at a time, and there's no JSON-file last-writer-wins race.
-    fn open_cache() -> Option<sled::Db> {
+    fn open_cache() -> Option<Database> {
         let p = cache_db_path();
         if let Some(parent) = p.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let db = match sled::open(&p) {
+        let db = match Database::create(&p) {
             Ok(db) => db,
             Err(e) => {
-                tracing::warn!("rdap sled open failed: {} — running without cache", e);
+                tracing::warn!("rdap redb open failed: {} — running without cache", e);
                 return None;
             }
         };
-        if db.is_empty() {
+        if is_cache_empty(&db) {
             if let Ok(s) = std::fs::read_to_string(legacy_json_path()) {
                 if let Ok(m) = serde_json::from_str::<HashMap<String, Info>>(&s) {
                     let mut migrated = 0u32;
-                    for (k, v) in m {
-                        if let Ok(buf) = serde_json::to_vec(&v) {
-                            if db.insert(k.as_bytes(), buf).is_ok() {
-                                migrated += 1;
+                    if let Ok(txn) = db.begin_write() {
+                        {
+                            if let Ok(mut tbl) = txn.open_table(RDAP_TABLE) {
+                                for (k, v) in &m {
+                                    if let Ok(buf) = serde_json::to_vec(v) {
+                                        if tbl.insert(k.as_bytes(), buf.as_slice()).is_ok() {
+                                            migrated += 1;
+                                        }
+                                    }
+                                }
                             }
                         }
+                        let _ = txn.commit();
                     }
-                    let _ = db.flush();
                     if migrated > 0 {
                         tracing::info!(
                             "rdap cache: migrated {} entries from legacy JSON",
@@ -2844,41 +2875,67 @@ mod rdap {
         Some(db)
     }
 
-    fn cache_get(db: &sled::Db, key: &str) -> Option<Info> {
-        let v = db.get(key.as_bytes()).ok().flatten()?;
-        serde_json::from_slice(&v).ok()
-    }
-
-    fn cache_put(db: &sled::Db, key: &str, info: &Info) {
-        if let Ok(buf) = serde_json::to_vec(info) {
-            let _ = db.insert(key.as_bytes(), buf);
+    fn is_cache_empty(db: &Database) -> bool {
+        let Ok(txn) = db.begin_read() else {
+            return true;
+        };
+        match txn.open_table(RDAP_TABLE) {
+            Err(redb::TableError::TableDoesNotExist(_)) => true,
+            Err(_) => true,
+            Ok(tbl) => tbl.is_empty().unwrap_or(true),
         }
     }
 
-    /// Walk the sled tree once; return the first `cidr:` entry whose prefix
+    fn cache_get(db: &Database, key: &str) -> Option<Info> {
+        let txn = db.begin_read().ok()?;
+        let tbl = match txn.open_table(RDAP_TABLE) {
+            Ok(t) => t,
+            Err(_) => return None,
+        };
+        let v = tbl.get(key.as_bytes()).ok()??;
+        serde_json::from_slice(v.value()).ok()
+    }
+
+    fn cache_put(db: &Database, key: &str, info: &Info) {
+        if let Ok(buf) = serde_json::to_vec(info) {
+            let _ = (|| -> anyhow::Result<()> {
+                let txn = db.begin_write()?;
+                {
+                    let mut tbl = txn.open_table(RDAP_TABLE)?;
+                    tbl.insert(key.as_bytes(), buf.as_slice())?;
+                }
+                txn.commit()?;
+                Ok(())
+            })();
+        }
+    }
+
+    /// Walk the redb table once; return the first `cidr:` entry whose prefix
     /// contains `ip`. Cache size in practice is hundreds to low thousands;
     /// linear scan beats indexing complexity at this scale.
-    fn cache_cidr_match(db: &sled::Db, ip: &str) -> Option<Info> {
-        for kv in db.scan_prefix("cidr:") {
-            let Ok((k, v)) = kv else {
-                continue;
-            };
-            let Ok(key) = std::str::from_utf8(&k) else {
-                continue;
-            };
+    fn cache_cidr_match(db: &Database, ip: &str) -> Option<Info> {
+        let txn = db.begin_read().ok()?;
+        let tbl = txn.open_table(RDAP_TABLE).ok()?;
+        let range = tbl.range(b"cidr:".as_ref()..).ok()?;
+        for entry in range.flatten() {
+            let (k, v) = entry;
+            if !k.value().starts_with(b"cidr:") {
+                break;
+            }
+            let key = String::from_utf8_lossy(k.value()).into_owned();
             let cidr_str = key.strip_prefix("cidr:").unwrap_or("");
             if cidr::contains(cidr_str, ip) {
-                return serde_json::from_slice(&v).ok();
+                return serde_json::from_slice(v.value()).ok();
             }
         }
         None
     }
 
-    fn cache_lookup(db: &sled::Db, ip: &str) -> Option<Info> {
+    fn cache_lookup(db: &Database, ip: &str) -> Option<Info> {
         cache_get(db, &format!("ip:{}", ip)).or_else(|| cache_cidr_match(db, ip))
     }
 
-    fn cache_insert(db: &sled::Db, ip: &str, info: &Info) {
+    fn cache_insert(db: &Database, ip: &str, info: &Info) {
         cache_put(db, &format!("ip:{}", ip), info);
         if let Some(c) = info.cidr.as_deref() {
             if cidr::contains(c, ip) {
@@ -2915,9 +2972,6 @@ mod rdap {
             out.push(info);
             // Be kind to RDAP — 250ms between calls.
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
-        if let Some(db) = &cache {
-            let _ = db.flush_async().await;
         }
         out
     }
@@ -3995,7 +4049,66 @@ mod browse {
 mod ctos {
     use crate::CtosOp;
     use crate::browse;
+    use redb::{Database, TableDefinition};
     use serde::{Deserialize, Serialize};
+
+    const CTO_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("cto");
+
+    fn db_get(db: &Database, key: &str) -> Option<Vec<u8>> {
+        let txn = db.begin_read().ok()?;
+        let tbl = txn.open_table(CTO_TABLE).ok()?;
+        tbl.get(key.as_bytes()).ok()?.map(|g| g.value().to_vec())
+    }
+
+    fn db_insert_is_new(db: &Database, key: &str, val: &[u8]) -> bool {
+        (|| -> anyhow::Result<bool> {
+            let txn = db.begin_write()?;
+            let is_new = {
+                let mut tbl = txn.open_table(CTO_TABLE)?;
+                tbl.insert(key.as_bytes(), val)?.is_none()
+            };
+            txn.commit()?;
+            Ok(is_new)
+        })()
+        .unwrap_or(false)
+    }
+
+    fn db_put(db: &Database, key: &str, val: &[u8]) {
+        let _ = (|| -> anyhow::Result<()> {
+            let txn = db.begin_write()?;
+            {
+                let mut tbl = txn.open_table(CTO_TABLE)?;
+                tbl.insert(key.as_bytes(), val)?;
+            }
+            txn.commit()?;
+            Ok(())
+        })();
+    }
+
+    fn db_scan_values_prefix(db: &Database, prefix: &[u8]) -> Vec<Vec<u8>> {
+        let Ok(txn) = db.begin_read() else {
+            return vec![];
+        };
+        let tbl = match txn.open_table(CTO_TABLE) {
+            Ok(t) => t,
+            Err(_) => return vec![],
+        };
+        let mut out = Vec::new();
+        if let Ok(range) = tbl.range(prefix..) {
+            for entry in range.flatten() {
+                let (k, v) = entry;
+                if !k.value().starts_with(prefix) {
+                    break;
+                }
+                out.push(v.value().to_vec());
+            }
+        }
+        out
+    }
+
+    fn db_count_prefix(db: &Database, prefix: &[u8]) -> usize {
+        db_scan_values_prefix(db, prefix).len()
+    }
 
     // Pure logic lives in the lib crate so the test binary can exercise it
     // without launching Chrome. Re-export for the pullers + commands below.
@@ -4004,7 +4117,7 @@ mod ctos {
         slugify, today_iso, truncate, verify,
     };
 
-    // ----- Contact record (sled-only type, stays here) -----
+    // ----- Contact record (redb-backed type, stays here) -----
 
     #[derive(Debug, Serialize, Deserialize, Clone)]
     pub struct CtoContact {
@@ -4013,13 +4126,14 @@ mod ctos {
         pub scraped_at: u64,
     }
 
-    // ----- Sled I/O -----
+    // ----- Redb I/O -----
 
-    fn open_db() -> sled::Db {
+    fn open_db() -> Database {
         let dir = dirs::data_local_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
             .join("whobelooking");
-        sled::open(dir).expect("open sled db")
+        let _ = std::fs::create_dir_all(&dir);
+        Database::create(dir.join("cto.redb")).expect("open redb cto")
     }
 
     fn hash_str(s: &str) -> String {
@@ -4036,21 +4150,19 @@ mod ctos {
         zstd::decode_all(data).unwrap_or_else(|_| data.to_vec())
     }
 
-    pub fn cache_mention(db: &sled::Db, m: &CtoMention) -> bool {
+    pub fn cache_mention(db: &Database, m: &CtoMention) -> bool {
         let uniq = format!("{}|{}|{}", m.source_url, m.name, m.company);
         let key = format!("cto:mention:{}:{}", m.source, hash_str(&uniq));
         let Ok(buf) = serde_json::to_vec(m) else {
             return false;
         };
-        db.insert(key.as_bytes(), compress(&buf))
-            .map(|prev| prev.is_none())
-            .unwrap_or(false)
+        db_insert_is_new(db, &key, &compress(&buf))
     }
 
-    pub fn load_mentions(db: &sled::Db) -> Vec<CtoMention> {
-        db.scan_prefix(b"cto:mention:")
-            .filter_map(|r| r.ok())
-            .filter_map(|(_k, v)| serde_json::from_slice::<CtoMention>(&decompress(&v)).ok())
+    pub fn load_mentions(db: &Database) -> Vec<CtoMention> {
+        db_scan_values_prefix(db, b"cto:mention:")
+            .into_iter()
+            .filter_map(|v| serde_json::from_slice::<CtoMention>(&decompress(&v)).ok())
             .collect()
     }
 
@@ -4058,19 +4170,16 @@ mod ctos {
         format!("{}|{}", norm(name), norm_company(company))
     }
 
-    fn cache_contact(db: &sled::Db, key: &str, c: &CtoContact) {
+    fn cache_contact(db: &Database, key: &str, c: &CtoContact) {
         let k = format!("cto:contact:{}", key);
         if let Ok(buf) = serde_json::to_vec(c) {
-            let _ = db.insert(k.as_bytes(), compress(&buf));
+            db_put(db, &k, &compress(&buf));
         }
     }
 
-    fn load_contact(db: &sled::Db, key: &str) -> Option<CtoContact> {
+    fn load_contact(db: &Database, key: &str) -> Option<CtoContact> {
         let k = format!("cto:contact:{}", key);
-        db.get(k.as_bytes())
-            .ok()
-            .flatten()
-            .and_then(|v| serde_json::from_slice::<CtoContact>(&decompress(&v)).ok())
+        db_get(db, &k).and_then(|v| serde_json::from_slice::<CtoContact>(&decompress(&v)).ok())
     }
 
     // ----- URL / HTML helpers used by the pullers -----
@@ -4499,21 +4608,19 @@ mod ctos {
                 }
             }
         }
-        db.flush()?;
-
-        let total_cached = db.scan_prefix(b"cto:mention:").count();
+        let total_cached = db_count_prefix(&db, b"cto:mention:");
         eprintln!("\n=== PULL SUMMARY ===");
         eprintln!("  observed:         {}", all.len());
         eprintln!("  new mentions:     {}", new_mentions);
         eprintln!("  direct emails:    {}", direct_contacts);
-        eprintln!("  total in sled:    {}", total_cached);
+        eprintln!("  total in redb:    {}", total_cached);
         Ok(())
     }
 
     async fn verified_cmd(scrape_emails: bool) -> anyhow::Result<()> {
         let db = open_db();
         let mentions = load_mentions(&db);
-        eprintln!("loaded {} mentions from sled", mentions.len());
+        eprintln!("loaded {} mentions from redb", mentions.len());
         let verified = verify(&mentions);
         eprintln!("{} verified CTOs (2+ distinct sources)\n", verified.len());
 

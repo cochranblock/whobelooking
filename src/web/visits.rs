@@ -1,42 +1,44 @@
 // All Rights Reserved — The Cochran Block, LLC
 //! Visitor logging — CF-Connecting-IP extraction, per-request tracing,
-//! per-(date, ip, path) counters in a sled tree.
+//! per-(date, ip, path) counters in a redb table.
 
 use axum::{extract::Request, http::HeaderMap, middleware::Next, response::Response};
-use sled::{Db, Tree};
-use std::sync::OnceLock;
+use redb::{Database, ReadableTable, TableDefinition};
+use std::sync::{Arc, OnceLock};
 
-static DB: OnceLock<Db> = OnceLock::new();
-static VISITS: OnceLock<Tree> = OnceLock::new();
+const VISITS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("visits");
 
-fn db() -> &'static Db {
+static DB: OnceLock<Arc<Database>> = OnceLock::new();
+
+fn db() -> &'static Arc<Database> {
     DB.get_or_init(|| {
         let dir = dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("whobelooking");
         let _ = std::fs::create_dir_all(&dir);
-        sled::open(&dir).unwrap_or_else(|e| {
-            // Visits is opened lazily inside an axum middleware; we can't
-            // propagate `Result` here without changing every callsite. If
-            // sled is locked or corrupt we log loudly and fall back to a
-            // process-private temp DB so the request path doesn't panic
-            // — visits are non-critical telemetry, not a correctness path.
-            tracing::error!("visits sled open failed: {} — using ephemeral fallback", e);
-            let fallback = std::env::temp_dir().join(format!(
-                "whobelooking-visits-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0)
-            ));
-            sled::open(&fallback).expect("ephemeral sled fallback must open")
-        })
+        match Database::create(dir.join("visits.redb")).map(Arc::new) {
+            Ok(db) => db,
+            Err(e) => {
+                // Visits is opened lazily inside an axum middleware; we can't
+                // propagate `Result` here without changing every callsite. If
+                // redb is locked or corrupt we log loudly and fall back to a
+                // process-private temp DB so the request path doesn't panic
+                // — visits are non-critical telemetry, not a correctness path.
+                tracing::error!("visits redb open failed: {} — using ephemeral fallback", e);
+                let fallback = std::env::temp_dir().join(format!(
+                    "whobelooking-visits-{}-{}.redb",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ));
+                Database::create(&fallback)
+                    .map(Arc::new)
+                    .expect("ephemeral redb fallback must open")
+            }
+        }
     })
-}
-
-fn tree() -> &'static Tree {
-    VISITS.get_or_init(|| db().open_tree("visits").expect("open visits tree"))
 }
 
 fn now_secs() -> u64 {
@@ -77,22 +79,29 @@ pub fn record(ip: &str, path: &str) {
     let d = today_days();
     let key = format!("{}|{}|{}", d, ip, path);
     let now = now_secs();
-    let _ = tree().update_and_fetch(key.as_bytes(), |old| {
-        let (count, first) = match old {
-            Some(v) => {
-                let s = String::from_utf8_lossy(v);
-                let mut p = s.splitn(3, '|');
-                let c: u64 = p.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-                let f: u64 = p.next().and_then(|s| s.parse().ok()).unwrap_or(now);
-                (c + 1, f)
-            }
-            None => (1, now),
-        };
-        Some(format!("{}|{}|{}", count, first, now).into_bytes())
-    });
+    let _ = (|| -> anyhow::Result<()> {
+        let txn = db().begin_write()?;
+        {
+            let mut tbl = txn.open_table(VISITS_TABLE)?;
+            let (count, first) = tbl
+                .get(key.as_bytes())?
+                .map(|g| {
+                    let s = String::from_utf8_lossy(g.value()).into_owned();
+                    let mut p = s.splitn(3, '|');
+                    let c: u64 = p.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+                    let f: u64 = p.next().and_then(|x| x.parse().ok()).unwrap_or(now);
+                    (c + 1, f)
+                })
+                .unwrap_or((1, now));
+            let val = format!("{}|{}|{}", count, first, now);
+            tbl.insert(key.as_bytes(), val.as_bytes())?;
+        }
+        txn.commit()?;
+        Ok(())
+    })();
 }
 
-/// Middleware: extract IP + UA + referer + country, log via tracing, record to sled.
+/// Middleware: extract IP + UA + referer + country, log via tracing, record to redb.
 pub async fn log_middleware(req: Request, next: Next) -> Response {
     let ip = client_ip(req.headers());
     let ua = header_str(req.headers(), "user-agent").to_string();
@@ -125,16 +134,30 @@ pub type VisitRow = (String, String, u64, u64, u64);
 pub fn list_for_date(date_days: u64) -> Vec<VisitRow> {
     let prefix = format!("{}|", date_days);
     let mut out = Vec::new();
-    for kv in tree().scan_prefix(prefix.as_bytes()).flatten() {
-        let k = String::from_utf8_lossy(&kv.0);
-        let v = String::from_utf8_lossy(&kv.1);
-        let kparts: Vec<&str> = k.splitn(3, '|').collect();
+    let Ok(txn) = db().begin_read() else {
+        return out;
+    };
+    let tbl = match txn.open_table(VISITS_TABLE) {
+        Ok(t) => t,
+        Err(_) => return out,
+    };
+    let Ok(range) = tbl.range(prefix.as_bytes()..) else {
+        return out;
+    };
+    for entry in range.flatten() {
+        let (k, v) = entry;
+        if !k.value().starts_with(prefix.as_bytes()) {
+            break;
+        }
+        let k_str = String::from_utf8_lossy(k.value()).into_owned();
+        let v_str = String::from_utf8_lossy(v.value()).into_owned();
+        let kparts: Vec<&str> = k_str.splitn(3, '|').collect();
         if kparts.len() != 3 {
             continue;
         }
         let ip = kparts[1].to_string();
         let path = kparts[2].to_string();
-        let vp: Vec<&str> = v.splitn(3, '|').collect();
+        let vp: Vec<&str> = v_str.splitn(3, '|').collect();
         let c: u64 = vp.first().and_then(|s| s.parse().ok()).unwrap_or(0);
         let f: u64 = vp.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
         let l: u64 = vp.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -169,18 +192,29 @@ fn is_boring(path: &str) -> bool {
     BORING_PATHS.contains(&path)
 }
 
-/// Aggregate every distinct path ever observed across the visits tree, with
+/// Aggregate every distinct path ever observed across the visits table, with
 /// total hit counts. Sorted by hits descending. This is the surface-area-scan
 /// corpus: paths attackers (and other bots) have probed for. Filters:
 ///   - `min_hits`: drop paths with fewer hits (de-noise)
 ///   - `attack_only`: skip BORING_PATHS (always-present paths)
 pub fn corpus_paths(min_hits: u64, attack_only: bool) -> Vec<(String, u64)> {
     let mut totals: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    for kv in tree().iter().flatten() {
-        let k = String::from_utf8_lossy(&kv.0);
-        let v = String::from_utf8_lossy(&kv.1);
+    let Ok(txn) = db().begin_read() else {
+        return vec![];
+    };
+    let tbl = match txn.open_table(VISITS_TABLE) {
+        Ok(t) => t,
+        Err(_) => return vec![],
+    };
+    let Ok(iter) = tbl.iter() else {
+        return vec![];
+    };
+    for entry in iter.flatten() {
+        let (k, v) = entry;
+        let k_str = String::from_utf8_lossy(k.value()).into_owned();
+        let v_str = String::from_utf8_lossy(v.value()).into_owned();
         // key format: {date}|{ip}|{path}
-        let parts: Vec<&str> = k.splitn(3, '|').collect();
+        let parts: Vec<&str> = k_str.splitn(3, '|').collect();
         if parts.len() != 3 {
             continue;
         }
@@ -188,7 +222,7 @@ pub fn corpus_paths(min_hits: u64, attack_only: bool) -> Vec<(String, u64)> {
         if attack_only && is_boring(&path) {
             continue;
         }
-        let count: u64 = v
+        let count: u64 = v_str
             .split('|')
             .next()
             .and_then(|s| s.parse().ok())

@@ -2,22 +2,27 @@
 //! Atomic order queue (Tier 1 fix).
 //!
 //! Replaces the earlier filesystem queue (`pending/`, `approved/`, `rejected/`,
-//! `ready/` directories). Metadata + state lives in a sled tree; only blobs
+//! `ready/` directories). Metadata + state lives in a redb table; only blobs
 //! (logfile, generated PDF) stay on the filesystem.
 //!
-//! Two trees:
-//!   * `orders/`  — `order:{id}` → bincode-serialized `Order`
-//!   * `audit/`   — `audit:{u128 BE epoch nanos}:{id}` → bincode-serialized `AuditEvent`
+//! Two tables:
+//!   * `orders`  — `order:{id}` → serde_json-serialized `Order`
+//!   * `audit`   — `audit:{u128 BE epoch nanos}:{id}` → serde_json-serialized `AuditEvent`
 //!
-//! State transitions go through `transition()` which uses sled
-//! `compare_and_swap` so two operators clicking "approve" at the same time
-//! cannot both win.
+//! State transitions go through `transition()` which reads, validates, and
+//! writes within a single write transaction — redb's exclusive writer lock
+//! provides the same serialized-write semantics as sled's compare_and_swap.
 //!
 //! Blobs live at `~/.local/share/whobelooking/orders/blobs/{id}/`.
 
+use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const ORDERS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("orders");
+const AUDIT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("audit");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderState {
@@ -81,7 +86,7 @@ pub const MAX_PENDING: usize = 5;
 
 #[derive(Debug)]
 pub enum Error {
-    Sled(sled::Error),
+    Db(String),
     Encode(serde_json::Error),
     Io(std::io::Error),
     NotFound(String),
@@ -93,7 +98,7 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::Sled(e) => write!(f, "sled: {}", e),
+            Error::Db(s) => write!(f, "db: {}", s),
             Error::Encode(e) => write!(f, "encode: {}", e),
             Error::Io(e) => write!(f, "io: {}", e),
             Error::NotFound(id) => write!(f, "order not found: {}", id),
@@ -111,7 +116,6 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Error::Sled(e) => Some(e),
             Error::Encode(e) => Some(e),
             Error::Io(e) => Some(e),
             _ => None,
@@ -119,11 +123,6 @@ impl std::error::Error for Error {
     }
 }
 
-impl From<sled::Error> for Error {
-    fn from(e: sled::Error) -> Self {
-        Error::Sled(e)
-    }
-}
 impl From<serde_json::Error> for Error {
     fn from(e: serde_json::Error) -> Self {
         Error::Encode(e)
@@ -145,12 +144,18 @@ pub fn blobs_dir(id: &str) -> PathBuf {
     data_dir().join("orders").join("blobs").join(id)
 }
 
-fn open_db() -> Result<sled::Db, Error> {
-    let p = data_dir().join("orders.db");
-    if let Some(parent) = p.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    Ok(sled::open(&p)?)
+static ORDERS_DB: OnceLock<Option<Arc<Database>>> = OnceLock::new();
+
+fn shared_db() -> Result<Arc<Database>, Error> {
+    ORDERS_DB
+        .get_or_init(|| {
+            let p = data_dir().join("orders.redb");
+            let _ = p.parent().map(std::fs::create_dir_all);
+            Database::create(&p).ok().map(Arc::new)
+        })
+        .as_ref()
+        .map(Arc::clone)
+        .ok_or_else(|| Error::Db("orders redb open failed".into()))
 }
 
 fn now_secs() -> u64 {
@@ -168,17 +173,12 @@ fn now_nanos() -> u128 {
 }
 
 pub struct Store {
-    db: sled::Db,
-    orders: sled::Tree,
-    audit: sled::Tree,
+    db: Arc<Database>,
 }
 
 impl Store {
     pub fn open() -> Result<Self, Error> {
-        let db = open_db()?;
-        let orders = db.open_tree("orders")?;
-        let audit = db.open_tree("audit")?;
-        Ok(Self { db, orders, audit })
+        Ok(Self { db: shared_db()? })
     }
 
     /// Open a store at a caller-chosen path. Bypasses `dirs::data_dir()`
@@ -188,18 +188,21 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let db = sled::open(path)?;
-        let orders = db.open_tree("orders")?;
-        let audit = db.open_tree("audit")?;
-        Ok(Self { db, orders, audit })
+        let db = Database::create(path).map_err(|e| Error::Db(e.to_string()))?;
+        Ok(Self { db: Arc::new(db) })
     }
 
     pub fn pending_count(&self) -> usize {
-        self.orders
-            .iter()
-            .values()
-            .flatten()
-            .filter_map(|v| serde_json::from_slice::<Order>(&v).ok())
+        let Ok(txn) = self.db.begin_read() else {
+            return 0;
+        };
+        let tbl = match txn.open_table(ORDERS_TABLE) {
+            Ok(t) => t,
+            Err(_) => return 0,
+        };
+        let Ok(iter) = tbl.iter() else { return 0 };
+        iter.flatten()
+            .filter_map(|(_, v)| serde_json::from_slice::<Order>(v.value()).ok())
             .filter(|o| o.state == OrderState::Pending)
             .count()
     }
@@ -209,7 +212,7 @@ impl Store {
     }
 
     /// Atomically create a new pending order. Capacity is checked just
-    /// before write and again on `compare_and_swap` of the order key, so
+    /// before write; only inserts if the key doesn't already exist so
     /// two simultaneous submitters racing for the last slot can't both win.
     #[allow(clippy::too_many_arguments)]
     pub fn create(
@@ -240,14 +243,29 @@ impl Store {
         };
         let key = format!("order:{}", id);
         let val = serde_json::to_vec(&order)?;
-        match self.orders.compare_and_swap(
-            key.as_bytes(),
-            Option::<&[u8]>::None,
-            Some(val.as_slice()),
-        )? {
-            Ok(()) => {}
-            Err(_) => return Err(Error::Conflict),
+
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| Error::Db(e.to_string()))?;
+        let already_exists = {
+            let mut tbl = txn
+                .open_table(ORDERS_TABLE)
+                .map_err(|e| Error::Db(e.to_string()))?;
+            let exists = tbl
+                .get(key.as_bytes())
+                .map_err(|e| Error::Db(e.to_string()))?
+                .is_some();
+            if !exists {
+                tbl.insert(key.as_bytes(), val.as_slice())
+                    .map_err(|e| Error::Db(e.to_string()))?;
+            }
+            exists
+        };
+        if already_exists {
+            return Err(Error::Conflict);
         }
+        txn.commit().map_err(|e| Error::Db(e.to_string()))?;
 
         // Make sure the blob dir exists, but don't fail order creation if it
         // doesn't — operators can recover via cli.
@@ -261,23 +279,37 @@ impl Store {
             actor: actor.to_string(),
             note: None,
         })?;
-        self.db.flush()?;
         Ok(order)
     }
 
     pub fn get(&self, id: &str) -> Result<Option<Order>, Error> {
         let key = format!("order:{}", id);
-        let Some(v) = self.orders.get(key.as_bytes())? else {
+        let txn = self.db.begin_read().map_err(|e| Error::Db(e.to_string()))?;
+        let tbl = match txn.open_table(ORDERS_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(Error::Db(e.to_string())),
+        };
+        let Some(g) = tbl
+            .get(key.as_bytes())
+            .map_err(|e| Error::Db(e.to_string()))?
+        else {
             return Ok(None);
         };
-        Ok(Some(serde_json::from_slice(&v)?))
+        Ok(Some(serde_json::from_slice(g.value())?))
     }
 
     pub fn list_all(&self) -> Result<Vec<Order>, Error> {
+        let txn = self.db.begin_read().map_err(|e| Error::Db(e.to_string()))?;
+        let tbl = match txn.open_table(ORDERS_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(vec![]),
+            Err(e) => return Err(Error::Db(e.to_string())),
+        };
         let mut out = Vec::new();
-        for kv in self.orders.iter() {
-            let (_k, v) = kv?;
-            if let Ok(o) = serde_json::from_slice::<Order>(&v) {
+        for entry in tbl.iter().map_err(|e| Error::Db(e.to_string()))?.flatten() {
+            let (_, v) = entry;
+            if let Ok(o) = serde_json::from_slice::<Order>(v.value()) {
                 out.push(o);
             }
         }
@@ -294,8 +326,8 @@ impl Store {
     }
 
     /// Atomically transition `id`'s state from its current value to `to`.
-    /// Returns the new order. The compare_and_swap ensures two operators
-    /// cannot both succeed if the prior state has already changed.
+    /// Returns the new order. Redb's exclusive writer lock ensures only one
+    /// transition can succeed at a time.
     pub fn transition(
         &self,
         id: &str,
@@ -304,11 +336,24 @@ impl Store {
         note: Option<String>,
     ) -> Result<Order, Error> {
         let key = format!("order:{}", id);
-        loop {
-            let Some(prev) = self.orders.get(key.as_bytes())? else {
-                return Err(Error::NotFound(id.to_string()));
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| Error::Db(e.to_string()))?;
+        let (order, from) = {
+            let mut tbl = txn
+                .open_table(ORDERS_TABLE)
+                .map_err(|e| Error::Db(e.to_string()))?;
+            let prev_bytes = {
+                let g = tbl
+                    .get(key.as_bytes())
+                    .map_err(|e| Error::Db(e.to_string()))?;
+                match g {
+                    Some(g) => g.value().to_vec(),
+                    None => return Err(Error::NotFound(id.to_string())),
+                }
             };
-            let mut order: Order = serde_json::from_slice(&prev)?;
+            let mut order: Order = serde_json::from_slice(&prev_bytes)?;
             if !order.state.can_transition(to) {
                 return Err(Error::IllegalTransition(order.state, to));
             }
@@ -316,37 +361,20 @@ impl Store {
             order.state = to;
             order.state_changed_at = now_secs();
             let new_val = serde_json::to_vec(&order)?;
-            match self.orders.compare_and_swap(
-                key.as_bytes(),
-                Some(prev.as_ref()),
-                Some(new_val.as_slice()),
-            )? {
-                Ok(()) => {
-                    self.write_audit(&AuditEvent {
-                        ts_nanos: now_nanos(),
-                        order_id: id.to_string(),
-                        from: Some(from),
-                        to,
-                        actor: actor.to_string(),
-                        note,
-                    })?;
-                    self.db.flush()?;
-                    return Ok(order);
-                }
-                Err(_) => {
-                    // Another writer slipped in; loop and try again. If the
-                    // new state already matches `to`, return Conflict so the
-                    // caller knows their action was redundant.
-                    let cur = self.orders.get(key.as_bytes())?;
-                    if let Some(v) = cur {
-                        let cur_order: Order = serde_json::from_slice(&v)?;
-                        if cur_order.state == to {
-                            return Err(Error::Conflict);
-                        }
-                    }
-                }
-            }
-        }
+            tbl.insert(key.as_bytes(), new_val.as_slice())
+                .map_err(|e| Error::Db(e.to_string()))?;
+            (order, from)
+        };
+        txn.commit().map_err(|e| Error::Db(e.to_string()))?;
+        self.write_audit(&AuditEvent {
+            ts_nanos: now_nanos(),
+            order_id: id.to_string(),
+            from: Some(from),
+            to,
+            actor: actor.to_string(),
+            note,
+        })?;
+        Ok(order)
     }
 
     fn write_audit(&self, ev: &AuditEvent) -> Result<(), Error> {
@@ -357,19 +385,41 @@ impl Store {
         key.push(b':');
         key.extend_from_slice(ev.order_id.as_bytes());
         let val = serde_json::to_vec(ev)?;
-        self.audit.insert(key, val)?;
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| Error::Db(e.to_string()))?;
+        {
+            let mut tbl = txn
+                .open_table(AUDIT_TABLE)
+                .map_err(|e| Error::Db(e.to_string()))?;
+            tbl.insert(key.as_slice(), val.as_slice())
+                .map_err(|e| Error::Db(e.to_string()))?;
+        }
+        txn.commit().map_err(|e| Error::Db(e.to_string()))?;
         Ok(())
     }
 
     /// Most-recent-first audit slice.  `limit` caps result count.
     pub fn audit_tail(&self, limit: usize) -> Result<Vec<AuditEvent>, Error> {
+        let txn = self.db.begin_read().map_err(|e| Error::Db(e.to_string()))?;
+        let tbl = match txn.open_table(AUDIT_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(vec![]),
+            Err(e) => return Err(Error::Db(e.to_string())),
+        };
         let mut out = Vec::with_capacity(limit);
-        for kv in self.audit.iter().rev() {
+        for entry in tbl
+            .iter()
+            .map_err(|e| Error::Db(e.to_string()))?
+            .rev()
+            .flatten()
+        {
             if out.len() >= limit {
                 break;
             }
-            let (_k, v) = kv?;
-            if let Ok(ev) = serde_json::from_slice(&v) {
+            let (_, v) = entry;
+            if let Ok(ev) = serde_json::from_slice(v.value()) {
                 out.push(ev);
             }
         }
@@ -378,10 +428,16 @@ impl Store {
 
     /// Audit history for a single order, oldest-first.
     pub fn audit_for(&self, id: &str) -> Result<Vec<AuditEvent>, Error> {
+        let txn = self.db.begin_read().map_err(|e| Error::Db(e.to_string()))?;
+        let tbl = match txn.open_table(AUDIT_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(vec![]),
+            Err(e) => return Err(Error::Db(e.to_string())),
+        };
         let mut out = Vec::new();
-        for kv in self.audit.iter() {
-            let (_k, v) = kv?;
-            if let Ok(ev) = serde_json::from_slice::<AuditEvent>(&v) {
+        for entry in tbl.iter().map_err(|e| Error::Db(e.to_string()))?.flatten() {
+            let (_, v) = entry;
+            if let Ok(ev) = serde_json::from_slice::<AuditEvent>(v.value()) {
                 if ev.order_id == id {
                     out.push(ev);
                 }
@@ -396,17 +452,14 @@ mod tests {
     use super::*;
 
     fn tmp_store() -> Store {
-        // Each test gets its own sled — use a process-unique tmpdir.
+        // Each test gets its own redb — use a process-unique tmpdir.
         let dir = std::env::temp_dir().join(format!(
             "wbl-orders-test-{}-{}",
             std::process::id(),
             now_nanos()
         ));
         std::fs::create_dir_all(&dir).expect("tmp_store: create tmpdir");
-        let db = sled::open(dir.join("orders.db")).expect("tmp_store: open sled db");
-        let orders = db.open_tree("orders").expect("tmp_store: open orders tree");
-        let audit = db.open_tree("audit").expect("tmp_store: open audit tree");
-        Store { db, orders, audit }
+        Store::open_at(&dir.join("orders.redb")).expect("tmp_store: open redb")
     }
 
     #[test]
