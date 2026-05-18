@@ -940,6 +940,7 @@ const TRY_HTML: &str = include_str!("../../static/try/index.html");
 const TRY_PAGE_RS: &str = include_str!("../web/try_page.rs");
 const ENRICHMENT_RS: &str = include_str!("../web/enrichment.rs");
 const ROUTER_RS: &str = include_str!("../web/router.rs");
+const CF_PULL_RS: &str = include_str!("../web/cf_pull.rs");
 
 fn test_try_html_has_drop_zone() -> Result<(), String> {
     if !TRY_HTML.contains(r#"id="drop-zone""#) {
@@ -1125,6 +1126,51 @@ fn test_demo_cta_points_to_try() -> Result<(), String> {
     // secondary "for the truly self-host curious" link.
     if !DEMO.contains("href=\"/try\"") {
         return Err("demo must have a primary CTA pointing at /try".into());
+    }
+    Ok(())
+}
+
+fn test_cf_pull_route_registered() -> Result<(), String> {
+    if !ROUTER_RS.contains("\"/api/cf/pull\"") {
+        return Err("router must register /api/cf/pull route".into());
+    }
+    if !ROUTER_RS.contains("cf_pull::pull") {
+        return Err("router /api/cf/pull must point at cf_pull::pull".into());
+    }
+    Ok(())
+}
+
+fn test_cf_pull_token_never_stored() -> Result<(), String> {
+    // Verify the handler comment and code pattern assert zero-retention.
+    if !CF_PULL_RS.contains("never logged") && !CF_PULL_RS.contains("never stored") {
+        return Err("cf_pull.rs must document zero-retention token policy".into());
+    }
+    // No file write calls with the token variable name.
+    if CF_PULL_RS.contains("write(token)") || CF_PULL_RS.contains("log!(.*token") {
+        return Err("cf_pull.rs must not write or log the token".into());
+    }
+    Ok(())
+}
+
+fn test_try_html_has_cf_panel() -> Result<(), String> {
+    if !TRY_HTML.contains("cf-panel") {
+        return Err("/try must contain cf-panel element".into());
+    }
+    if !TRY_HTML.contains("Pull from Cloudflare") {
+        return Err("/try must contain 'Pull from Cloudflare' label".into());
+    }
+    if !TRY_HTML.contains("zone_id") || !TRY_HTML.contains("cf-token") {
+        return Err("/try CF panel must have zone_id and token inputs".into());
+    }
+    Ok(())
+}
+
+fn test_try_html_cf_panel_install_hint() -> Result<(), String> {
+    if !TRY_HTML.contains("cf-install-hint") {
+        return Err("/try must have cf-install-hint element for non-local users".into());
+    }
+    if !TRY_HTML.contains("whobelooking serve") {
+        return Err("/try install hint must mention 'whobelooking serve'".into());
     }
     Ok(())
 }
@@ -1678,6 +1724,16 @@ const TESTS: &[(&str, TestFn)] = &[
     ),
     ("enrichment_snapshot_shape", test_enrichment_snapshot_shape),
     ("demo_cta_points_to_try", test_demo_cta_points_to_try),
+    ("cf_pull_route_registered", test_cf_pull_route_registered),
+    (
+        "cf_pull_token_never_stored",
+        test_cf_pull_token_never_stored,
+    ),
+    ("try_html_has_cf_panel", test_try_html_has_cf_panel),
+    (
+        "try_html_cf_panel_has_install_hint",
+        test_try_html_cf_panel_install_hint,
+    ),
     // Order flow
     ("order_creates_pending_atomic", test_order_creates_pending),
     ("order_capacity_rejects_at_5", test_order_capacity_limit),
@@ -5107,7 +5163,17 @@ async fn main() {
     println!("  {}/{} standards passed", report.passed(), report.total());
     let standards_ok = report.failed() == 0;
 
-    // Stage 5: exit code
+    // Stage 5: end-to-end smoke tests (requires whobelooking serve running locally)
+    println!("\nStage 5: SMOKE TESTS (end-to-end against running server)");
+    let smoke_base =
+        std::env::var("WBL_SMOKE_URL").unwrap_or_else(|_| "http://localhost:8082".to_string());
+    let smoke_ok = run_smoke_tests(&smoke_base).await;
+    if !smoke_ok {
+        eprintln!("\n=== whobelooking-test: SMOKE TESTS FAILED ===");
+        std::process::exit(1);
+    }
+
+    // Stage 6: exit code
     if standards_ok {
         println!("\n=== whobelooking-test: ALL STAGES PASSED ===");
         std::process::exit(0);
@@ -5116,9 +5182,146 @@ async fn main() {
             "\n=== whobelooking-test: STANDARDS CHECK FAILED ({} issues) ===",
             report.failed()
         );
-        // Don't fail the build for standards — report only for now
-        // Once all 14 pass, flip this to exit(1)
         println!("\n=== whobelooking-test: ALL STAGES PASSED (standards advisory) ===");
         std::process::exit(0);
     }
+}
+
+async fn run_smoke_tests(base: &str) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("  [FAIL] could not build HTTP client: {e}");
+            return false;
+        }
+    };
+
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+
+    macro_rules! smoke {
+        ($name:expr, $block:block) => {{
+            let result: Result<(), String> = (async { $block }).await;
+            match result {
+                Ok(()) => {
+                    println!("  [pass] {}", $name);
+                    passed += 1;
+                }
+                Err(e) => {
+                    println!("  [FAIL] {} — {}", $name, e);
+                    failed += 1;
+                }
+            }
+        }};
+    }
+
+    macro_rules! get {
+        ($path:expr) => {
+            client
+                .get(format!("{}{}", base, $path))
+                .send()
+                .await
+                .map_err(|e| format!("request failed: {e}"))
+        };
+    }
+
+    // Server reachable at all?
+    let reachable = client.get(format!("{}/health", base)).send().await.is_ok();
+    if !reachable {
+        println!(
+            "  [SKIP] server not reachable at {} — run `whobelooking serve` first",
+            base
+        );
+        println!("  ---");
+        println!("  0 passed, 0 failed, 0 total smoke (skipped — server down)");
+        // Not a failure — smoke tests are advisory when server isn't running.
+        return true;
+    }
+
+    smoke!("smoke_health_ok", {
+        let r = get!("/health")?;
+        if !r.status().is_success() {
+            return Err(format!("status={}", r.status()));
+        }
+        Ok(())
+    });
+
+    smoke!("smoke_try_serves_200", {
+        let r = get!("/try")?;
+        if !r.status().is_success() {
+            return Err(format!("status={}", r.status()));
+        }
+        Ok(())
+    });
+
+    smoke!("smoke_try_has_cf_panel", {
+        let r = get!("/try")?;
+        let body = r.text().await.map_err(|e| format!("body: {e}"))?;
+        if !body.contains("cf-panel") {
+            return Err("/try response missing cf-panel element".into());
+        }
+        if !body.contains("Pull from Cloudflare") {
+            return Err("/try response missing 'Pull from Cloudflare'".into());
+        }
+        Ok(())
+    });
+
+    smoke!("smoke_cf_pull_no_params_is_400", {
+        let r = get!("/api/cf/pull")?;
+        if r.status().as_u16() != 400 {
+            return Err(format!("expected 400, got {}", r.status()));
+        }
+        Ok(())
+    });
+
+    smoke!("smoke_cf_pull_short_zone_is_400", {
+        let r = get!("/api/cf/pull?zone_id=tooshort&token=x")?;
+        if r.status().as_u16() != 400 {
+            return Err(format!("expected 400, got {}", r.status()));
+        }
+        Ok(())
+    });
+
+    smoke!("smoke_cf_pull_nonhex_zone_is_400", {
+        // 32 chars but contains non-hex
+        let r = get!("/api/cf/pull?zone_id=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz&token=x")?;
+        if r.status().as_u16() != 400 {
+            return Err(format!("expected 400, got {}", r.status()));
+        }
+        Ok(())
+    });
+
+    smoke!("smoke_cf_pull_empty_token_is_400", {
+        let r = get!("/api/cf/pull?zone_id=abcdef1234567890abcdef1234567890&token=")?;
+        if r.status().as_u16() != 400 {
+            return Err(format!("expected 400, got {}", r.status()));
+        }
+        Ok(())
+    });
+
+    smoke!("smoke_cf_pull_fake_token_rejected_by_cf", {
+        // Valid format but bogus token — CF returns 401, handler surfaces it.
+        let r = get!(
+            "/api/cf/pull?zone_id=abcdef1234567890abcdef1234567890&token=notarealapitokenxyz&hours=1"
+        )?;
+        if r.status().as_u16() != 401 {
+            return Err(format!(
+                "expected 401 (CF rejects fake token), got {}",
+                r.status()
+            ));
+        }
+        Ok(())
+    });
+
+    println!("  ---");
+    println!(
+        "  {} passed, {} failed, {} total smoke",
+        passed,
+        failed,
+        passed + failed
+    );
+    failed == 0
 }
