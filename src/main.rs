@@ -1000,7 +1000,19 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Render { file, out } => {
             let text = std::fs::read_to_string(&file)?;
             let parsed = wbl_detect::f400(&text);
-            let report = wbl_detect::f401(&parsed.events);
+            let mut report = wbl_detect::f401(&parsed.events);
+            let ips = wbl_detect::f403(&report);
+            if !ips.is_empty() {
+                eprintln!("resolving {} IP(s)...", ips.len());
+                let rdns = dns::rdns_batch(&ips).await;
+                let enrich: std::collections::BTreeMap<String, wbl_detect::t108> = rdns
+                    .into_iter()
+                    .filter_map(|(ip, name)| {
+                        name.map(|r| (ip, wbl_detect::t108 { rdns: Some(r), org: None, org_country: None }))
+                    })
+                    .collect();
+                wbl_detect::f402(&mut report, &enrich);
+            }
             let html = wbl_detect::f405(&report, &file);
             let dest = out.unwrap_or_else(|| format!("{}.html", file));
             std::fs::write(&dest, &html)?;
