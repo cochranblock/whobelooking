@@ -19,6 +19,7 @@
 //!
 //! ### Public surface
 //!   * `f400 = parse_log`              — line / CSV / JSONL parsers
+//!   * `f454 = parse_packet_data`      — binary pcap + hex-dump entry point
 //!   * `f401 = aggregate`              — per-IP rollup + classify
 //!   * `f402 = apply_enrichment`       — splice rDNS / org / country back in, re-classify
 //!   * `f403 = ips_needing_enrichment` — list of IPs the browser must DoH+RDAP
@@ -44,6 +45,7 @@
 //!   * `f432..f434` — parse.rs (HAProxy, W3C fields header, W3C line)
 //!   * `f435`       — parse.rs (raw IP extraction)
 //!   * `f436..f439` — parse.rs (ALB, Azure JSON, GCP JSON, generic JSON)
+//!   * `f454..f457` — parse.rs (pcap/hex-dump: binary entry, hex decoder, packet iterator, per-packet)
 //!   * `f430`       — aggregate.rs (`is_ipv4`)
 //!   * `f440..f453` — report.rs (escape, format, render-section helpers)
 //!   * `f470`       — wasm_api.rs (`parse_enrichment`)
@@ -82,6 +84,6 @@ mod wasm_api;
 
 pub use aggregate::{f401, f402, f403, f404, t104, t105, t106, t107, t108};
 pub use classify::{RowSignal, classify};
-pub use parse::{f400, t100, t101, t102, t103};
+pub use parse::{f400, f454, t100, t101, t102, t103};
 pub use report::f405;
 pub use schema::{ColumnKind, ColumnReport, SchemaReport, detect_schema};

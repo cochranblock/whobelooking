@@ -998,8 +998,11 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Render { file, out } => {
-            let text = std::fs::read_to_string(&file)?;
-            let parsed = wbl_detect::f400(&text);
+            let bytes = std::fs::read(&file)?;
+            let parsed = match String::from_utf8(bytes.clone()) {
+                Ok(text) => wbl_detect::f400(&text),
+                Err(_) => wbl_detect::f454(&bytes),
+            };
             let mut report = wbl_detect::f401(&parsed.events);
             let ips = wbl_detect::f403(&report);
             if !ips.is_empty() {

@@ -23,7 +23,10 @@ use exopack::triple_sims::f60;
 // types). Map the tokens back to readable names at the import boundary so
 // the test bodies don't have to remember `f400(text)` means "parse_log".
 // Mapping doc lives at `wbl_detect::lib.rs` // KOVA compression map.
-use wbl_detect::{ColumnKind, classify as detect_classify, detect_schema, f400 as wbl_parse_log};
+use wbl_detect::{
+    ColumnKind, classify as detect_classify, detect_schema, f400 as wbl_parse_log,
+    f454 as wbl_parse_packet,
+};
 use wbl_detect::{
     f401 as wbl_aggregate, f402 as wbl_apply_enrichment, f403 as wbl_ips_needing,
     f405 as wbl_render_html, t104 as IpClass, t107 as AggregatedReport, t108 as IpEnrichment,
@@ -1912,6 +1915,13 @@ const TESTS: &[(&str, TestFn)] = &[
         t_parse_generic_no_ip,
     ),
     ("parse_generic_json_format_label", t_parse_generic_fmt),
+    ("parse_pcap_extracts_ip_from_binary", t_parse_pcap_binary),
+    ("parse_pcap_extracts_http_method_path", t_parse_pcap_http),
+    ("parse_pcap_extracts_user_agent", t_parse_pcap_ua),
+    ("parse_pcap_format_label", t_parse_pcap_fmt),
+    ("parse_hexdump_xxd_style", t_parse_hexdump_xxd),
+    ("parse_hexdump_raw_hex_string", t_parse_hexdump_raw),
+    ("parse_hexdump_format_label", t_parse_hexdump_fmt),
     ("parse_jsonl_unicode_escape_resolves", t_parse_jsonl_uescape),
     (
         "parse_jsonl_backslash_quote_in_string",
@@ -3708,6 +3718,126 @@ fn t_parse_generic_fmt() -> Result<(), String> {
     let r = wbl_parse_log(GENERIC_SIMPLE);
     if r.stats.format != "generic-json" {
         return Err(format!("format={:?}, want generic-json", r.stats.format));
+    }
+    Ok(())
+}
+
+// Minimal pcap v2.4 (LE, DLT_EN10MB) — 1 packet:
+// Ethernet→IPv4(src=203.0.113.5)→TCP→"GET /probe HTTP/1.1\r\nUser-Agent: TestBot/1.0\r\n\r\n"
+const PCAP_BYTES: &[u8] = &[
+    0xd4, 0xc3, 0xb2, 0xa1, // magic LE
+    0x02, 0x00, 0x04, 0x00, // version 2.4
+    0x00, 0x00, 0x00, 0x00, // timezone
+    0x00, 0x00, 0x00, 0x00, // sigfigs
+    0xff, 0xff, 0x00, 0x00, // snaplen
+    0x01, 0x00, 0x00, 0x00, // DLT_EN10MB
+    // --- packet record header ---
+    0x00, 0x4b, 0x9a, 0x63, // ts_sec
+    0x00, 0x00, 0x00, 0x00, // ts_usec
+    0x66, 0x00, 0x00, 0x00, // incl_len = 102
+    0x66, 0x00, 0x00, 0x00, // orig_len = 102
+    // --- Ethernet header ---
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // dst MAC
+    0x00, 0x0c, 0x29, 0xab, 0xcd, 0xef, // src MAC
+    0x08, 0x00, // ethertype IPv4
+    // --- IPv4 header ---
+    0x45, 0x00, 0x00, 0x58, // ver+IHL, DSCP, total_len=88
+    0x00, 0x01, 0x40, 0x00, // id, flags+frag (DF)
+    0x40, 0x06, 0x00, 0x00, // TTL=64, proto=TCP, checksum=0
+    0xcb, 0x00, 0x71, 0x05, // src = 203.0.113.5
+    0x0a, 0x00, 0x00, 0x01, // dst = 10.0.0.1
+    // --- TCP header ---
+    0xc0, 0xde, 0x00, 0x50, // src_port=49374, dst_port=80
+    0x00, 0x00, 0x00, 0x01, // seq
+    0x00, 0x00, 0x00, 0x00, // ack
+    0x50, 0x18, 0xff, 0xff, // data_off=5, flags=PSH+ACK, window
+    0x00, 0x00, 0x00, 0x00, // checksum, urgent
+    // --- HTTP payload ---
+    b'G', b'E', b'T', b' ', b'/', b'p', b'r', b'o', b'b', b'e', b' ', b'H', b'T', b'T', b'P', b'/',
+    b'1', b'.', b'1', b'\r', b'\n', b'U', b's', b'e', b'r', b'-', b'A', b'g', b'e', b'n', b't',
+    b':', b' ', b'T', b'e', b's', b't', b'B', b'o', b't', b'/', b'1', b'.', b'0', b'\r', b'\n',
+    b'\r', b'\n',
+];
+
+fn t_parse_pcap_binary() -> Result<(), String> {
+    let r = wbl_parse_packet(PCAP_BYTES);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}, want 1", r.stats.parsed));
+    }
+    if r.events[0].ip != "203.0.113.5" {
+        return Err(format!("ip={:?}, want 203.0.113.5", r.events[0].ip));
+    }
+    Ok(())
+}
+
+fn t_parse_pcap_http() -> Result<(), String> {
+    let r = wbl_parse_packet(PCAP_BYTES);
+    if r.events[0].method != "GET" {
+        return Err(format!("method={:?}, want GET", r.events[0].method));
+    }
+    if r.events[0].path != "/probe" {
+        return Err(format!("path={:?}, want /probe", r.events[0].path));
+    }
+    Ok(())
+}
+
+fn t_parse_pcap_ua() -> Result<(), String> {
+    let r = wbl_parse_packet(PCAP_BYTES);
+    if r.events[0].ua != "TestBot/1.0" {
+        return Err(format!("ua={:?}, want TestBot/1.0", r.events[0].ua));
+    }
+    Ok(())
+}
+
+fn t_parse_pcap_fmt() -> Result<(), String> {
+    let r = wbl_parse_packet(PCAP_BYTES);
+    if r.stats.format != "pcap" {
+        return Err(format!("format={:?}, want pcap", r.stats.format));
+    }
+    Ok(())
+}
+
+// xxd-style hex dump of PCAP_BYTES — f400 must decode and route through f454
+const HEXDUMP_XXD: &str = "\
+00000000: d4 c3 b2 a1 02 00 04 00 00 00 00 00 00 00 00 00  ................
+00000010: ff ff 00 00 01 00 00 00 00 4b 9a 63 00 00 00 00  .........K.c....
+00000020: 66 00 00 00 66 00 00 00 ff ff ff ff ff ff 00 0c  f...f...........
+00000030: 29 ab cd ef 08 00 45 00 00 58 00 01 40 00 40 06  ).....E..X..@.@.
+00000040: 00 00 cb 00 71 05 0a 00 00 01 c0 de 00 50 00 00  ....q........P..
+00000050: 00 01 00 00 00 00 50 18 ff ff 00 00 00 00 47 45  ......P.......GE
+00000060: 54 20 2f 70 72 6f 62 65 20 48 54 54 50 2f 31 2e  T /probe HTTP/1.
+00000070: 31 0d 0a 55 73 65 72 2d 41 67 65 6e 74 3a 20 54  1..User-Agent: T
+00000080: 65 73 74 42 6f 74 2f 31 2e 30 0d 0a 0d 0a        estBot/1.0....";
+
+fn t_parse_hexdump_xxd() -> Result<(), String> {
+    let r = wbl_parse_log(HEXDUMP_XXD);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}, want 1", r.stats.parsed));
+    }
+    if r.events[0].ip != "203.0.113.5" {
+        return Err(format!("ip={:?}, want 203.0.113.5", r.events[0].ip));
+    }
+    Ok(())
+}
+
+// Raw hex string — no offset or ascii column
+const HEXDUMP_RAW: &str = "d4c3b2a1020004000000000000000000ffff000001000000004b9a63000000006600000066000000ffffffffffff000c29abcdef0800450000580001400040060000cb0071050a000001c0de005000000001000000005018ffff00000000474554202f70726f626520485454502f312e310d0a557365722d4167656e743a2054657374426f742f312e300d0a0d0a";
+
+fn t_parse_hexdump_raw() -> Result<(), String> {
+    let r = wbl_parse_log(HEXDUMP_RAW);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}, want 1", r.stats.parsed));
+    }
+    if r.events[0].ip != "203.0.113.5" {
+        return Err(format!("ip={:?}, want 203.0.113.5", r.events[0].ip));
+    }
+    Ok(())
+}
+
+fn t_parse_hexdump_fmt() -> Result<(), String> {
+    let r = wbl_parse_log(HEXDUMP_RAW);
+    if r.stats.format != "hex-dump" {
+        return Err(format!("format={:?}, want hex-dump", r.stats.format));
     }
     Ok(())
 }

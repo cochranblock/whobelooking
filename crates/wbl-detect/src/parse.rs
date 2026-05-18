@@ -15,6 +15,11 @@
 //!  13. GCP Cloud Logging structured JSON (`httpRequest.remoteIp`)
 //!  14. Generic JSON fallback (`ip`, `remote_addr`, `remote_ip`, `client_ip`, etc.)
 //!
+//! Binary / packet-level entry point:
+//! * `f454 = parse_packet_data(&[u8])` — pcap v2.4 or hex-dump-decoded bytes
+//! * Feed hex dump text (xxd / Wireshark / tcpdump) to `f400` — it auto-detects
+//!   via `f455` and routes to `f454` internally.
+//!
 //! Output is `Vec<t100>` — uniform shape regardless of input format. The
 //! per-IP aggregator downstream doesn't care which format produced an event.
 
@@ -93,6 +98,13 @@ pub enum t101 {
     /// `clientIp`, `ClientHost`, etc.). Covers Caddy, Traefik, and custom
     /// application log shippers.
     GenericJson,
+    /// Binary pcap v2.4 file. Ethernet, raw IP, and Linux SLL link types
+    /// supported. IPv4 src extracted; TCP payloads scanned for HTTP method,
+    /// path, and User-Agent.
+    Pcap,
+    /// Hex dump text that was decoded to bytes and then parsed as pcap.
+    /// Covers xxd, Wireshark hex panel, tcpdump hex, and raw hex strings.
+    HexDump,
     Mixed,
     Unknown,
 }
@@ -115,6 +127,8 @@ impl t101 {
             t101::AzureJson => "azure-json",
             t101::GcpJson => "gcp-json",
             t101::GenericJson => "generic-json",
+            t101::Pcap => "pcap",
+            t101::HexDump => "hex-dump",
             t101::Mixed => "mixed",
             t101::Unknown => "unknown",
         }
@@ -1485,12 +1499,450 @@ fn f424(line: &str) -> Option<t100> {
     None
 }
 
+// ── Packet-level parsing (f454–f457) ─────────────────────────────────────────
+
+/// Read 4 bytes at `off` from `data` in either LE or BE byte order.
+fn read_u32(data: &[u8], off: usize, le: bool) -> Option<u32> {
+    let b = data.get(off..off + 4)?;
+    Some(if le {
+        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+    } else {
+        u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+    })
+}
+
+/// f455 = decode_hex_dump
+///
+/// Detect common hex dump text formats and decode them to raw bytes.
+/// Supported input shapes:
+///   * **xxd**:       `00000000: d4c3 b2a1 ...  ....`
+///   * **Wireshark**: `0000  d4 c3 b2 a1 ...  ....`
+///   * **tcpdump**:   `\t0x0000:  4500 0028 ...`
+///   * **raw hex**:   `d4c3b2a10200...` (entire content is lowercase hex)
+///
+/// Returns `None` if the text doesn't carry enough hex-dump signal.
+fn f455(text: &str) -> Option<Vec<u8>> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum HFmt {
+        Xxd,
+        Wireshark,
+        Tcpdump,
+    }
+
+    // Raw hex: entire non-whitespace content is hex digits, ≥ 32 chars.
+    // Check this first — it can be a single line with no structural markers.
+    {
+        let stripped: String = text.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        if stripped.len() >= 32 && stripped.chars().all(|c| c.is_ascii_hexdigit()) {
+            let hex: Vec<u8> = stripped.bytes().collect();
+            let mut bytes: Vec<u8> = Vec::with_capacity(hex.len() / 2);
+            for pair in hex.chunks_exact(2) {
+                let hi = (pair[0] as char).to_digit(16).unwrap_or(0) as u8;
+                let lo = (pair[1] as char).to_digit(16).unwrap_or(0) as u8;
+                bytes.push((hi << 4) | lo);
+            }
+            if bytes.len() >= 8 {
+                return Some(bytes);
+            }
+        }
+    }
+
+    let sample: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(12)
+        .collect();
+    if sample.len() < 2 {
+        return None;
+    }
+
+    // xxd: `[0-9a-f]{4,9}: ...`
+    let xxd = sample
+        .iter()
+        .filter(|&&l| {
+            let t = l.trim();
+            t.find(": ")
+                .map(|ci| (4..=9).contains(&ci) && t[..ci].chars().all(|c| c.is_ascii_hexdigit()))
+                .unwrap_or(false)
+        })
+        .count();
+
+    // Wireshark: `[0-9a-f]{4}  ` (4 hex + two spaces)
+    let ws = sample
+        .iter()
+        .filter(|&&l| {
+            let t = l.trim();
+            t.len() > 6
+                && t[..4].chars().all(|c| c.is_ascii_hexdigit())
+                && t.get(4..6) == Some("  ")
+        })
+        .count();
+
+    // tcpdump: `0x[hex]:` prefix
+    let tc = sample
+        .iter()
+        .filter(|&&l| {
+            let t = l.trim();
+            t.starts_with("0x")
+                && t[2..].chars().take(4).all(|c| c.is_ascii_hexdigit())
+                && t.contains(':')
+        })
+        .count();
+
+    let fmt = if xxd >= 2 {
+        HFmt::Xxd
+    } else if ws >= 2 {
+        HFmt::Wireshark
+    } else if tc >= 2 {
+        HFmt::Tcpdump
+    } else {
+        return None;
+    };
+
+    let mut bytes: Vec<u8> = Vec::new();
+
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+
+        // Extract the hex-data portion of this line (strip offset prefix
+        // and trailing ASCII column where applicable).
+        let hex_section: &str = match fmt {
+            HFmt::Xxd => {
+                let ci = match t.find(": ") {
+                    Some(i) => i,
+                    None => continue,
+                };
+                let after = &t[ci + 2..];
+                match after.find("  ") {
+                    Some(si) => &after[..si],
+                    None => after,
+                }
+            }
+            HFmt::Wireshark => {
+                if t.len() < 6 {
+                    continue;
+                }
+                let after = &t[6..]; // skip `0000  `
+                // Hex section is ≤ 48 chars wide (16 bytes × 3 chars each)
+                let cap = after.len().min(50);
+                let portion = &after[..cap];
+                // Strip ASCII column: trailing double-space + printable text
+                match portion.rfind("  ") {
+                    Some(si) if portion.len() - si <= 20 => &portion[..si],
+                    _ => portion,
+                }
+            }
+            HFmt::Tcpdump => match t.find(':') {
+                Some(ci) => t[ci + 1..].trim_start(),
+                None => continue,
+            },
+        };
+
+        // Collect all hex digit bytes from the section, decode as pairs.
+        let hex: Vec<u8> = hex_section
+            .bytes()
+            .filter(|b| b.is_ascii_hexdigit())
+            .collect();
+        for pair in hex.chunks_exact(2) {
+            let hi = (pair[0] as char).to_digit(16).unwrap_or(0) as u8;
+            let lo = (pair[1] as char).to_digit(16).unwrap_or(0) as u8;
+            bytes.push((hi << 4) | lo);
+        }
+    }
+
+    if bytes.len() >= 8 { Some(bytes) } else { None }
+}
+
+/// f456 = parse_pcap_bytes
+///
+/// Parse a pcap v2.4 binary file (`data`) and return one `t100` event per
+/// packet that contains an IPv4 or IPv6 source address. Handles both
+/// little-endian and big-endian pcap files and the nanosecond-timestamp
+/// variant. Supported link types: 1 (Ethernet), 101 (raw IP), 113 (Linux SLL).
+fn f456(data: &[u8]) -> Vec<t100> {
+    if data.len() < 24 {
+        return vec![];
+    }
+
+    // Detect magic and byte order (LE vs BE, second/ns timestamps).
+    let magic_le = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    let (le, _ns) = match magic_le {
+        0xa1b2_c3d4 => (true, false),
+        0xa1b2_3c4d => (true, true),
+        _ => {
+            let magic_be = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+            match magic_be {
+                0xa1b2_c3d4 => (false, false),
+                0xa1b2_3c4d => (false, true),
+                _ => return vec![],
+            }
+        }
+    };
+
+    let network = match read_u32(data, 20, le) {
+        Some(n) => n,
+        None => return vec![],
+    };
+
+    let mut pos = 24usize; // first packet record
+    let mut events: Vec<t100> = Vec::new();
+
+    while pos + 16 <= data.len() {
+        let ts_sec = match read_u32(data, pos, le) {
+            Some(t) => t as i64,
+            None => break,
+        };
+        let incl_len = match read_u32(data, pos + 8, le) {
+            Some(n) => n as usize,
+            None => break,
+        };
+        pos += 16;
+
+        if pos.saturating_add(incl_len) > data.len() {
+            break;
+        }
+        let pkt = &data[pos..pos + incl_len];
+        pos += incl_len;
+
+        if let Some(e) = f457(pkt, ts_sec, network) {
+            events.push(e);
+        }
+    }
+
+    events
+}
+
+/// f457 = extract_packet_event
+///
+/// Extract one `t100` event from a raw packet buffer. Handles three link
+/// types and falls through to the IP-layer extractor for both IPv4 and IPv6.
+/// TCP payloads are scanned for HTTP request lines and `User-Agent` headers.
+fn f457(data: &[u8], ts: i64, link_type: u32) -> Option<t100> {
+    let (ip_off, ethertype) = match link_type {
+        1 => {
+            // Ethernet II: dst(6) src(6) ethertype(2) = 14 bytes
+            if data.len() < 14 {
+                return None;
+            }
+            let et = u16::from_be_bytes([data[12], data[13]]);
+            // 802.1Q VLAN tag — skip extra 4 bytes
+            if et == 0x8100 {
+                if data.len() < 18 {
+                    return None;
+                }
+                (18usize, u16::from_be_bytes([data[16], data[17]]))
+            } else {
+                (14usize, et)
+            }
+        }
+        101 => {
+            // Raw IP — no link header
+            if data.is_empty() {
+                return None;
+            }
+            let et = if data[0] >> 4 == 6 { 0x86DD } else { 0x0800 };
+            (0usize, et)
+        }
+        113 => {
+            // Linux cooked capture (SLL): 16 bytes, ethertype at 14-15
+            if data.len() < 16 {
+                return None;
+            }
+            (16usize, u16::from_be_bytes([data[14], data[15]]))
+        }
+        _ => return None,
+    };
+
+    match ethertype {
+        0x0800 => f457_v4(data, ip_off, ts),
+        0x86DD => f457_v6(data, ip_off, ts),
+        _ => None,
+    }
+}
+
+fn f457_v4(data: &[u8], off: usize, ts: i64) -> Option<t100> {
+    if data.len() < off + 20 {
+        return None;
+    }
+    let ip = &data[off..];
+    if ip[0] >> 4 != 4 {
+        return None; // not IPv4
+    }
+    let ihl = (ip[0] & 0x0f) as usize * 4;
+    if ihl < 20 || data.len() < off + ihl {
+        return None;
+    }
+    let src = format!("{}.{}.{}.{}", ip[12], ip[13], ip[14], ip[15]);
+    let proto = ip[9];
+
+    let (method, path, ua) = if proto == 6 {
+        // TCP
+        let tcp_off = off + ihl;
+        if data.len() < tcp_off + 20 {
+            (String::new(), String::new(), String::new())
+        } else {
+            let tcp = &data[tcp_off..];
+            let tcp_hdr = ((tcp[12] >> 4) as usize) * 4;
+            let payload_off = tcp_off + tcp_hdr;
+            if payload_off < data.len() {
+                f457_http(&data[payload_off..])
+            } else {
+                (String::new(), String::new(), String::new())
+            }
+        }
+    } else {
+        (String::new(), String::new(), String::new())
+    };
+
+    Some(t100 {
+        ts,
+        ip: src,
+        cc: String::new(),
+        method,
+        path,
+        ua: truncate(ua, 256),
+        referrer: String::new(),
+    })
+}
+
+fn f457_v6(data: &[u8], off: usize, ts: i64) -> Option<t100> {
+    if data.len() < off + 40 {
+        return None;
+    }
+    let ip = &data[off..];
+    if ip[0] >> 4 != 6 {
+        return None;
+    }
+    // IPv6 source address: bytes 8–23
+    let src = format!(
+        "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:\
+         {:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
+        ip[8],
+        ip[9],
+        ip[10],
+        ip[11],
+        ip[12],
+        ip[13],
+        ip[14],
+        ip[15],
+        ip[16],
+        ip[17],
+        ip[18],
+        ip[19],
+        ip[20],
+        ip[21],
+        ip[22],
+        ip[23],
+    );
+    Some(t100 {
+        ts,
+        ip: src,
+        cc: String::new(),
+        method: String::new(),
+        path: String::new(),
+        ua: String::new(),
+        referrer: String::new(),
+    })
+}
+
+/// Scan up to 8 KB of a TCP payload for an HTTP request line and
+/// `User-Agent` header. Returns `(method, path, ua)`.
+fn f457_http(payload: &[u8]) -> (String, String, String) {
+    const METHODS: &[&[u8]] = &[
+        b"GET ",
+        b"POST ",
+        b"PUT ",
+        b"DELETE ",
+        b"HEAD ",
+        b"OPTIONS ",
+        b"PATCH ",
+    ];
+    let search = &payload[..payload.len().min(8192)];
+
+    let found = METHODS.iter().find_map(|m| {
+        search
+            .windows(m.len())
+            .position(|w| w == *m)
+            .map(|pos| (pos, m.len()))
+    });
+
+    let (method, path) = if let Some((start, mlen)) = found {
+        let m = String::from_utf8_lossy(&search[start..start + mlen - 1]).to_string();
+        let rest = &search[start + mlen..];
+        let pend = rest
+            .iter()
+            .position(|&b| b == b' ' || b == b'\r' || b == b'\n')
+            .unwrap_or(rest.len().min(512));
+        let p = String::from_utf8_lossy(&rest[..pend]).to_string();
+        (m, p)
+    } else {
+        (String::new(), String::new())
+    };
+
+    let ua = find_http_header(search, b"user-agent: ").unwrap_or_default();
+
+    (method, path, ua)
+}
+
+fn find_http_header(data: &[u8], name: &[u8]) -> Option<String> {
+    // Case-insensitive search for `\r\n<name>` or start-of-buffer `<name>`
+    let needle_len = name.len();
+    let pos = data
+        .windows(needle_len)
+        .position(|w| w.eq_ignore_ascii_case(name))?;
+    let val = &data[pos + needle_len..];
+    let end = val
+        .iter()
+        .position(|&b| b == b'\r' || b == b'\n')
+        .unwrap_or(val.len().min(256));
+    Some(String::from_utf8_lossy(&val[..end]).to_string())
+}
+
+/// f454 = parse_packet_data
+///
+/// Binary entry point. Detects pcap v2.4 by magic bytes and extracts
+/// one event per packet containing an IP address. Returns an empty result
+/// (format = unknown) for data that isn't a recognised pcap file.
+///
+/// Feed hex dump *text* (xxd / Wireshark / tcpdump) to `f400` instead —
+/// it auto-detects via `f455` and routes here internally with format
+/// = `HexDump`.
+pub fn f454(data: &[u8]) -> t103 {
+    let events = f456(data);
+    let parsed = events.len();
+    t103 {
+        events,
+        stats: t102 {
+            parsed,
+            skipped: 0,
+            format: if parsed > 0 {
+                t101::Pcap.name().to_string()
+            } else {
+                t101::Unknown.name().to_string()
+            },
+        },
+    }
+}
+
 /// Top-level: take a whole log file as `&str`, return parsed events and
 /// per-format counts. Detects the format from the first non-blank line
 /// (CSV header sniff for Cloudflare CSV; `{` prefix for JSONL; else
 /// text-line shapes). Mixed-format files fall back to per-line parsing.
 /// f400 = parse_log
 pub fn f400(text: &str) -> t103 {
+    // Hex-dump text (xxd / Wireshark / tcpdump / raw hex) — decode to bytes
+    // and route through the packet parser before touching line-based logic.
+    if let Some(bytes) = f455(text) {
+        let mut r = f454(&bytes);
+        if !r.events.is_empty() {
+            r.stats.format = t101::HexDump.name().to_string();
+            return r;
+        }
+    }
+
     let mut events: Vec<t100> = Vec::new();
     let mut parsed = 0usize;
     let mut skipped = 0usize;

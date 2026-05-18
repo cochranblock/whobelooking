@@ -117,7 +117,7 @@ Registers with approuter. Cloudflare tunnel routes traffic.
 | Artifact | Evidence |
 |----------|----------|
 | Test binary | `cargo run --bin whobelooking-test --features tests,serve` |
-| 255 unit tests | wbl-detect parsers (log formats, classification, enrichment, report rendering), scan API, web content, security, legal |
+| 265 unit tests | wbl-detect parsers (log formats, classification, enrichment, report rendering, pcap/hex-dump), scan API, web content, security, legal |
 | Triple Sims | 3 passes, all 255 produce identical results — determinism gate |
 | 14/14 standards gate | clippy, fmt, audit, deny, msrv, unsafe, docs, changelog, license, test\_binary, allow\_unused, error\_handling, secrets, cargo\_meta |
 | `#![forbid(unsafe_code)]` | `crates/wbl-detect/src/lib.rs` line 1 |
@@ -160,7 +160,10 @@ Registers with approuter. Cloudflare tunnel routes traffic.
 | W3C / IIS / HAProxy ingest | W3C Extended (`#Fields:` column mapping, mid-file rotation), HAProxy TCP (IP:PORT + `{}` capture blocks) |
 | AWS ALB ingest | `f436` — space-delimited fixed column order, quoted request + UA; `http`/`https`/`h2`/`ws`/`wss`/`grpc` detection |
 | Azure diagnostic log ingest | `f437` — Activity Log (`callerIpAddress`), App Gateway (`clientIP`), CDN (`clientIp`); key-prefix scan finds IP at any nesting depth |
+| GCP Cloud Logging ingest | `f439` — `httpRequest.remoteIp`, `requestUrl` path strip, `requestMethod`; covers Cloud Run, GCE, GKE |
 | Generic JSON ingest | `f438` — last-resort: any JSON with `ip`, `remote_addr`, `remote_ip`, `client_ip`, `clientIp`, `ClientHost`, etc. — covers Caddy, Traefik, custom apps |
+| Binary pcap ingest | `f454` — pcap v2.4 LE/BE, Ethernet/raw-IP/Linux SLL; IPv4 + IPv6 + TCP HTTP extraction (method/path/UA) |
+| Hex dump ingest | `f455` — xxd / Wireshark / tcpdump / raw hex string auto-detected by `f400`; decoded to bytes → routed through `f454` |
 | Raw IP extraction | `f435` — regex fallback on any unstructured file (ACAS/Nessus, email headers, config dumps); octets validated 0–255 |
 | Visit logging | Per-request counter in sled (`visits/` tree) |
 | Prometheus endpoint | `/metrics` (token-gated) |
