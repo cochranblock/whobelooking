@@ -2,6 +2,7 @@
 //! Web server for whobelooking.org
 
 pub mod admin;
+pub mod cf_pull;
 pub mod detect;
 pub mod enrichment;
 pub mod feedback;

@@ -8,7 +8,7 @@ use axum::{
 };
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
-use super::{admin, detect, enrichment, metrics, openapi, pages, scan, try_page};
+use super::{admin, cf_pull, detect, enrichment, metrics, openapi, pages, scan, try_page};
 
 pub fn build() -> Router {
     Router::new()
@@ -49,6 +49,11 @@ pub fn build() -> Router {
         // Server never sees a line of customer data; we just serve the static page.
         .route("/try", get(try_page::index))
         .route("/try/", get(try_page::index))
+        // /api/cf/pull — local proxy for CF Analytics GraphQL. Runs the CF
+        // request server-side so the browser avoids the CORS dead-end.
+        // Only useful when whobelooking is running on the user's own machine;
+        // the token is used once per request and never stored.
+        .route("/api/cf/pull", get(cf_pull::pull))
         // /api/enrichment.json — public IP→org snapshot from the RDAP cache.
         // Pre-warms the in-browser /try lookups so common ranges (Microsoft,
         // Google, AWS) resolve instantly without each visitor re-doing RDAP.

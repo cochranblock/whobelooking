@@ -56,6 +56,59 @@ body::after {
 #file-input { display:none; }
 .drop-fineprint { max-width:540px; text-align:center; font-size:11px; color:var(--muted); line-height:1.6; }
 .drop-fineprint strong { color:var(--teal); }
+
+/* CF pull panel */
+.cf-panel {
+  width:min(640px,100%); border:1px solid var(--border); border-radius:8px;
+  background:var(--surface); overflow:hidden;
+}
+.cf-panel-toggle {
+  width:100%; padding:14px 20px; background:transparent; border:0;
+  display:flex; align-items:center; gap:10px; cursor:pointer;
+  font-family:var(--mono); font-size:11px; letter-spacing:.15em; text-transform:uppercase;
+  color:var(--muted); transition:color .15s;
+}
+.cf-panel-toggle:hover { color:var(--accent); }
+.cf-panel-toggle .cf-arrow { transition:transform .2s; font-size:9px; }
+.cf-panel-toggle.open .cf-arrow { transform:rotate(90deg); }
+.cf-panel-toggle .cf-badge {
+  margin-left:auto; font-size:9px; padding:2px 8px; border-radius:2px;
+  border:1px solid var(--border); color:var(--muted);
+}
+.cf-panel-body {
+  display:none; padding:0 20px 20px; border-top:1px solid var(--border);
+}
+.cf-panel-body.open { display:block; }
+.cf-fields { display:grid; gap:10px; margin-top:16px; }
+.cf-field label {
+  display:block; font-size:10px; letter-spacing:.15em; text-transform:uppercase;
+  color:var(--muted); margin-bottom:5px;
+}
+.cf-field input, .cf-field select {
+  width:100%; padding:8px 10px; background:var(--surface2); border:1px solid var(--border);
+  border-radius:3px; color:var(--text); font-family:var(--mono); font-size:12px;
+  outline:none; transition:border-color .15s;
+}
+.cf-field input:focus, .cf-field select:focus { border-color:var(--accent); }
+.cf-field input::placeholder { color:var(--muted); }
+.cf-row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.cf-pull-btn {
+  margin-top:14px; width:100%; padding:10px; background:transparent;
+  border:1px solid var(--accent); border-radius:3px; color:var(--accent);
+  font-family:var(--mono); font-size:11px; letter-spacing:.15em; text-transform:uppercase;
+  cursor:pointer; transition:all .15s;
+}
+.cf-pull-btn:hover:not(:disabled) { background:var(--accent); color:var(--bg); }
+.cf-pull-btn:disabled { opacity:.4; cursor:default; }
+.cf-status { margin-top:10px; font-size:10px; color:var(--muted); min-height:16px; letter-spacing:.05em; }
+.cf-status.err { color:var(--orange); }
+.cf-status.ok { color:var(--teal); }
+.cf-install-hint {
+  margin-top:12px; padding:10px 14px; background:var(--surface2);
+  border:1px solid rgba(255,107,53,.3); border-radius:3px;
+  font-size:10px; color:var(--muted); line-height:1.6; display:none;
+}
+.cf-install-hint a { color:var(--accent); text-decoration:underline; }
 .drop-trust { display:flex; gap:24px; flex-wrap:wrap; justify-content:center; font-size:10px; color:var(--muted); letter-spacing:.15em; text-transform:uppercase; }
 .drop-trust span { display:flex; align-items:center; gap:6px; }
 .drop-trust .dot { width:6px; height:6px; border-radius:50%; background:var(--teal); }
@@ -111,7 +164,48 @@ iframe.report-frame { flex:1; width:100%; border:0; background:var(--bg); }
       <span>whobelooking</span> · <span>nginx</span> · <span>apache</span> · <span>cloudflare jsonl/csv</span>
     </div>
   </label>
-  <input type="file" id="file-input" accept=".log,.txt,.csv,.gz,.jsonl,.json">
+  <input type="file" id="file-input" accept=".log,.txt,.csv,.gz,.jsonl,.json,.pcap,.pcapng,.cap">
+
+  <!-- CF pull panel — visible only when whobelooking runs locally -->
+  <div class="cf-panel" id="cf-panel">
+    <button class="cf-panel-toggle" id="cf-toggle" type="button">
+      <span class="cf-arrow">▶</span>
+      <span>Pull from Cloudflare</span>
+      <span class="cf-badge">requires local install</span>
+    </button>
+    <div class="cf-panel-body" id="cf-body">
+      <div class="cf-fields">
+        <div class="cf-row">
+          <div class="cf-field">
+            <label for="cf-zone">Zone ID</label>
+            <input id="cf-zone" type="text" placeholder="32-char hex" maxlength="32" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="cf-field">
+            <label for="cf-hours">Time range</label>
+            <select id="cf-hours">
+              <option value="1">Last 1 hour</option>
+              <option value="6">Last 6 hours</option>
+              <option value="12">Last 12 hours</option>
+              <option value="24" selected>Last 24 hours</option>
+              <option value="48">Last 48 hours</option>
+              <option value="72">Last 72 hours</option>
+            </select>
+          </div>
+        </div>
+        <div class="cf-field">
+          <label for="cf-token">API Token <span style="color:var(--muted);text-transform:none;letter-spacing:0">(Analytics:Read permission · never stored)</span></label>
+          <input id="cf-token" type="password" placeholder="CF API token" autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+      <button class="cf-pull-btn" id="cf-pull-btn" type="button">Pull logs</button>
+      <div class="cf-status" id="cf-status"></div>
+      <div class="cf-install-hint" id="cf-install-hint">
+        This feature requires <strong style="color:var(--accent)">whobelooking</strong> running locally on your machine.<br>
+        Get it: <a href="https://github.com/cochranblock/whobelooking" target="_blank" rel="noopener">github.com/cochranblock/whobelooking</a>
+        — run <code style="color:var(--teal)">whobelooking serve</code>, then open <code style="color:var(--teal)">localhost:8082/try</code>.
+      </div>
+    </div>
+  </div>
 
   <div class="wasm-stamp" id="wasm-stamp">loading WASM engine…</div>
 
@@ -441,6 +535,101 @@ document.getElementById("btn-reset").addEventListener("click", () => {
   document.getElementById("drop-shell").style.display = "flex";
   fileInput.value = "";
   lastHtml = "";
+});
+
+// ── CF pull panel ─────────────────────────────────────────────────────
+const cfToggle = document.getElementById("cf-toggle");
+const cfBody = document.getElementById("cf-body");
+const cfPullBtn = document.getElementById("cf-pull-btn");
+const cfStatus = document.getElementById("cf-status");
+const cfInstallHint = document.getElementById("cf-install-hint");
+
+cfToggle.addEventListener("click", () => {
+  const open = cfBody.classList.toggle("open");
+  cfToggle.classList.toggle("open", open);
+});
+
+cfPullBtn.addEventListener("click", async () => {
+  await wasmReady;
+  const zoneId = document.getElementById("cf-zone").value.trim();
+  const token = document.getElementById("cf-token").value.trim();
+  const hours = document.getElementById("cf-hours").value;
+
+  cfStatus.className = "cf-status";
+  cfInstallHint.style.display = "none";
+
+  if (!zoneId || zoneId.length !== 32) {
+    cfStatus.className = "cf-status err";
+    cfStatus.textContent = "Zone ID must be a 32-character hex string.";
+    return;
+  }
+  if (!token) {
+    cfStatus.className = "cf-status err";
+    cfStatus.textContent = "API token is required.";
+    return;
+  }
+
+  cfPullBtn.disabled = true;
+  cfStatus.textContent = "pulling from Cloudflare…";
+
+  const url = `/api/cf/pull?zone_id=${encodeURIComponent(zoneId)}&token=${encodeURIComponent(token)}&hours=${hours}`;
+  let resp;
+  try {
+    resp = await fetch(url);
+  } catch (e) {
+    cfPullBtn.disabled = false;
+    cfStatus.className = "cf-status err";
+    cfStatus.textContent = "Could not reach /api/cf/pull — is whobelooking running locally?";
+    cfInstallHint.style.display = "block";
+    return;
+  }
+
+  if (resp.status === 401) {
+    cfPullBtn.disabled = false;
+    cfStatus.className = "cf-status err";
+    cfStatus.textContent = "CF token rejected. Check zone ID and token permissions (needs Analytics:Read).";
+    return;
+  }
+  if (!resp.ok) {
+    const msg = await resp.text().catch(() => resp.statusText);
+    cfPullBtn.disabled = false;
+    cfStatus.className = "cf-status err";
+    cfStatus.textContent = `Error ${resp.status}: ${msg.slice(0, 120)}`;
+    return;
+  }
+
+  const ndjson = await resp.text();
+  const eventCount = resp.headers.get("X-WBL-Events") || "?";
+  cfPullBtn.disabled = false;
+
+  if (!ndjson.trim()) {
+    cfStatus.className = "cf-status err";
+    cfStatus.textContent = "No events returned — check the zone ID and time range.";
+    return;
+  }
+
+  cfStatus.className = "cf-status ok";
+  cfStatus.textContent = `${eventCount} events pulled — analyzing…`;
+
+  // Feed into WASM pipeline exactly like a dropped file.
+  const label = `cloudflare-zone-${zoneId.slice(0, 8)} · last ${hours}h`;
+  document.getElementById("drop-shell").style.display = "none";
+  document.getElementById("report-shell").classList.add("active");
+  document.getElementById("r-source").textContent = label;
+  document.getElementById("r-status").textContent = "parsing…";
+
+  let session;
+  try {
+    session = new ReportSession(ndjson, label);
+  } catch (e) {
+    showFatal(`Parse error — ${e?.message ?? e}`);
+    return;
+  }
+  const stats = session.stats();
+  document.getElementById("r-source").textContent =
+    `${label} · ${stats.parsed.toLocaleString()} events · ${stats.unique_ips} IPs · ${stats.format}`;
+  lastHtml = session.renderHtml();
+  await enrichAndRender(session, label);
 });
 </script>
 </body>
