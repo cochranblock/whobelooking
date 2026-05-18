@@ -69,6 +69,7 @@ whobelooking pop                # take next pending job
 whobelooking done {id}          # mark complete
 whobelooking deliver {id}       # mark delivered
 whobelooking report ...         # run enrichment pipeline
+whobelooking render <file>      # log file → rDNS-enriched standalone HTML report
 whobelooking scout ...          # federal contract search
 ```
 
@@ -116,8 +117,8 @@ Registers with approuter. Cloudflare tunnel routes traffic.
 | Artifact | Evidence |
 |----------|----------|
 | Test binary | `cargo run --bin whobelooking-test --features tests,serve` |
-| 227 unit tests | wbl-detect parsers (log formats, classification, enrichment, report rendering), scan API, web content, security, legal |
-| Triple Sims | 3 passes, all 227 produce identical results — determinism gate |
+| 241 unit tests | wbl-detect parsers (log formats, classification, enrichment, report rendering), scan API, web content, security, legal |
+| Triple Sims | 3 passes, all 241 produce identical results — determinism gate |
 | 14/14 standards gate | clippy, fmt, audit, deny, msrv, unsafe, docs, changelog, license, test\_binary, allow\_unused, error\_handling, secrets, cargo\_meta |
 | `#![forbid(unsafe_code)]` | `crates/wbl-detect/src/lib.rs` line 1 |
 
@@ -155,7 +156,9 @@ Registers with approuter. Cloudflare tunnel routes traffic.
 | Artifact | Evidence |
 |----------|----------|
 | OTEL metrics | `wbl.enrichment.snapshot.rebuilds`, `wbl.enrichment.snapshot.entries` — emitted via OTLP when `otel` feature enabled |
-| Syslog ingest | RFC 3164 + RFC 5424, ELK/Logstash, Splunk KV — 8 log formats total |
+| Syslog ingest | RFC 3164 + RFC 5424, ELK/Logstash, Splunk KV — 8 structured log formats total |
+| W3C / IIS / HAProxy ingest | W3C Extended (`#Fields:` column mapping, mid-file rotation), HAProxy TCP (IP:PORT + `{}` capture blocks) |
+| Raw IP extraction | `f435` — regex fallback on any unstructured file (ACAS/Nessus, email headers, config dumps); octets validated 0–255 |
 | Visit logging | Per-request counter in sled (`visits/` tree) |
 | Prometheus endpoint | `/metrics` (token-gated) |
 

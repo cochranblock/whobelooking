@@ -1867,6 +1867,15 @@ const TESTS: &[(&str, TestFn)] = &[
         "parse_haproxy_ua_from_capture_block",
         t_parse_haproxy_ua_capture,
     ),
+    // Raw IP extraction fallback
+    ("parse_raw_extracts_ips_from_unstructured", t_parse_raw_ips),
+    ("parse_raw_deduplicates_repeated_ip", t_parse_raw_dedup),
+    ("parse_raw_rejects_invalid_octets", t_parse_raw_invalid),
+    ("parse_raw_format_label", t_parse_raw_format),
+    (
+        "parse_raw_not_triggered_when_structured_matches",
+        t_parse_raw_no_trigger,
+    ),
     ("parse_jsonl_unicode_escape_resolves", t_parse_jsonl_uescape),
     (
         "parse_jsonl_backslash_quote_in_string",
@@ -3294,6 +3303,81 @@ fn t_parse_haproxy_ua_capture() -> Result<(), String> {
     }
     if r.events[0].ua != "curl/8" {
         return Err(format!("ua={:?}, want curl/8", r.events[0].ua));
+    }
+    Ok(())
+}
+
+fn t_parse_raw_ips() -> Result<(), String> {
+    // Simulates ACAS/Nessus output or any blob of text with IPs in it.
+    let blob =
+        "Host: 203.0.113.5\nConnected from 198.51.100.7 to server.\nSee also 10.0.0.1 (internal).";
+    let r = wbl_parse_log(blob);
+    if r.stats.parsed < 2 {
+        return Err(format!("parsed={}, want ≥2 (public IPs)", r.stats.parsed));
+    }
+    let ips: std::collections::BTreeSet<_> = r.events.iter().map(|e| e.ip.as_str()).collect();
+    if !ips.contains("203.0.113.5") {
+        return Err(format!("missing 203.0.113.5 in {:?}", ips));
+    }
+    if !ips.contains("198.51.100.7") {
+        return Err(format!("missing 198.51.100.7 in {:?}", ips));
+    }
+    Ok(())
+}
+
+fn t_parse_raw_dedup() -> Result<(), String> {
+    let blob = "alert: 1.2.3.4 probed us\nalert: 1.2.3.4 tried again\nalert: 1.2.3.4 still going";
+    let r = wbl_parse_log(blob);
+    // 3 occurrences → 3 synthetic events (aggregator will roll them up to 1 IP with hits=3)
+    if r.stats.parsed != 3 {
+        return Err(format!(
+            "parsed={}, want 3 (one per occurrence)",
+            r.stats.parsed
+        ));
+    }
+    let agg = wbl_detect::f401(&r.events);
+    let rec = agg
+        .ips
+        .get("1.2.3.4")
+        .ok_or("1.2.3.4 not in aggregated report")?;
+    if rec.hits != 3 {
+        return Err(format!("hits={}, want 3", rec.hits));
+    }
+    Ok(())
+}
+
+fn t_parse_raw_invalid() -> Result<(), String> {
+    // 999.999.999.999 has octets > 255 — must not be extracted
+    let blob = "version 1.2.3.4 and bad addr 999.999.999.999 here";
+    let r = wbl_parse_log(blob);
+    let ips: Vec<_> = r.events.iter().map(|e| e.ip.as_str()).collect();
+    if ips.contains(&"999.999.999.999") {
+        return Err("999.999.999.999 should be rejected (octet > 255)".into());
+    }
+    if !ips.contains(&"1.2.3.4") {
+        return Err("1.2.3.4 should be extracted".into());
+    }
+    Ok(())
+}
+
+fn t_parse_raw_format() -> Result<(), String> {
+    let blob = "attacker 203.0.113.99 tried to log in";
+    let r = wbl_parse_log(blob);
+    if r.stats.format != "raw" {
+        return Err(format!("format={:?}, want raw", r.stats.format));
+    }
+    Ok(())
+}
+
+fn t_parse_raw_no_trigger() -> Result<(), String> {
+    // A valid nginx combined line should NOT fall through to raw extraction.
+    let line = "1.2.3.4 - - [15/Jan/2026:18:42:11 +0000] \"GET /foo HTTP/1.1\" 200 1234 \"-\" \"Mozilla/5.0\"";
+    let r = wbl_parse_log(line);
+    if r.stats.format == "raw" {
+        return Err("nginx combined line should not trigger raw fallback".into());
+    }
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}, want 1", r.stats.parsed));
     }
     Ok(())
 }

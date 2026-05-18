@@ -66,6 +66,11 @@ pub enum t101 {
     /// HAProxy HTTP mode log. Default format: `IP:PORT [date] frontend
     /// backend/server Tq/Tw/Tc/Tr/Tt status bytes ... "METHOD PATH HTTP/v"`.
     HaProxy,
+    /// Raw text extraction fallback. No recognised log format was found;
+    /// IPv4 addresses were scraped from the raw content via regex. Used for
+    /// ACAS/Nessus output, email headers, config dumps, or any unstructured
+    /// text that contains IP addresses.
+    Raw,
     Mixed,
     Unknown,
 }
@@ -83,6 +88,7 @@ impl t101 {
             t101::Splunk => "splunk",
             t101::W3c => "w3c-extended",
             t101::HaProxy => "haproxy",
+            t101::Raw => "raw",
             t101::Mixed => "mixed",
             t101::Unknown => "unknown",
         }
@@ -944,6 +950,60 @@ fn f434(line: &str, idx: &W3cIdx) -> Option<t100> {
     })
 }
 
+fn ipv4_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?:^|[^0-9])(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?:[^0-9]|$)")
+            .expect("ipv4 pattern")
+    })
+}
+
+/// f435 = extract_raw_ips
+///
+/// Last-resort fallback for unstructured input (ACAS/Nessus output, email
+/// headers, config dumps, paste-bin text, etc.). Regex-scans the entire
+/// text for IPv4 addresses, validates each octet is 0–255, deduplicates,
+/// and returns one synthetic `t100` per unique IP. Each appearance of the
+/// same IP in the text increments its hit count via repeated synthetic
+/// events — callers aggregate with `f401` as normal.
+///
+/// No timestamp, method, path, or UA is synthesised — those fields are
+/// left empty so enrichment (rDNS/RDAP) carries the full weight of
+/// identification.
+fn f435(text: &str) -> Vec<t100> {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for cap in ipv4_re().captures_iter(text) {
+        let ip = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        if ip.is_empty() {
+            continue;
+        }
+        // Validate all four octets are ≤ 255.
+        let valid = ip
+            .split('.')
+            .filter_map(|o| o.parse::<u16>().ok())
+            .filter(|&o| o <= 255)
+            .count()
+            == 4;
+        if valid {
+            *counts.entry(ip.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .flat_map(|(ip, n)| {
+            (0..n).map(move |_| t100 {
+                ts: 0,
+                ip: ip.clone(),
+                cc: String::new(),
+                method: String::new(),
+                path: String::new(),
+                ua: String::new(),
+                referrer: String::new(),
+            })
+        })
+        .collect()
+}
+
 /// f428 = unwrap_syslog.
 ///
 /// If `line` starts with a syslog priority header (`<NNN>` where NNN is
@@ -1085,6 +1145,7 @@ pub fn f400(text: &str) -> t103 {
     let mut events: Vec<t100> = Vec::new();
     let mut parsed = 0usize;
     let mut skipped = 0usize;
+    let mut json_malformed = 0usize;
     let mut format = t101::Unknown;
 
     // First non-empty line drives format detection.
@@ -1302,6 +1363,7 @@ pub fn f400(text: &str) -> t103 {
                 }
             }
             // JSON-shaped but unparseable → genuine skip, no text fallback.
+            json_malformed += 1;
             skipped += 1;
             continue;
         }
@@ -1344,6 +1406,19 @@ pub fn f400(text: &str) -> t103 {
             parsed += 1;
         } else {
             skipped += 1;
+        }
+    }
+
+    // Raw fallback: if no structured parser matched anything, regex-scan
+    // the entire text for IPv4 addresses. Covers ACAS/Nessus output, email
+    // headers, config dumps, and any other unstructured input that contains
+    // IP addresses but no recognised log format.
+    if parsed == 0 && json_malformed == 0 {
+        let raw_events = f435(text);
+        if !raw_events.is_empty() {
+            parsed = raw_events.len();
+            format = t101::Raw;
+            events = raw_events;
         }
     }
 

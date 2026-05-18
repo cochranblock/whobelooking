@@ -1008,7 +1008,16 @@ async fn main() -> anyhow::Result<()> {
                 let enrich: std::collections::BTreeMap<String, wbl_detect::t108> = rdns
                     .into_iter()
                     .filter_map(|(ip, name)| {
-                        name.map(|r| (ip, wbl_detect::t108 { rdns: Some(r), org: None, org_country: None }))
+                        name.map(|r| {
+                            (
+                                ip,
+                                wbl_detect::t108 {
+                                    rdns: Some(r),
+                                    org: None,
+                                    org_country: None,
+                                },
+                            )
+                        })
                     })
                     .collect();
                 wbl_detect::f402(&mut report, &enrich);
