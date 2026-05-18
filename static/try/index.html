@@ -106,7 +106,7 @@ body::after {
 .cf-install-hint {
   margin-top:12px; padding:10px 14px; background:var(--surface2);
   border:1px solid rgba(255,107,53,.3); border-radius:3px;
-  font-size:10px; color:var(--muted); line-height:1.6; display:none;
+  font-size:10px; color:var(--muted); line-height:1.6;
 }
 .cf-install-hint a { color:var(--accent); text-decoration:underline; }
 .drop-trust { display:flex; gap:24px; flex-wrap:wrap; justify-content:center; font-size:10px; color:var(--muted); letter-spacing:.15em; text-transform:uppercase; }
@@ -171,26 +171,13 @@ iframe.report-frame { flex:1; width:100%; border:0; background:var(--bg); }
     <button class="cf-panel-toggle" id="cf-toggle" type="button">
       <span class="cf-arrow">▶</span>
       <span>Pull from Cloudflare</span>
-      <span class="cf-badge">requires local install</span>
+      <span class="cf-badge">local</span>
     </button>
     <div class="cf-panel-body" id="cf-body">
       <div class="cf-fields">
-        <div class="cf-row">
-          <div class="cf-field">
-            <label for="cf-zone">Zone ID</label>
-            <input id="cf-zone" type="text" placeholder="32-char hex" maxlength="32" autocomplete="off" spellcheck="false">
-          </div>
-          <div class="cf-field">
-            <label for="cf-hours">Time range</label>
-            <select id="cf-hours">
-              <option value="1">Last 1 hour</option>
-              <option value="6">Last 6 hours</option>
-              <option value="12">Last 12 hours</option>
-              <option value="24" selected>Last 24 hours</option>
-              <option value="48">Last 48 hours</option>
-              <option value="72">Last 72 hours</option>
-            </select>
-          </div>
+        <div class="cf-field">
+          <label for="cf-zone">Zone ID</label>
+          <input id="cf-zone" type="text" placeholder="32-char hex" maxlength="32" autocomplete="off" spellcheck="false">
         </div>
         <div class="cf-field">
           <label for="cf-token">API Token <span style="color:var(--muted);text-transform:none;letter-spacing:0">(Analytics:Read permission · never stored)</span></label>
@@ -553,10 +540,9 @@ cfPullBtn.addEventListener("click", async () => {
   await wasmReady;
   const zoneId = document.getElementById("cf-zone").value.trim();
   const token = document.getElementById("cf-token").value.trim();
-  const hours = document.getElementById("cf-hours").value;
+  const hours = 72;
 
   cfStatus.className = "cf-status";
-  cfInstallHint.style.display = "none";
 
   if (!zoneId || zoneId.length !== 32) {
     cfStatus.className = "cf-status err";
@@ -604,12 +590,13 @@ cfPullBtn.addEventListener("click", async () => {
 
   if (!ndjson.trim()) {
     cfStatus.className = "cf-status err";
-    cfStatus.textContent = "No events returned — check the zone ID and time range.";
+    cfStatus.textContent = "No events returned — check zone ID and token permissions.";
     return;
   }
 
   cfStatus.className = "cf-status ok";
   cfStatus.textContent = `${eventCount} events pulled — analyzing…`;
+  cfInstallHint.style.display = "none";
 
   // Feed into WASM pipeline exactly like a dropped file.
   const label = `cloudflare-zone-${zoneId.slice(0, 8)} · last ${hours}h`;
