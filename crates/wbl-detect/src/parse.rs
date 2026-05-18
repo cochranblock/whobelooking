@@ -12,7 +12,8 @@
 //!  10. HAProxy HTTP mode log (default format with optional capture blocks)
 //!  11. AWS ALB / ELB access log (space-delimited, quoted request + UA fields)
 //!  12. Azure diagnostic logs (Activity Log `callerIpAddress`, App Gateway `clientIP`)
-//!  13. Generic JSON fallback (`ip`, `remote_addr`, `remote_ip`, `client_ip`, etc.)
+//!  13. GCP Cloud Logging structured JSON (`httpRequest.remoteIp`)
+//!  14. Generic JSON fallback (`ip`, `remote_addr`, `remote_ip`, `client_ip`, etc.)
 //!
 //! Output is `Vec<t100>` — uniform shape regardless of input format. The
 //! per-IP aggregator downstream doesn't care which format produced an event.
@@ -82,6 +83,11 @@ pub enum t101 {
     /// Gateway access log (`clientIP`), Azure CDN (`clientIp`). IP field
     /// found via key-prefix scan regardless of nesting depth.
     AzureJson,
+    /// GCP Cloud Logging structured JSON. Uses the `httpRequest` embedded
+    /// object with `remoteIp`, `requestMethod`, `requestUrl`, `userAgent`.
+    /// Covers Cloud Run, App Engine, GKE Ingress, and Cloud Load Balancer
+    /// access logs exported via Cloud Logging.
+    GcpJson,
     /// Generic JSON fallback — any JSON object that carries an IP under a
     /// recognised field name (`ip`, `remote_addr`, `remote_ip`, `client_ip`,
     /// `clientIp`, `ClientHost`, etc.). Covers Caddy, Traefik, and custom
@@ -107,6 +113,7 @@ impl t101 {
             t101::Raw => "raw",
             t101::Alb => "alb",
             t101::AzureJson => "azure-json",
+            t101::GcpJson => "gcp-json",
             t101::GenericJson => "generic-json",
             t101::Mixed => "mixed",
             t101::Unknown => "unknown",
@@ -1291,6 +1298,61 @@ fn f438(line: &str) -> Option<t100> {
     })
 }
 
+/// f439 = parse_gcp_json_line
+///
+/// GCP Cloud Logging structured JSON. All access log formats that flow
+/// through Cloud Logging — Cloud Run, App Engine, GKE Ingress, Cloud
+/// Load Balancer — embed the client IP and HTTP fields inside an
+/// `httpRequest` object using the key `remoteIp`. Detection is the
+/// combination of `"httpRequest"` + `"remoteIp"`, which is specific
+/// to GCP's logging schema.
+fn f439(line: &str) -> Option<t100> {
+    if !line.trim_start().starts_with('{') {
+        return None;
+    }
+    if !line.contains(r#""httpRequest""#) || !line.contains(r#""remoteIp""#) {
+        return None;
+    }
+
+    let ip = json_str_val(line, "remoteIp")
+        .filter(|s| !s.is_empty() && (s.contains('.') || s.contains(':')))?;
+
+    let ts = json_str_val(line, "timestamp")
+        .or_else(|| json_str_val(line, "receiveTimestamp"))
+        .map(|s| f418(&s))
+        .unwrap_or(0);
+
+    let method = json_str_val(line, "requestMethod").unwrap_or_default();
+
+    // requestUrl may be an absolute URL — strip the scheme+host.
+    let path = json_str_val(line, "requestUrl")
+        .map(|url| {
+            if let Some(rest) = url
+                .strip_prefix("https://")
+                .or_else(|| url.strip_prefix("http://"))
+            {
+                rest.find('/')
+                    .map(|i| rest[i..].to_string())
+                    .unwrap_or_else(|| "/".to_string())
+            } else {
+                url
+            }
+        })
+        .unwrap_or_default();
+
+    let ua = json_str_val(line, "userAgent").unwrap_or_default();
+
+    Some(t100 {
+        ts,
+        ip,
+        cc: String::new(),
+        method,
+        path,
+        ua: truncate(ua, 256),
+        referrer: String::new(),
+    })
+}
+
 /// f428 = unwrap_syslog.
 ///
 /// If `line` starts with a syslog priority header (`<NNN>` where NNN is
@@ -1656,6 +1718,19 @@ pub fn f400(text: &str) -> t103 {
                     t101::Splunk
                 } else {
                     t101::AzureJson
+                };
+                bump_format(seen, &mut format);
+                events.push(e);
+                parsed += 1;
+                continue;
+            }
+            if let Some(e) = f439(trimmed) {
+                let seen = if was_syslog {
+                    t101::Syslog
+                } else if was_splunk_kv {
+                    t101::Splunk
+                } else {
+                    t101::GcpJson
                 };
                 bump_format(seen, &mut format);
                 events.push(e);

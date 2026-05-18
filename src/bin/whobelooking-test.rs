@@ -1893,6 +1893,13 @@ const TESTS: &[(&str, TestFn)] = &[
         t_parse_azure_appgw,
     ),
     ("parse_azure_format_label", t_parse_azure_fmt),
+    // GCP Cloud Logging structured JSON parser
+    ("parse_gcp_cloud_run_remote_ip", t_parse_gcp_cloud_run),
+    (
+        "parse_gcp_absolute_request_url_to_path",
+        t_parse_gcp_abs_url,
+    ),
+    ("parse_gcp_format_label", t_parse_gcp_fmt),
     // Generic JSON fallback parser
     ("parse_generic_json_caddy_remote_ip", t_parse_generic_caddy),
     (
@@ -3572,6 +3579,57 @@ fn t_parse_azure_fmt() -> Result<(), String> {
     let r = wbl_parse_log(AZURE_ACTIVITY);
     if r.stats.format != "azure-json" {
         return Err(format!("format={:?}, want azure-json", r.stats.format));
+    }
+    Ok(())
+}
+
+// ── GCP Cloud Logging ────────────────────────────────────────────────────────
+
+const GCP_CLOUD_RUN: &str = r#"{"httpRequest":{"requestMethod":"POST","requestUrl":"/api/v1/ingest","userAgent":"python-requests/2.28.0","remoteIp":"203.0.113.5","status":201,"responseSize":"88","latency":"0.042s","protocol":"HTTP/1.1"},"insertId":"abc123","logName":"projects/my-project/logs/run.googleapis.com%2Frequests","timestamp":"2023-01-15T18:42:11Z","severity":"INFO","resource":{"type":"cloud_run_revision","labels":{"service_name":"ingest-svc"}}}"#;
+
+const GCP_ABS_URL: &str = r#"{"httpRequest":{"remoteIp":"198.51.100.7","requestMethod":"GET","requestUrl":"https://my-project.appspot.com/dashboard?view=summary","userAgent":"Mozilla/5.0 (Macintosh)","status":200},"timestamp":"2023-01-15T18:42:11Z","severity":"DEFAULT"}"#;
+
+fn t_parse_gcp_cloud_run() -> Result<(), String> {
+    let r = wbl_parse_log(GCP_CLOUD_RUN);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}", r.stats.parsed));
+    }
+    let e = &r.events[0];
+    if e.ip != "203.0.113.5" {
+        return Err(format!("ip={:?}, want 203.0.113.5", e.ip));
+    }
+    if e.method != "POST" {
+        return Err(format!("method={:?}", e.method));
+    }
+    if e.path != "/api/v1/ingest" {
+        return Err(format!("path={:?}", e.path));
+    }
+    if e.ts == 0 {
+        return Err("ts should be non-zero".into());
+    }
+    Ok(())
+}
+
+fn t_parse_gcp_abs_url() -> Result<(), String> {
+    // requestUrl is an absolute URL — must be reduced to path+query.
+    let r = wbl_parse_log(GCP_ABS_URL);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}", r.stats.parsed));
+    }
+    let path = &r.events[0].path;
+    if !path.starts_with('/') {
+        return Err(format!("path should start with /: {path:?}"));
+    }
+    if path.contains("my-project.appspot.com") {
+        return Err(format!("host leaked into path: {path:?}"));
+    }
+    Ok(())
+}
+
+fn t_parse_gcp_fmt() -> Result<(), String> {
+    let r = wbl_parse_log(GCP_CLOUD_RUN);
+    if r.stats.format != "gcp-json" {
+        return Err(format!("format={:?}, want gcp-json", r.stats.format));
     }
     Ok(())
 }
