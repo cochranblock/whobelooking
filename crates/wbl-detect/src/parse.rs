@@ -1,9 +1,15 @@
 // Unlicense — public domain — whobelooking.org
-//! Log-line parser. Recognizes four shapes:
+//! Log-line parser. Recognizes ten shapes:
 //!   1. whobelooking-native   `… visit ip=… cc=… method=… path=… ua="…" ref="…"`
 //!   2. nginx/apache combined `IP - - [date] "METHOD PATH …" status size "ref" "ua"`
 //!   3. Cloudflare Logpush JSONL (one JSON object per line)
 //!   4. Cloudflare Logpush CSV (first row contains CF field names)
+//!   5. OTEL / OTLP JSON (line-delimited logRecord objects)
+//!   6. Syslog (RFC 3164 / RFC 5424) wrapping an inner HTTP log line
+//!   7. ELK / Logstash JSON (grok-parsed fields or `message` unwrap)
+//!   8. Splunk export (JSON `_raw` or KV `_raw="..."`)
+//!   9. W3C Extended Log Format / IIS (column layout declared by `#Fields:`)
+//!  10. HAProxy HTTP mode log (default format with optional capture blocks)
 //!
 //! Output is `Vec<t100>` — uniform shape regardless of input format. The
 //! per-IP aggregator downstream doesn't care which format produced an event.
@@ -53,6 +59,13 @@ pub enum t101 {
     /// Either way the `_raw` is the actual HTTP log record; we unwrap
     /// it and re-route through the regular parsers.
     Splunk,
+    /// W3C Extended Log Format (also covers IIS W3C logs). Column order is
+    /// declared by a `#Fields:` directive; lines starting with `#` are
+    /// directives or comments and are skipped.
+    W3c,
+    /// HAProxy HTTP mode log. Default format: `IP:PORT [date] frontend
+    /// backend/server Tq/Tw/Tc/Tr/Tt status bytes ... "METHOD PATH HTTP/v"`.
+    HaProxy,
     Mixed,
     Unknown,
 }
@@ -68,6 +81,8 @@ impl t101 {
             t101::Syslog => "syslog",
             t101::Elk => "elk",
             t101::Splunk => "splunk",
+            t101::W3c => "w3c-extended",
+            t101::HaProxy => "haproxy",
             t101::Mixed => "mixed",
             t101::Unknown => "unknown",
         }
@@ -432,6 +447,17 @@ fn truncate(mut s: String, max: usize) -> String {
     s
 }
 
+struct W3cIdx {
+    date: Option<usize>,
+    time: Option<usize>,
+    ip: Option<usize>,
+    method: Option<usize>,
+    path: Option<usize>,
+    query: Option<usize>,
+    ua: Option<usize>,
+    referer: Option<usize>,
+}
+
 /// f425 = parse_otel_line.
 ///
 /// Decode a single OTLP/JSON logRecord into a `t100` Event. Used for OTEL
@@ -719,6 +745,205 @@ fn f431(line: &str) -> Option<String> {
     None
 }
 
+fn haproxy_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"^(\d{1,3}(?:\.\d{1,3}){3}):\d+ \[(\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2})")
+            .expect("haproxy pattern")
+    })
+}
+
+/// f432 = parse_haproxy_line
+///
+/// HAProxy HTTP mode log. Default format (no capture headers):
+///   `IP:PORT [DD/Mon/YYYY:HH:MM:SS.mmm] frontend backend/server
+///    Tq/Tw/Tc/Tr/Tt status bytes - - flags ... "METHOD PATH HTTP/version"`
+///
+/// With `capture request header` configured, optional `{val}` blocks appear
+/// before the request line; a single-value `{...}` block immediately before
+/// the request line is extracted as UA if it contains no `|`.
+///
+/// IPv6 client addresses (`[::1]:port`) are not handled — HAProxy wraps them
+/// in brackets which collides with the timestamp `[...]` pattern.
+fn f432(line: &str) -> Option<t100> {
+    let m = haproxy_re().captures(line)?;
+    let ip = m.get(1)?.as_str().to_string();
+    let ts = f420(m.get(2)?.as_str());
+
+    // Request line is the LAST `"..."` in the log entry.
+    let end = line.rfind('"')?;
+    let start = line[..end].rfind('"')?;
+    let req = &line[start + 1..end];
+    if req.is_empty() {
+        return None;
+    }
+    let mut parts = req.splitn(3, ' ');
+    let method = parts.next().unwrap_or("GET").to_string();
+    let path = parts.next().unwrap_or("/").to_string();
+    // Sanity: HTTP verb must not contain `/`; path must start with `/` or be `*`.
+    if method.contains('/') || (!path.starts_with('/') && path != "*") {
+        return None;
+    }
+
+    // Best-effort UA: scan `{value}` capture blocks immediately before `"...`,
+    // walking backwards through consecutive blocks to find the first non-empty
+    // single-value (no `|`) block. HAProxy capture lists emit multiple `{}`
+    // blocks in declaration order; the UA block may not be the last one.
+    let before = line[..start].trim_end();
+    let ua = {
+        let mut scan = before;
+        let mut found = String::new();
+        while scan.ends_with('}') {
+            let cb_end = scan.len() - 1;
+            if let Some(cb_start) = scan[..cb_end].rfind('{') {
+                let inner = scan[cb_start + 1..cb_end].trim();
+                if !inner.is_empty() && inner != "-" && !inner.contains('|') {
+                    found = inner.to_string();
+                    break;
+                }
+                // Empty or multi-value block — keep scanning backwards.
+                scan = scan[..cb_start].trim_end();
+            } else {
+                break;
+            }
+        }
+        found
+    };
+
+    Some(t100 {
+        ts,
+        ip,
+        cc: String::new(),
+        method,
+        path,
+        ua: truncate(ua, 256),
+        referrer: String::new(),
+    })
+}
+
+/// f433 = parse_w3c_fields_header
+///
+/// Parse a W3C Extended Log Format `#Fields:` directive and return column
+/// index positions for the fields we extract. Matching is case-insensitive.
+/// IIS uses parenthesised HTTP header names (`cs(User-Agent)`, `cs(Referer)`).
+fn f433(fields_line: &str) -> W3cIdx {
+    let s = fields_line.trim().trim_start_matches('#').trim();
+    let body = if s.len() >= 7 && s[..7].eq_ignore_ascii_case("fields:") {
+        &s[7..]
+    } else {
+        s
+    };
+    let mut idx = W3cIdx {
+        date: None,
+        time: None,
+        ip: None,
+        method: None,
+        path: None,
+        query: None,
+        ua: None,
+        referer: None,
+    };
+    for (i, field) in body.split_whitespace().enumerate() {
+        match field.to_ascii_lowercase().as_str() {
+            "date" => idx.date = Some(i),
+            "time" => idx.time = Some(i),
+            "c-ip" => idx.ip = Some(i),
+            "cs-method" => idx.method = Some(i),
+            "cs-uri-stem" => idx.path = Some(i),
+            "cs-uri-query" => idx.query = Some(i),
+            "cs(user-agent)" => idx.ua = Some(i),
+            "cs(referer)" => idx.referer = Some(i),
+            _ => {}
+        }
+    }
+    idx
+}
+
+/// f434 = parse_w3c_line
+///
+/// Parse one W3C Extended Log Format data line using the column map from
+/// `f433`. Fields with value `-` are absent. W3C encodes spaces in header
+/// values (User-Agent, Referer) as `+`. Lines starting with `#` are
+/// directives and must not be passed here (caller filters them).
+fn f434(line: &str, idx: &W3cIdx) -> Option<t100> {
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    let ip = idx
+        .ip
+        .and_then(|i| cols.get(i))
+        .filter(|s| **s != "-" && !s.is_empty())
+        .map(|s| s.to_string())?;
+
+    let ts = match (idx.date, idx.time) {
+        (Some(di), Some(ti)) => {
+            let d = cols.get(di).copied().filter(|s| *s != "-").unwrap_or("");
+            let t = cols
+                .get(ti)
+                .copied()
+                .filter(|s| *s != "-")
+                .unwrap_or("00:00:00");
+            if d.is_empty() {
+                0
+            } else {
+                f419(&format!("{}T{}", d, t)).unwrap_or(0)
+            }
+        }
+        (Some(di), None) => {
+            let d = cols.get(di).copied().filter(|s| *s != "-").unwrap_or("");
+            if d.is_empty() {
+                0
+            } else {
+                f419(&format!("{}T00:00:00", d)).unwrap_or(0)
+            }
+        }
+        _ => 0,
+    };
+
+    let method = idx
+        .method
+        .and_then(|i| cols.get(i))
+        .filter(|s| **s != "-")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "GET".into());
+
+    let mut path = idx
+        .path
+        .and_then(|i| cols.get(i))
+        .filter(|s| **s != "-")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "/".into());
+
+    if let Some(qi) = idx.query {
+        if let Some(q) = cols.get(qi).filter(|s| **s != "-" && !s.is_empty()) {
+            path.push('?');
+            path.push_str(q);
+        }
+    }
+
+    let ua = idx
+        .ua
+        .and_then(|i| cols.get(i))
+        .filter(|s| **s != "-")
+        .map(|s| s.replace('+', " "))
+        .unwrap_or_default();
+
+    let referrer = idx
+        .referer
+        .and_then(|i| cols.get(i))
+        .filter(|s| **s != "-")
+        .map(|s| s.replace('+', " "))
+        .unwrap_or_default();
+
+    Some(t100 {
+        ts,
+        ip,
+        cc: String::new(),
+        method,
+        path,
+        ua: truncate(ua, 256),
+        referrer: truncate(referrer, 256),
+    })
+}
+
 /// f428 = unwrap_syslog.
 ///
 /// If `line` starts with a syslog priority header (`<NNN>` where NNN is
@@ -896,6 +1121,26 @@ pub fn f400(text: &str) -> t103 {
         }
     }
 
+    // Scan the file for a W3C Extended Log Format #Fields: directive.
+    // Scan all lines (not just initial ones) because directives can follow
+    // log-rotation header blocks mid-file.
+    let mut w3c_idx: Option<W3cIdx> = None;
+    for l in text.lines() {
+        let t = l.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t.starts_with('#') {
+            let inner = t.trim_start_matches('#').trim();
+            if inner.len() >= 7 && inner[..7].eq_ignore_ascii_case("fields:") {
+                w3c_idx = Some(f433(t));
+                break;
+            }
+            continue;
+        }
+        break;
+    }
+
     // Rebuild iterator from the top — simpler than threading state and the
     // file is already in memory at this point.
     let _ = leading_blanks;
@@ -927,6 +1172,16 @@ pub fn f400(text: &str) -> t103 {
             continue;
         }
         is_first_real = false;
+
+        // W3C directive / comment lines — skip without counting as malformed.
+        // Mid-file #Fields: updates (log rotation) refresh the column map.
+        if line.trim_start().starts_with('#') {
+            let inner = line.trim_start().trim_start_matches('#').trim_start();
+            if inner.len() >= 7 && inner[..7].eq_ignore_ascii_case("fields:") {
+                w3c_idx = Some(f433(&line));
+            }
+            continue;
+        }
 
         // Outer unwrappers — syslog priority header and Splunk `_raw="..."`
         // key-value wrapping. Either strips its envelope and routes the
@@ -1063,6 +1318,28 @@ pub fn f400(text: &str) -> t103 {
                 t101::Combined
             };
             bump_format(detected, &mut format);
+            events.push(e);
+            parsed += 1;
+        } else if let Some(e) = w3c_idx.as_ref().and_then(|idx| f434(&line, idx)) {
+            let seen = if was_syslog {
+                t101::Syslog
+            } else if was_splunk_kv {
+                t101::Splunk
+            } else {
+                t101::W3c
+            };
+            bump_format(seen, &mut format);
+            events.push(e);
+            parsed += 1;
+        } else if let Some(e) = f432(&line) {
+            let seen = if was_syslog {
+                t101::Syslog
+            } else if was_splunk_kv {
+                t101::Splunk
+            } else {
+                t101::HaProxy
+            };
+            bump_format(seen, &mut format);
             events.push(e);
             parsed += 1;
         } else {

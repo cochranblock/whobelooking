@@ -1847,6 +1847,26 @@ const TESTS: &[(&str, TestFn)] = &[
     ("parse_splunk_json_with_raw", t_parse_splunk_json_raw),
     ("parse_splunk_kv_unwraps_inner", t_parse_splunk_kv),
     ("parse_splunk_format_label", t_parse_splunk_format),
+    // W3C Extended Log Format / IIS
+    ("parse_w3c_basic_two_lines", t_parse_w3c_basic),
+    ("parse_w3c_fields_path_method_ua", t_parse_w3c_fields),
+    ("parse_w3c_timestamp", t_parse_w3c_ts),
+    (
+        "parse_w3c_query_string_appended",
+        t_parse_w3c_query_appended,
+    ),
+    ("parse_w3c_format_label", t_parse_w3c_format_label),
+    // HAProxy
+    ("parse_haproxy_basic_two_lines", t_parse_haproxy_basic),
+    (
+        "parse_haproxy_fields_path_method_ts",
+        t_parse_haproxy_fields,
+    ),
+    ("parse_haproxy_format_label", t_parse_haproxy_format_label),
+    (
+        "parse_haproxy_ua_from_capture_block",
+        t_parse_haproxy_ua_capture,
+    ),
     ("parse_jsonl_unicode_escape_resolves", t_parse_jsonl_uescape),
     (
         "parse_jsonl_backslash_quote_in_string",
@@ -2377,6 +2397,24 @@ const CF_JSONL_FIX: &str = r#"{"ClientIP":"74.179.10.20","ClientRequestPath":"/o
 const CF_CSV_FIX: &str = "ClientIP,ClientRequestPath,ClientRequestMethod,ClientCountry,EdgeStartTimestamp,ClientRequestUserAgent\n\
     74.179.10.20,/operations,GET,us,2026-01-15T18:42:11Z,Mozilla/5.0\n\
     88.151.10.5,/.env,GET,es,2026-01-15T18:42:12Z,curl/8\n";
+
+const W3C_FIX: &str = "\
+#Version: 1.0\n\
+#Date: 2026-01-15 18:42:11\n\
+#Fields: date time c-ip cs-method cs-uri-stem cs-uri-query sc-status cs(User-Agent) cs(Referer)\n\
+2026-01-15 18:42:11 74.179.10.20 GET /operations - 200 Mozilla/5.0+(Windows+NT+10.0) -\n\
+2026-01-15 18:42:12 88.151.10.5 GET /.env - 404 curl/8 -\n";
+
+const W3C_QUERY_FIX: &str = "\
+#Fields: date time c-ip cs-method cs-uri-stem cs-uri-query sc-status\n\
+2026-01-15 18:42:11 74.179.10.20 GET /search q=hello 200\n";
+
+const HAPROXY_FIX: &str = "\
+1.2.3.4:50218 [15/Jan/2026:18:42:11.123] fe_main be_app/server1 0/0/0/15/15 200 456 - - --VN 1/1/0/0/0 0/0 \"GET /page HTTP/1.1\"\n\
+5.6.7.8:12345 [15/Jan/2026:18:43:00.000] fe_main be_app/server2 0/0/0/5/5 404 0 - - --VN 1/1/0/0/0 0/0 \"GET /.env HTTP/1.1\"\n";
+
+const HAPROXY_UA_FIX: &str = "\
+9.9.9.9:11111 [15/Jan/2026:18:42:11.000] fe_main be_app/s1 0/0/0/1/1 200 100 - - --VN 1/1/0/0/0 0/0 {curl/8} {} \"GET /api HTTP/1.1\"\n";
 
 fn t_parse_wbl_one() -> Result<(), String> {
     let r = wbl_parse_log(
@@ -3135,6 +3173,127 @@ fn t_parse_splunk_format() -> Result<(), String> {
     let r = wbl_parse_log(line);
     if r.stats.format != "splunk" {
         return Err(format!("format={:?}, want splunk", r.stats.format));
+    }
+    Ok(())
+}
+
+fn t_parse_w3c_basic() -> Result<(), String> {
+    let r = wbl_parse_log(W3C_FIX);
+    if r.stats.parsed != 2 {
+        return Err(format!("parsed={}, want 2", r.stats.parsed));
+    }
+    if r.stats.skipped != 0 {
+        return Err(format!(
+            "skipped={}, want 0 (# lines not counted)",
+            r.stats.skipped
+        ));
+    }
+    let ips: Vec<_> = r.events.iter().map(|e| e.ip.as_str()).collect();
+    if !ips.contains(&"74.179.10.20") {
+        return Err(format!("missing 74.179.10.20 in {:?}", ips));
+    }
+    Ok(())
+}
+
+fn t_parse_w3c_fields() -> Result<(), String> {
+    let r = wbl_parse_log(W3C_FIX);
+    let e = r
+        .events
+        .iter()
+        .find(|e| e.ip == "74.179.10.20")
+        .ok_or("74.179.10.20 not found")?;
+    if e.path != "/operations" {
+        return Err(format!("path={:?}, want /operations", e.path));
+    }
+    if e.method != "GET" {
+        return Err(format!("method={:?}", e.method));
+    }
+    if !e.ua.contains("Windows NT 10.0") {
+        return Err(format!("ua={:?}, want 'Windows NT 10.0' (+ decoded)", e.ua));
+    }
+    Ok(())
+}
+
+fn t_parse_w3c_ts() -> Result<(), String> {
+    let r = wbl_parse_log(W3C_FIX);
+    let e = r
+        .events
+        .iter()
+        .find(|e| e.ip == "74.179.10.20")
+        .ok_or("event not found")?;
+    let want = 1_768_502_531i64; // 2026-01-15T18:42:11Z verified
+    if e.ts != want {
+        return Err(format!("ts={}, want {}", e.ts, want));
+    }
+    Ok(())
+}
+
+fn t_parse_w3c_query_appended() -> Result<(), String> {
+    let r = wbl_parse_log(W3C_QUERY_FIX);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}", r.stats.parsed));
+    }
+    if r.events[0].path != "/search?q=hello" {
+        return Err(format!("path={:?}, want /search?q=hello", r.events[0].path));
+    }
+    Ok(())
+}
+
+fn t_parse_w3c_format_label() -> Result<(), String> {
+    let r = wbl_parse_log(W3C_FIX);
+    if r.stats.format != "w3c-extended" {
+        return Err(format!("format={:?}, want w3c-extended", r.stats.format));
+    }
+    Ok(())
+}
+
+fn t_parse_haproxy_basic() -> Result<(), String> {
+    let r = wbl_parse_log(HAPROXY_FIX);
+    if r.stats.parsed != 2 {
+        return Err(format!("parsed={}, want 2", r.stats.parsed));
+    }
+    let ips: Vec<_> = r.events.iter().map(|e| e.ip.as_str()).collect();
+    if !ips.contains(&"1.2.3.4") {
+        return Err(format!("missing 1.2.3.4 in {:?}", ips));
+    }
+    Ok(())
+}
+
+fn t_parse_haproxy_fields() -> Result<(), String> {
+    let r = wbl_parse_log(HAPROXY_FIX);
+    let e = r
+        .events
+        .iter()
+        .find(|e| e.ip == "1.2.3.4")
+        .ok_or("1.2.3.4 not found")?;
+    if e.path != "/page" {
+        return Err(format!("path={:?}, want /page", e.path));
+    }
+    if e.method != "GET" {
+        return Err(format!("method={:?}", e.method));
+    }
+    let want_ts = 1_768_502_531i64;
+    if e.ts != want_ts {
+        return Err(format!("ts={}, want {}", e.ts, want_ts));
+    }
+    Ok(())
+}
+
+fn t_parse_haproxy_format_label() -> Result<(), String> {
+    let r = wbl_parse_log(HAPROXY_FIX);
+    if r.stats.format != "haproxy" {
+        return Err(format!("format={:?}, want haproxy", r.stats.format));
+    }
+    Ok(())
+}
+
+fn t_parse_haproxy_ua_capture() -> Result<(), String> {
+    let r = wbl_parse_log(HAPROXY_UA_FIX);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}", r.stats.parsed));
+    }
+    if r.events[0].ua != "curl/8" {
+        return Err(format!("ua={:?}, want curl/8", r.events[0].ua));
     }
     Ok(())
 }
