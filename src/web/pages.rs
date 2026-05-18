@@ -860,17 +860,12 @@ pub async fn llms_txt() -> (axum::http::HeaderMap, &'static str) {
 
 const LLMS_TXT: &str = "# whobelooking
 
-> Free, server-side attack-surface scanner. Submit a public URL, get back a structured report of which sensitive paths (.env, configs, admin panels, leaked artifacts, framework debug endpoints) responded. Companion visitor-intelligence platform identifies which companies are silently evaluating a site.
-
-The surface-scan API is **free**, **no auth**, and machine-callable. Designed for AI agents, CI/CD pipelines, security tooling, and human researchers.
+> Browser-driven attack-surface scanner. Drop in a URL and the browser probes 140+ sensitive paths (.env, configs, admin panels, leaked artifacts, framework debug endpoints) via WASM — no data leaves your machine. Companion visitor-intelligence platform identifies which companies are silently evaluating a site.
 
 ## Surface-scan API
 
 - [OpenAPI spec](https://whobelooking.cochranblock.org/openapi.json): OpenAPI 3.0.3 JSON describing every endpoint, request shape, and response schema. CORS-open. Drop into Postman, Stoplight, openapi-generator, or an MCP wrapper.
 - [Swagger UI](https://whobelooking.cochranblock.org/docs): interactive try-it-out console for the same spec.
-- [POST /api/scan/run](https://whobelooking.cochranblock.org/api/scan/run): full server-side scan, one call. Body: `{\"url\":\"https://example.com\",\"severity\":\"all\"}`. Severity: `critical` | `high` | `all`.
-- [GET /api/scan/run](https://whobelooking.cochranblock.org/api/scan/run): same, query-string form. Params: `url`, `severity`.
-- [GET /api/scan/probes](https://whobelooking.cochranblock.org/api/scan/probes): canonical list of paths the scanner checks, with severity tags.
 - [GET /api/scan/status](https://whobelooking.cochranblock.org/api/scan/status): live concurrency/capacity snapshot.
 
 ## Claude Code skill

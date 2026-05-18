@@ -10,6 +10,5 @@ pub mod openapi;
 pub mod pages;
 pub mod router;
 pub mod scan;
-pub mod scan_api;
 pub mod try_page;
 pub mod visits;

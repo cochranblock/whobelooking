@@ -608,9 +608,8 @@ a:hover{text-decoration:underline}
 
 <!-- Funnel CTA — shown after scan completes with findings -->
 <div class="cta-block" id="cta-block">
-  <a href="/api/scan/email" class="cta-primary">Email these results (CSV + JSON) →</a>
-  <a href="https://github.com/cochranblock/whobelooking" class="cta-secondary">Run it yourself — free, Unlicense →</a>
-  <p class="cta-sub">Free. Unlicense. Run it yourself, hit the API, or have the report emailed.</p>
+  <a href="https://github.com/cochranblock/whobelooking" class="cta-primary">Run it yourself — free, Unlicense →</a>
+  <p class="cta-sub">Free. Unlicense. Run it yourself or deploy it on your network.</p>
 </div>
 
 <div id="results"></div>

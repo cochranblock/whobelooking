@@ -15,7 +15,7 @@
 //!
 //! The metric instruments live in [`metrics::Instruments`] — a singleton
 //! cached via `OnceLock` so handler hot paths don't re-lookup. Counters
-//! land at `wbl.scan.runs`, `wbl.scan.hits`, `wbl.rdap.cache.hits`, etc.
+//! land at `wbl.enrichment.snapshot.rebuilds`, etc.
 //! Histograms use OTEL semantic-convention units (`ms`, `By`).
 
 #[cfg(feature = "otel")]
@@ -155,14 +155,6 @@ pub mod metrics {
     /// server-side RDAP proxy mode later, re-add `rdap_cache_hits` /
     /// `rdap_cache_misses` counters at that point.
     pub struct Instruments {
-        /// `wbl.scan.runs` — total `/api/scan/run` invocations.
-        pub scan_runs: Counter<u64>,
-        /// `wbl.scan.hits` — total hit count across all scans.
-        pub scan_hits: Counter<u64>,
-        /// `wbl.scan.duration_ms` — per-scan wall time histogram.
-        pub scan_duration_ms: Histogram<u64>,
-        /// `wbl.scan.probes` — per-scan number of probes fired (~80 today).
-        pub scan_probes: Histogram<u64>,
         /// `wbl.enrichment.snapshot.rebuilds` — `/api/enrichment.json` rebuild events.
         pub enrichment_rebuilds: Counter<u64>,
         /// `wbl.enrichment.snapshot.entries` — entry count at last rebuild.
@@ -175,23 +167,6 @@ pub mod metrics {
         INSTRUMENTS.get_or_init(|| {
             let meter = global::meter("whobelooking");
             Instruments {
-                scan_runs: meter
-                    .u64_counter("wbl.scan.runs")
-                    .with_description("Total /api/scan/run invocations")
-                    .build(),
-                scan_hits: meter
-                    .u64_counter("wbl.scan.hits")
-                    .with_description("Total probe hits across all scans")
-                    .build(),
-                scan_duration_ms: meter
-                    .u64_histogram("wbl.scan.duration_ms")
-                    .with_description("Wall time per scan, milliseconds")
-                    .with_unit("ms")
-                    .build(),
-                scan_probes: meter
-                    .u64_histogram("wbl.scan.probes")
-                    .with_description("Probes fired per scan")
-                    .build(),
                 enrichment_rebuilds: meter
                     .u64_counter("wbl.enrichment.snapshot.rebuilds")
                     .with_description("/api/enrichment.json snapshot rebuilds")
@@ -208,8 +183,7 @@ pub mod metrics {
 // No-op shim for non-otel builds — keeps call-sites free of `#[cfg]`.
 //
 // Every method here mirrors the real `Instruments` API but does nothing.
-// Callers in `scan_api.rs` and elsewhere call e.g.
-// `otel::metrics::instruments().scan_runs_add(1, &[("target", host)])`
+// Callers use e.g. `otel::metrics::instruments().enrichment_rebuilt(n)`
 // without needing to know whether OTEL is compiled in.
 #[cfg(not(feature = "otel"))]
 pub mod metrics {
@@ -218,14 +192,6 @@ pub mod metrics {
     /// so the shim and the real impl have byte-identical signatures.
     pub struct Instruments;
     impl Instruments {
-        #[inline]
-        pub fn scan_runs_add(&self, _v: u64, _attrs: &[(&str, &str)]) {}
-        #[inline]
-        pub fn scan_hits_add(&self, _v: u64, _attrs: &[(&str, &str)]) {}
-        #[inline]
-        pub fn scan_duration_record(&self, _ms: u64, _attrs: &[(&str, &str)]) {}
-        #[inline]
-        pub fn scan_probes_record(&self, _n: u64, _attrs: &[(&str, &str)]) {}
         #[inline]
         pub fn enrichment_rebuilt(&self, _entries: u64) {}
     }
@@ -238,38 +204,6 @@ pub mod metrics {
 // Same method surface, real impl. The OTEL crate's `KeyValue` lands here.
 #[cfg(feature = "otel")]
 impl metrics::Instruments {
-    #[inline]
-    pub fn scan_runs_add(&self, v: u64, attrs: &[(&str, &str)]) {
-        let kv: Vec<KeyValue> = attrs
-            .iter()
-            .map(|(k, v)| KeyValue::new(k.to_string(), v.to_string()))
-            .collect();
-        self.scan_runs.add(v, &kv);
-    }
-    #[inline]
-    pub fn scan_hits_add(&self, v: u64, attrs: &[(&str, &str)]) {
-        let kv: Vec<KeyValue> = attrs
-            .iter()
-            .map(|(k, v)| KeyValue::new(k.to_string(), v.to_string()))
-            .collect();
-        self.scan_hits.add(v, &kv);
-    }
-    #[inline]
-    pub fn scan_duration_record(&self, ms: u64, attrs: &[(&str, &str)]) {
-        let kv: Vec<KeyValue> = attrs
-            .iter()
-            .map(|(k, v)| KeyValue::new(k.to_string(), v.to_string()))
-            .collect();
-        self.scan_duration_ms.record(ms, &kv);
-    }
-    #[inline]
-    pub fn scan_probes_record(&self, n: u64, attrs: &[(&str, &str)]) {
-        let kv: Vec<KeyValue> = attrs
-            .iter()
-            .map(|(k, v)| KeyValue::new(k.to_string(), v.to_string()))
-            .collect();
-        self.scan_probes.record(n, &kv);
-    }
     #[inline]
     pub fn enrichment_rebuilt(&self, entries: u64) {
         self.enrichment_rebuilds.add(1, &[]);

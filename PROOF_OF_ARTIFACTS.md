@@ -18,9 +18,9 @@ INPUT (any source)          PIPELINE                        OUTPUT
 Cloudflare API  ─┐
 Access logs     ─┤         IP + path + timestamp
 CSV / JSON      ─┘─────►  → rDNS batch                     HTML report (WASM, in-browser)
-                           → RDAP whois                      + surface scan (135 probes)
+                           → RDAP whois                      + surface scan (135 probes, WASM)
                            → company identification          + threat classification
-                           → sled enrichment cache           + SIEM ingest
+                           → redb enrichment cache           + SIEM ingest
                            → manual review by operator
 ```
 
@@ -43,9 +43,6 @@ Every report caches rDNS, whois, and company ID results in sled. Customer #1's M
 ### Log Analyzer (`/try`)
 ![/try — WASM log analysis, zero upload](docs/screenshots/try-page.png)
 
-### Probe API (`/api/scan/probes`)
-![135 canonical probes served from wbl-detect](docs/screenshots/probes-api.png)
-
 ## Modules
 
 | Module | Purpose |
@@ -56,8 +53,7 @@ Every report caches rDNS, whois, and company ID results in sled. Customer #1's M
 | `scout` | Federal contract intelligence (8 APIs) |
 | `queue` | sled-backed job queue |
 | `web` | axum server (whobelooking.cochranblock.org) |
-| `web::scan` | Surface-area scanner — 135-probe HEAD fan-out |
-| `web::scan_api` | Free server-side scan API + email delivery |
+| `web::scan` | Surface-area scanner — WASM probe list, browser fan-out via `/api/probe` |
 | `web::try_page` | In-browser log analysis (WASM) |
 | `web::openapi` | OpenAPI spec + Swagger UI + Claude skill |
 | `wbl-detect` | WASM crate: parse → classify → enrich → render |
@@ -134,10 +130,7 @@ Registers with approuter. Cloudflare tunnel routes traffic.
 | `/try` | `try_page::index` | In-browser log analysis (WASM, zero upload) |
 | `/detect` | `detect::*` | Column-type detector (WASM) |
 | `/scan` | `scan::index` | Surface-area scanner — 135 probes, WASM probe list, browser fan-out |
-| `/api/probe` | `scan::probe` | Server HEAD relay (SSRF-guarded, rate-limited) |
-| `/api/scan/run` | `scan_api::run_*` | Free server-side bulk scan (JSON/CSV/HTML) |
-| `/api/scan/probes` | `scan_api::probes_list` | Canonical 135-probe list (from `wbl_detect::probes`) |
-| `/api/scan/email` | `scan_api::email_post` | Email scan results with attachments |
+| `/api/probe` | `scan::probe` | Server HEAD relay (SSRF-guarded, rate-limited) — WASM calls this per probe |
 | `/api/scan/feedback` | `feedback::submit` | Operator feedback (emails to SMTP_USER) |
 | `/api/enrichment.json` | `enrichment::snapshot` | IP→org cache snapshot |
 | `/openapi.json` | `openapi::*` | OpenAPI spec |
@@ -153,16 +146,15 @@ Registers with approuter. Cloudflare tunnel routes traffic.
 | Claim | Evidence |
 |-------|---------|
 | Single source of truth | `crates/wbl-detect/src/probes.rs` — 135 entries, `pub const PROBES: &[Probe]` |
-| Server API uses it | `scan_api.rs:28` — `pub use wbl_detect::probes::{Probe, PROBES};` |
 | Browser gets it via WASM | `f406 = getProbes()` exported from `wasm_api.rs`; `/scan` calls it at startup |
-| API endpoint reflects it | `GET /api/scan/probes` → 135 probes (critical: 49, high: 30, medium: 36, low: 8, info: 12) |
 | Old duplication removed | JS inline array (137 entries) and Rust seed list (82 entries) both gone |
+| No server-side batch scan | `/api/scan/run` removed; WASM drives scanning, `/api/probe` relays individual probes |
 
 ## SIEM / Observability
 
 | Artifact | Evidence |
 |----------|----------|
-| OTEL metrics | `wbl.scan.runs`, `wbl.scan.duration_ms`, `wbl.scan.probes`, `wbl.scan.hits` — emitted via OTLP when `otel` feature enabled |
+| OTEL metrics | `wbl.enrichment.snapshot.rebuilds`, `wbl.enrichment.snapshot.entries` — emitted via OTLP when `otel` feature enabled |
 | Syslog ingest | RFC 3164 + RFC 5424, ELK/Logstash, Splunk KV — 8 log formats total |
 | Visit logging | Per-request counter in sled (`visits/` tree) |
 | Prometheus endpoint | `/metrics` (token-gated) |
@@ -183,8 +175,8 @@ CSP is computed per-request from these values — no hardcoded cross-origin fall
 
 | Artifact | Evidence |
 |----------|----------|
-| SSRF guard | Private/loopback IPs rejected before any outbound probe (both `/api/probe` and `/api/scan/run`) |
-| Rate limiting | Probe: 7,500/min; server scan: 5/min; email: 2/min — per source IP, in-memory buckets |
+| SSRF guard | Private/loopback IPs rejected before any outbound probe (`/api/probe`) |
+| Rate limiting | Probe: 7,500/min — per source IP, in-memory bucket |
 | IP redaction | Demo data IPs redacted in all user-facing output |
 | No secrets in output | Test scans demo for CF_TOKEN, STRIPE_KEY, API_KEY, kovakey, id_ed25519 |
 | Admin token gate | `/admin` and `/metrics` require `ADMIN_TOKEN` |
@@ -198,7 +190,7 @@ CSP is computed per-request from these values — no hardcoded cross-origin fall
 | reqwest 0.12 | HTTP client (rustls, no OpenSSL) | MIT/Apache-2.0 |
 | tokio 1 | Async runtime | MIT |
 | serde + serde_json | Serialization | MIT/Apache-2.0 |
-| sled 0.34 | Embedded KV store | MIT/Apache-2.0 |
+| redb 2 | Embedded KV store | MIT |
 | hickory-resolver | DNS resolution | MIT/Apache-2.0 |
 | blake3 | Gate token hashing | CC0/Apache-2.0 |
 | lettre | SMTP email delivery | MIT/Apache-2.0 |

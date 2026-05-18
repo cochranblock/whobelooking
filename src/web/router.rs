@@ -8,7 +8,7 @@ use axum::{
 };
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
-use super::{admin, detect, enrichment, metrics, openapi, pages, scan, scan_api, try_page};
+use super::{admin, detect, enrichment, metrics, openapi, pages, scan, try_page};
 
 pub fn build() -> Router {
     Router::new()
@@ -68,12 +68,6 @@ pub fn build() -> Router {
         .route("/api/scan/gate", post(scan::gate))
         .route("/api/scan/finalize", post(scan::finalize))
         .route("/api/scan/feedback", post(super::feedback::submit))
-        .route(
-            "/api/scan/run",
-            post(scan_api::run_post).get(scan_api::run_get),
-        )
-        .route("/api/scan/probes", get(scan_api::probes_list))
-        .route("/api/scan/email", post(scan_api::email_post))
         .route("/openapi.json", get(openapi::json))
         .route("/docs", get(openapi::ui))
         .route("/docs/", get(openapi::ui))
