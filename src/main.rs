@@ -342,6 +342,14 @@ enum Cmd {
         #[arg(short, long, default_value = "/tmp/wbl-cf-enriched.json")]
         out: String,
     },
+    /// Parse a log file and render a standalone HTML intelligence report (same pipeline as /try).
+    Render {
+        /// Path to a log file (any supported format: nginx, CF JSONL/CSV, W3C, HAProxy, syslog, …)
+        file: String,
+        /// Output path (default: <file>.html)
+        #[arg(short, long)]
+        out: Option<String>,
+    },
     /// Detect column types in a log/CSV file (uses the same WASM-shippable detector as `/detect`).
     Detect {
         /// Path to a log / CSV / TSV file
@@ -988,6 +996,15 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
             }
+        }
+        Cmd::Render { file, out } => {
+            let text = std::fs::read_to_string(&file)?;
+            let parsed = wbl_detect::f400(&text);
+            let report = wbl_detect::f401(&parsed.events);
+            let html = wbl_detect::f405(&report, &file);
+            let dest = out.unwrap_or_else(|| format!("{}.html", file));
+            std::fs::write(&dest, &html)?;
+            println!("{}", dest);
         }
         Cmd::Intel {
             baselogs_dir,
