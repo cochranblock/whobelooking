@@ -1,5 +1,5 @@
 // Unlicense — public domain — whobelooking.org
-//! Log-line parser. Recognizes ten shapes:
+//! Log-line parser. Recognizes thirteen shapes:
 //!   1. whobelooking-native   `… visit ip=… cc=… method=… path=… ua="…" ref="…"`
 //!   2. nginx/apache combined `IP - - [date] "METHOD PATH …" status size "ref" "ua"`
 //!   3. Cloudflare Logpush JSONL (one JSON object per line)
@@ -10,6 +10,9 @@
 //!   8. Splunk export (JSON `_raw` or KV `_raw="..."`)
 //!   9. W3C Extended Log Format / IIS (column layout declared by `#Fields:`)
 //!  10. HAProxy HTTP mode log (default format with optional capture blocks)
+//!  11. AWS ALB / ELB access log (space-delimited, quoted request + UA fields)
+//!  12. Azure diagnostic logs (Activity Log `callerIpAddress`, App Gateway `clientIP`)
+//!  13. Generic JSON fallback (`ip`, `remote_addr`, `remote_ip`, `client_ip`, etc.)
 //!
 //! Output is `Vec<t100>` — uniform shape regardless of input format. The
 //! per-IP aggregator downstream doesn't care which format produced an event.
@@ -71,6 +74,19 @@ pub enum t101 {
     /// ACAS/Nessus output, email headers, config dumps, or any unstructured
     /// text that contains IP addresses.
     Raw,
+    /// AWS ALB / ELB access log. Space-delimited, fixed column order.
+    /// Connection type is the first field (`http`, `https`, `h2`, etc.);
+    /// request and user-agent are double-quoted at positions 12 and 13.
+    Alb,
+    /// Azure diagnostic logs — Activity Log (`callerIpAddress`), Application
+    /// Gateway access log (`clientIP`), Azure CDN (`clientIp`). IP field
+    /// found via key-prefix scan regardless of nesting depth.
+    AzureJson,
+    /// Generic JSON fallback — any JSON object that carries an IP under a
+    /// recognised field name (`ip`, `remote_addr`, `remote_ip`, `client_ip`,
+    /// `clientIp`, `ClientHost`, etc.). Covers Caddy, Traefik, and custom
+    /// application log shippers.
+    GenericJson,
     Mixed,
     Unknown,
 }
@@ -89,6 +105,9 @@ impl t101 {
             t101::W3c => "w3c-extended",
             t101::HaProxy => "haproxy",
             t101::Raw => "raw",
+            t101::Alb => "alb",
+            t101::AzureJson => "azure-json",
+            t101::GenericJson => "generic-json",
             t101::Mixed => "mixed",
             t101::Unknown => "unknown",
         }
@@ -1004,6 +1023,274 @@ fn f435(text: &str) -> Vec<t100> {
         .collect()
 }
 
+/// Extract the string value for `key` from a raw JSON line using a
+/// simple prefix scan — `"key":"value"` or `"key": "value"`. Handles
+/// `\"` and `\\` escapes. Returns `None` when the key is absent or its
+/// value is not a JSON string (e.g. a number or nested object).
+fn json_str_val(line: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{}\":", key);
+    let pos = line.find(&needle)?;
+    let after = line[pos + needle.len()..].trim_start_matches(' ');
+    if !after.starts_with('"') {
+        return None;
+    }
+    let inner = &after[1..];
+    let bytes = inner.as_bytes();
+    let mut buf: Vec<u8> = Vec::with_capacity(64);
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'"' | b'\\' | b'/' => {
+                    buf.push(bytes[i + 1]);
+                    i += 2;
+                }
+                b'n' => {
+                    buf.push(b'\n');
+                    i += 2;
+                }
+                b't' => {
+                    buf.push(b'\t');
+                    i += 2;
+                }
+                b'r' => {
+                    buf.push(b'\r');
+                    i += 2;
+                }
+                _ => {
+                    buf.push(bytes[i + 1]);
+                    i += 2;
+                }
+            }
+            continue;
+        }
+        if bytes[i] == b'"' {
+            return Some(String::from_utf8_lossy(&buf).into_owned());
+        }
+        buf.push(bytes[i]);
+        i += 1;
+    }
+    None
+}
+
+fn alb_detect_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(
+            r"^(?:https?|h2|wss?|grpc) (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})[^ ]* [^ ]+ (\d{1,3}(?:\.\d{1,3}){3}):\d+",
+        )
+        .expect("static alb-detect pattern")
+    })
+}
+
+/// f436 = parse_alb_line
+///
+/// AWS Application Load Balancer / ELB access log. Fixed column order,
+/// space-delimited; the request (field 12) and user-agent (field 13) are
+/// double-quoted. First field is the connection type (`http`, `https`,
+/// `h2`, `ws`, `wss`, `grpc`); second field is an ISO 8601 timestamp.
+/// Client address is at field 3 as `IP:PORT`; we take the IP part only.
+fn f436(line: &str) -> Option<t100> {
+    let m = alb_detect_re().captures(line)?;
+    let ts = f419(m.get(1)?.as_str()).unwrap_or(0);
+    let ip = m.get(2)?.as_str().to_string();
+
+    // Walk the line for quoted substrings. Field 12 = request, field 13 = UA.
+    // There are no quoted fields before position 12 in standard ALB logs.
+    let mut quotes: Vec<&str> = Vec::with_capacity(4);
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && quotes.len() < 4 {
+        if bytes[i] == b'"' {
+            let start = i + 1;
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                i += 1;
+            }
+            quotes.push(&line[start..i]);
+        }
+        i += 1;
+    }
+
+    let (method, path) = match quotes.first() {
+        None | Some(&"-") | Some(&"") => (String::new(), String::new()),
+        Some(req) => {
+            let mut parts = req.splitn(3, ' ');
+            let m = parts.next().unwrap_or("").to_string();
+            let url = parts.next().unwrap_or("");
+            let p = if let Some(rest) = url
+                .strip_prefix("https://")
+                .or_else(|| url.strip_prefix("http://"))
+            {
+                rest.find('/')
+                    .map(|idx| rest[idx..].to_string())
+                    .unwrap_or_else(|| "/".to_string())
+            } else {
+                url.to_string()
+            };
+            (m, p)
+        }
+    };
+
+    let ua = quotes
+        .get(1)
+        .map(|s| truncate(s.to_string(), 256))
+        .unwrap_or_default();
+
+    Some(t100 {
+        ts,
+        ip,
+        cc: String::new(),
+        method,
+        path,
+        ua,
+        referrer: String::new(),
+    })
+}
+
+/// f437 = parse_azure_json_line
+///
+/// Azure diagnostic log formats delivered via Event Hub, Storage, or
+/// Log Analytics:
+///   * **Activity Log** — top-level `callerIpAddress`
+///   * **Application Gateway access log** — `clientIP` nested under
+///     `properties` (found by `json_str_val` regardless of depth)
+///   * **Azure CDN / Front Door** — `clientIp` variant
+///
+/// Distinct from ELK/Splunk/CF by `callerIpAddress` or the combination
+/// of `resourceId` + `clientIP`/`clientIp`.
+fn f437(line: &str) -> Option<t100> {
+    if !line.trim_start().starts_with('{') {
+        return None;
+    }
+    let has_caller = line.contains(r#""callerIpAddress""#);
+    let has_resource = line.contains(r#""resourceId""#);
+    let has_client_ip = line.contains(r#""clientIP""#) || line.contains(r#""clientIp""#);
+    if !(has_caller || has_resource && has_client_ip) {
+        return None;
+    }
+
+    let ip = json_str_val(line, "callerIpAddress")
+        .or_else(|| json_str_val(line, "clientIP"))
+        .or_else(|| json_str_val(line, "clientIp"))
+        .filter(|s| !s.is_empty() && (s.contains('.') || s.contains(':')))?;
+
+    let ts = json_str_val(line, "time")
+        .or_else(|| json_str_val(line, "timeStamp"))
+        .or_else(|| json_str_val(line, "timestamp"))
+        .map(|s| f418(&s))
+        .unwrap_or(0);
+
+    // Activity Log operationName looks like "MICROSOFT.KEYVAULT/VAULTS/READ";
+    // take the last path component as a rough HTTP-method analogue.
+    let method = json_str_val(line, "httpMethod")
+        .or_else(|| {
+            json_str_val(line, "operationName")
+                .map(|op| op.rsplit('/').next().unwrap_or("").to_string())
+        })
+        .unwrap_or_default();
+
+    let path = json_str_val(line, "requestUri")
+        .or_else(|| json_str_val(line, "originalRequestUriWithArgs"))
+        .unwrap_or_default();
+
+    let ua = json_str_val(line, "userAgent").unwrap_or_default();
+
+    Some(t100 {
+        ts,
+        ip,
+        cc: String::new(),
+        method,
+        path,
+        ua: truncate(ua, 256),
+        referrer: String::new(),
+    })
+}
+
+/// f438 = parse_generic_json_line
+///
+/// Last-resort JSON parser for unrecognised structured log formats:
+/// Caddy, Traefik, custom application log shippers, and anything else
+/// that emits JSON with an IP address under a common field name. Uses
+/// `json_str_val` so it finds keys regardless of nesting depth.
+///
+/// Tried after all specific JSON parsers (OTEL, ELK, CF, Azure) have
+/// rejected the line. Lines with no recognised IP field fall through to
+/// the `json_malformed` counter and are not treated as raw text.
+fn f438(line: &str) -> Option<t100> {
+    if !line.trim_start().starts_with('{') {
+        return None;
+    }
+
+    const IP_FIELDS: &[&str] = &[
+        "ip",
+        "remote_addr",
+        "remote_ip",
+        "client_ip",
+        "src",
+        "source_ip",
+        "clientIp",
+        "client_address",
+        "remoteAddr",
+        "srcip",
+        "ClientHost",
+    ];
+    let ip = IP_FIELDS
+        .iter()
+        .find_map(|k| json_str_val(line, k))
+        .filter(|s| !s.is_empty() && s.contains('.'))?;
+
+    let ts = ["timestamp", "ts", "time", "datetime", "@timestamp", "date"]
+        .iter()
+        .find_map(|k| json_str_val(line, k))
+        .map(|s| f418(&s))
+        .unwrap_or(0);
+
+    let method = [
+        "method",
+        "RequestMethod",
+        "http_method",
+        "request_method",
+        "verb",
+    ]
+    .iter()
+    .find_map(|k| json_str_val(line, k))
+    .unwrap_or_default();
+
+    let path = [
+        "path",
+        "uri",
+        "RequestPath",
+        "url",
+        "request_uri",
+        "endpoint",
+    ]
+    .iter()
+    .find_map(|k| json_str_val(line, k))
+    .unwrap_or_default();
+
+    let ua = [
+        "user_agent",
+        "ua",
+        "useragent",
+        "http_user_agent",
+        "UserAgent",
+    ]
+    .iter()
+    .find_map(|k| json_str_val(line, k))
+    .unwrap_or_default();
+
+    Some(t100 {
+        ts,
+        ip,
+        cc: String::new(),
+        method,
+        path,
+        ua: truncate(ua, 256),
+        referrer: String::new(),
+    })
+}
+
 /// f428 = unwrap_syslog.
 ///
 /// If `line` starts with a syslog priority header (`<NNN>` where NNN is
@@ -1362,6 +1649,32 @@ pub fn f400(text: &str) -> t103 {
                     continue;
                 }
             }
+            if let Some(e) = f437(trimmed) {
+                let seen = if was_syslog {
+                    t101::Syslog
+                } else if was_splunk_kv {
+                    t101::Splunk
+                } else {
+                    t101::AzureJson
+                };
+                bump_format(seen, &mut format);
+                events.push(e);
+                parsed += 1;
+                continue;
+            }
+            if let Some(e) = f438(trimmed) {
+                let seen = if was_syslog {
+                    t101::Syslog
+                } else if was_splunk_kv {
+                    t101::Splunk
+                } else {
+                    t101::GenericJson
+                };
+                bump_format(seen, &mut format);
+                events.push(e);
+                parsed += 1;
+                continue;
+            }
             // JSON-shaped but unparseable → genuine skip, no text fallback.
             json_malformed += 1;
             skipped += 1;
@@ -1400,6 +1713,17 @@ pub fn f400(text: &str) -> t103 {
                 t101::Splunk
             } else {
                 t101::HaProxy
+            };
+            bump_format(seen, &mut format);
+            events.push(e);
+            parsed += 1;
+        } else if let Some(e) = f436(&line) {
+            let seen = if was_syslog {
+                t101::Syslog
+            } else if was_splunk_kv {
+                t101::Splunk
+            } else {
+                t101::Alb
             };
             bump_format(seen, &mut format);
             events.push(e);

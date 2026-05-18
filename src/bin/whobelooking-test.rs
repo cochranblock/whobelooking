@@ -1876,6 +1876,35 @@ const TESTS: &[(&str, TestFn)] = &[
         "parse_raw_not_triggered_when_structured_matches",
         t_parse_raw_no_trigger,
     ),
+    // AWS ALB / ELB access log parser
+    ("parse_alb_basic_http", t_parse_alb_basic),
+    ("parse_alb_https_absolute_url", t_parse_alb_https_abs),
+    (
+        "parse_alb_client_ip_extracted_from_port",
+        t_parse_alb_client_port,
+    ),
+    ("parse_alb_dash_request_is_empty", t_parse_alb_dash_req),
+    ("parse_alb_h2_type", t_parse_alb_h2),
+    ("parse_alb_format_label", t_parse_alb_format),
+    // Azure JSON diagnostic log parser
+    ("parse_azure_activity_log_caller_ip", t_parse_azure_activity),
+    (
+        "parse_azure_app_gateway_nested_client_ip",
+        t_parse_azure_appgw,
+    ),
+    ("parse_azure_format_label", t_parse_azure_fmt),
+    // Generic JSON fallback parser
+    ("parse_generic_json_caddy_remote_ip", t_parse_generic_caddy),
+    (
+        "parse_generic_json_traefik_client_host",
+        t_parse_generic_traefik,
+    ),
+    ("parse_generic_json_simple_ip_field", t_parse_generic_simple),
+    (
+        "parse_generic_json_no_ip_falls_through",
+        t_parse_generic_no_ip,
+    ),
+    ("parse_generic_json_format_label", t_parse_generic_fmt),
     ("parse_jsonl_unicode_escape_resolves", t_parse_jsonl_uescape),
     (
         "parse_jsonl_backslash_quote_in_string",
@@ -3382,6 +3411,249 @@ fn t_parse_raw_no_trigger() -> Result<(), String> {
     Ok(())
 }
 
+// ── AWS ALB ──────────────────────────────────────────────────────────────────
+
+const ALB_BASIC: &str = concat!(
+    "http 2023-09-22T21:14:59.029000Z app/my-alb/abcdef0123456789 ",
+    "203.0.113.7:65482 10.0.0.1:80 0.002 0.001 0.000 200 200 0 1241 ",
+    "\"GET /products/widget HTTP/1.1\" \"Mozilla/5.0 (Windows NT 10.0)\" ",
+    "- - arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/tg/abc"
+);
+
+const ALB_HTTPS: &str = concat!(
+    "https 2023-09-22T21:15:30.000000Z app/my-alb/abcdef0123456789 ",
+    "198.51.100.5:54321 10.0.0.1:443 0.001 0.002 0.000 200 200 0 500 ",
+    "\"GET https://example.com/api/v1/users HTTP/2.0\" \"curl/7.68.0\" ",
+    "ECDHE-RSA-AES128-GCM-SHA256 TLSv1.2 arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/tg/abc"
+);
+
+const ALB_DASH: &str = concat!(
+    "http 2023-09-22T21:15:00.000000Z app/my-alb/abcdef0123456789 ",
+    "10.0.0.2:12345 10.0.0.1:80 0.000 0.001 0.000 200 200 0 0 ",
+    "\"-\" \"-\" - - -"
+);
+
+const ALB_H2: &str = concat!(
+    "h2 2023-09-22T21:14:59.100000Z app/my-alb/abcdef0123456789 ",
+    "203.0.113.9:9999 10.0.0.1:443 0.001 0.001 0.000 201 201 0 88 ",
+    "\"POST /api/upload HTTP/2.0\" \"python-requests/2.28.0\" ",
+    "TLS_AES_128_GCM_SHA256 TLSv1.3 arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/tg/abc"
+);
+
+fn t_parse_alb_basic() -> Result<(), String> {
+    let r = wbl_parse_log(ALB_BASIC);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}, want 1", r.stats.parsed));
+    }
+    let e = &r.events[0];
+    if e.ip != "203.0.113.7" {
+        return Err(format!("ip={:?}, want 203.0.113.7", e.ip));
+    }
+    if e.method != "GET" {
+        return Err(format!("method={:?}, want GET", e.method));
+    }
+    if e.path != "/products/widget" {
+        return Err(format!("path={:?}, want /products/widget", e.path));
+    }
+    if !e.ua.contains("Windows NT") {
+        return Err(format!("ua missing Windows NT: {:?}", e.ua));
+    }
+    Ok(())
+}
+
+fn t_parse_alb_https_abs() -> Result<(), String> {
+    // Absolute URL must be reduced to just the path component.
+    let r = wbl_parse_log(ALB_HTTPS);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}", r.stats.parsed));
+    }
+    let e = &r.events[0];
+    if e.ip != "198.51.100.5" {
+        return Err(format!("ip={:?}", e.ip));
+    }
+    if e.path != "/api/v1/users" {
+        return Err(format!("path={:?}, want /api/v1/users", e.path));
+    }
+    if e.ua != "curl/7.68.0" {
+        return Err(format!("ua={:?}", e.ua));
+    }
+    Ok(())
+}
+
+fn t_parse_alb_client_port() -> Result<(), String> {
+    // Ensure IP:PORT → only IP is taken.
+    let r = wbl_parse_log(ALB_BASIC);
+    let ip = &r.events[0].ip;
+    if ip.contains(':') {
+        return Err(format!("port leaked into ip field: {ip:?}"));
+    }
+    Ok(())
+}
+
+fn t_parse_alb_dash_req() -> Result<(), String> {
+    // Health check line with "-" request/UA must parse with empty fields.
+    let r = wbl_parse_log(ALB_DASH);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}", r.stats.parsed));
+    }
+    let e = &r.events[0];
+    if !e.method.is_empty() {
+        return Err(format!("method should be empty, got {:?}", e.method));
+    }
+    if !e.path.is_empty() {
+        return Err(format!("path should be empty, got {:?}", e.path));
+    }
+    Ok(())
+}
+
+fn t_parse_alb_h2() -> Result<(), String> {
+    let r = wbl_parse_log(ALB_H2);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}", r.stats.parsed));
+    }
+    if r.events[0].ip != "203.0.113.9" {
+        return Err(format!("ip={:?}", r.events[0].ip));
+    }
+    if r.events[0].method != "POST" {
+        return Err(format!("method={:?}", r.events[0].method));
+    }
+    Ok(())
+}
+
+fn t_parse_alb_format() -> Result<(), String> {
+    let r = wbl_parse_log(ALB_BASIC);
+    if r.stats.format != "alb" {
+        return Err(format!("format={:?}, want alb", r.stats.format));
+    }
+    Ok(())
+}
+
+// ── Azure JSON ───────────────────────────────────────────────────────────────
+
+const AZURE_ACTIVITY: &str = r#"{"time":"2023-01-15T18:42:11Z","resourceId":"/SUBSCRIPTIONS/abc/PROVIDERS/MICROSOFT.KEYVAULT/VAULTS/myvault","operationName":"MICROSOFT.KEYVAULT/VAULTS/READ","category":"AuditEvent","resultType":"Success","level":"Information","callerIpAddress":"203.0.113.42","correlationId":"12345"}"#;
+
+const AZURE_APPGW: &str = r#"{"timeStamp":"2023-01-15T18:42:11Z","resourceId":"/SUBSCRIPTIONS/abc/PROVIDERS/MICROSOFT.NETWORK/APPLICATIONGATEWAYS/mygateway","operationName":"ApplicationGatewayAccess","category":"ApplicationGatewayAccessLog","properties":{"instanceId":"appgw_1","clientIP":"198.51.100.7","clientPort":54321,"httpMethod":"GET","requestUri":"/api/data","userAgent":"Mozilla/5.0 (compatible)","httpStatus":200}}"#;
+
+fn t_parse_azure_activity() -> Result<(), String> {
+    let r = wbl_parse_log(AZURE_ACTIVITY);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}", r.stats.parsed));
+    }
+    let e = &r.events[0];
+    if e.ip != "203.0.113.42" {
+        return Err(format!("ip={:?}, want 203.0.113.42", e.ip));
+    }
+    if e.ts == 0 {
+        return Err("ts should be non-zero for ISO timestamp".into());
+    }
+    Ok(())
+}
+
+fn t_parse_azure_appgw() -> Result<(), String> {
+    // clientIP nested under properties — json_str_val finds it anywhere.
+    let r = wbl_parse_log(AZURE_APPGW);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}", r.stats.parsed));
+    }
+    let e = &r.events[0];
+    if e.ip != "198.51.100.7" {
+        return Err(format!("ip={:?}, want 198.51.100.7", e.ip));
+    }
+    if e.method != "GET" {
+        return Err(format!("method={:?}", e.method));
+    }
+    if e.path != "/api/data" {
+        return Err(format!("path={:?}", e.path));
+    }
+    Ok(())
+}
+
+fn t_parse_azure_fmt() -> Result<(), String> {
+    let r = wbl_parse_log(AZURE_ACTIVITY);
+    if r.stats.format != "azure-json" {
+        return Err(format!("format={:?}, want azure-json", r.stats.format));
+    }
+    Ok(())
+}
+
+// ── Generic JSON ─────────────────────────────────────────────────────────────
+
+// Caddy-style: remote_ip nested under request object.
+const GENERIC_CADDY: &str = r#"{"level":"info","ts":1678441944.123,"logger":"http.log.access","msg":"handled request","request":{"remote_ip":"203.0.113.10","method":"GET","uri":"/index.html"},"status":200}"#;
+
+// Traefik-style: ClientHost for IP, RequestMethod/RequestPath for route.
+const GENERIC_TRAEFIK: &str = r#"{"ClientHost":"198.51.100.20","RequestMethod":"GET","RequestPath":"/api/users","time":"2023-01-15T18:42:11Z","DownstreamStatus":200}"#;
+
+// Minimal custom app log.
+const GENERIC_SIMPLE: &str = r#"{"ip":"203.0.113.30","method":"POST","path":"/login","user_agent":"python-requests/2.28.0"}"#;
+
+// No IP field — should fall through to json_malformed (skipped=1).
+const GENERIC_NO_IP: &str = r#"{"message":"startup complete","level":"info","ts":1678441944}"#;
+
+fn t_parse_generic_caddy() -> Result<(), String> {
+    let r = wbl_parse_log(GENERIC_CADDY);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}", r.stats.parsed));
+    }
+    if r.events[0].ip != "203.0.113.10" {
+        return Err(format!("ip={:?}", r.events[0].ip));
+    }
+    Ok(())
+}
+
+fn t_parse_generic_traefik() -> Result<(), String> {
+    let r = wbl_parse_log(GENERIC_TRAEFIK);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}", r.stats.parsed));
+    }
+    let e = &r.events[0];
+    if e.ip != "198.51.100.20" {
+        return Err(format!("ip={:?}", e.ip));
+    }
+    if e.method != "GET" {
+        return Err(format!("method={:?}", e.method));
+    }
+    if e.path != "/api/users" {
+        return Err(format!("path={:?}", e.path));
+    }
+    Ok(())
+}
+
+fn t_parse_generic_simple() -> Result<(), String> {
+    let r = wbl_parse_log(GENERIC_SIMPLE);
+    if r.stats.parsed != 1 {
+        return Err(format!("parsed={}", r.stats.parsed));
+    }
+    let e = &r.events[0];
+    if e.ip != "203.0.113.30" {
+        return Err(format!("ip={:?}", e.ip));
+    }
+    if e.ua != "python-requests/2.28.0" {
+        return Err(format!("ua={:?}", e.ua));
+    }
+    Ok(())
+}
+
+fn t_parse_generic_no_ip() -> Result<(), String> {
+    // JSON with no recognised IP field → skipped, not parsed.
+    let r = wbl_parse_log(GENERIC_NO_IP);
+    if r.stats.parsed != 0 {
+        return Err(format!("parsed={}, want 0", r.stats.parsed));
+    }
+    if r.stats.skipped != 1 {
+        return Err(format!("skipped={}, want 1", r.stats.skipped));
+    }
+    Ok(())
+}
+
+fn t_parse_generic_fmt() -> Result<(), String> {
+    let r = wbl_parse_log(GENERIC_SIMPLE);
+    if r.stats.format != "generic-json" {
+        return Err(format!("format={:?}, want generic-json", r.stats.format));
+    }
+    Ok(())
+}
+
 fn t_parse_jsonl_uescape() -> Result<(), String> {
     // `é` → é (U+00E9). The scanner must decode the 4-hex escape
     // into the codepoint, not pass through the literal `é` bytes.
@@ -4179,7 +4451,7 @@ fn t_render_count() -> Result<(), String> {
         return Err("threat count missing from feed header".into());
     }
     if !html.contains("7 events") {
-        return Err(format!("literal '7 events' missing in HTML"));
+        return Err("literal '7 events' missing in HTML".into());
     }
     if !html.contains("3 IPs") {
         return Err("literal '3 IPs' missing in HTML".into());

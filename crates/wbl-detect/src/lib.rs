@@ -42,6 +42,8 @@
 //!   * `f410..f424` — parse.rs (regexes, date math, CSV split, RFC3339)
 //!   * `f425..f431` — parse.rs (OTEL, syslog, ELK/Splunk unwrappers)
 //!   * `f432..f434` — parse.rs (HAProxy, W3C fields header, W3C line)
+//!   * `f435`       — parse.rs (raw IP extraction)
+//!   * `f436..f438` — parse.rs (ALB, Azure JSON, generic JSON)
 //!   * `f430`       — aggregate.rs (`is_ipv4`)
 //!   * `f440..f453` — report.rs (escape, format, render-section helpers)
 //!   * `f470`       — wasm_api.rs (`parse_enrichment`)
