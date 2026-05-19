@@ -433,6 +433,60 @@ fn f452(out: &mut String, report: &t107) {
         );
     }
 
+    // Trend panel: new vs returning IPs derived from actor history fields.
+    let (new_ips, new_threats, returning_ips, returning_threats) =
+        report
+            .ips
+            .values()
+            .fold((0u32, 0u32, 0u32, 0u32), |mut acc, rec| {
+                let is_threat = rec.class == Some(t104::Threat);
+                let is_returning = rec.history_total_reports.map(|r| r > 0).unwrap_or(false);
+                if is_returning {
+                    acc.2 += 1;
+                    if is_threat {
+                        acc.3 += 1;
+                    }
+                } else {
+                    acc.0 += 1;
+                    if is_threat {
+                        acc.1 += 1;
+                    }
+                }
+                acc
+            });
+    // Only render the trend block if history data is present for at least one IP.
+    if returning_ips > 0 || new_threats > 0 {
+        out.push_str(r#"<div class="panel-title" style="margin-top:24px">Trend</div>"#);
+        let _ = write!(
+            out,
+            r#"<div class="stat-block"><div class="stat-num">{new_ips}</div><div class="stat-label">new IPs{new_threat_note}</div></div>"#,
+            new_ips = new_ips,
+            new_threat_note = if new_threats > 0 {
+                format!(
+                    r#" · <span style="color:var(--orange)">{} threat{}</span>"#,
+                    new_threats,
+                    if new_threats == 1 { "" } else { "s" }
+                )
+            } else {
+                String::new()
+            },
+        );
+        let _ = write!(
+            out,
+            r#"<div class="stat-block"><div class="stat-num">{returning_ips}</div><div class="stat-label">returning{returning_threat_note}</div></div>"#,
+            returning_ips = returning_ips,
+            returning_threat_note = if returning_threats > 0 {
+                format!(
+                    r#" · <span style="color:var(--orange)">{} threat{}</span>"#,
+                    returning_threats,
+                    if returning_threats == 1 { "" } else { "s" }
+                )
+            } else {
+                String::new()
+            },
+        );
+    }
+
     out.push_str(r#"<div class="panel-title" style="margin-top:24px">Top entities</div><div class="roster">"#);
     // Roster aggregates per displayed-label (org name fallback to IP). When
     // multiple IPs collapse under the same label, the dot must show the
