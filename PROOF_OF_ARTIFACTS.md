@@ -127,6 +127,7 @@ Registers with approuter. Cloudflare tunnel routes traffic.
 | Actor persistence | `~/.local/share/whobelooking/actors.redb` — `actors` table; `ActorRecord {first_seen, last_seen, total_hits, total_reports, last_class}`; written/merged after every `render` run; `↩ returning` badge in HTML cards for IPs seen in prior reports |
 | Multi-site combined report | `intel::render_html` — Zones column in Top-25 IPs table; Cross-Site Actors section (IPs ≥2 zones, sorted by zone count); Per-Zone Summary section (top 5 IPs per zone with hits + org) |
 | Classification confidence | `f404c` in `crates/wbl-detect/src/aggregate.rs` — `(t104, u8)` return; `t105.confidence`; HTML cards show `NN%` badge per class; 4-class scoring documented in code |
+| CF Firewall Block List | `intel::render_html` — `(ip.src in {...})` expression from THREAT IPs + FW-blocked IPs; per-IP reason/org/rDNS table; redacted report shows count only |
 | `#![forbid(unsafe_code)]` | `crates/wbl-detect/src/lib.rs` line 1 |
 
 ## Web Frontend / Routes

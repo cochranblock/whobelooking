@@ -3420,6 +3420,67 @@ mod intel {
             );
         }
 
+        // CF firewall block list: THREAT IPs + IPs CF already blocked.
+        // Only include real (unredacted) IPs — redacted report gets a stub.
+        let fw_section = {
+            // Collect candidate IPs: threat class OR CF firewall_blocks > 0.
+            let mut block_ips: Vec<(String, String, String)> = Vec::new(); // (ip, reason, org)
+            for (ip, p) in &ranked {
+                let is_threat = p.class == "threat";
+                let fw_hits = cf_enrich.get(*ip).map(|e| e.firewall_blocks).unwrap_or(0);
+                if is_threat || fw_hits > 0 {
+                    let reason = if is_threat && fw_hits > 0 {
+                        format!("THREAT · {} FW blocks", fw_hits)
+                    } else if is_threat {
+                        "THREAT".to_string()
+                    } else {
+                        format!("{} FW blocks", fw_hits)
+                    };
+                    let org = rdap_map
+                        .get(*ip)
+                        .and_then(|r| r.org.clone().or_else(|| r.name.clone()))
+                        .unwrap_or_default();
+                    block_ips.push(((*ip).clone(), reason, org));
+                }
+            }
+
+            if block_ips.is_empty() {
+                "<p style='color:#7d8497;font-size:9pt'>No THREAT IPs detected in this window.</p>"
+                    .to_string()
+            } else if redacted {
+                format!(
+                    "<p style='color:#e07b5e;font-size:9pt'>{} THREAT/FW IPs — IPs redacted; see internal report for CF rule.</p>",
+                    block_ips.len()
+                )
+            } else {
+                let ip_list: Vec<&str> = block_ips.iter().map(|(ip, _, _)| ip.as_str()).collect();
+                let expr = if ip_list.len() <= 5 {
+                    format!("(ip.src in {{{}}})", ip_list.join(" "))
+                } else {
+                    format!("(ip.src in {{\n  {}\n}})", ip_list.join("\n  "))
+                };
+                let mut detail_rows = String::new();
+                for (ip, reason, org) in &block_ips {
+                    let rd = rdns.get(ip.as_str()).cloned().unwrap_or_default();
+                    detail_rows.push_str(&format!(
+                        "<tr><td><code>{ip}</code></td><td>{reason}</td><td>{org}</td><td style='font-size:8pt;color:#9ba2b3'>{rd}</td></tr>",
+                        ip = htmlesc(ip),
+                        reason = htmlesc(reason),
+                        org = htmlesc(org),
+                        rd = htmlesc(&rd),
+                    ));
+                }
+                format!(
+                    r#"<p style='font-size:8pt;color:#9ba2b3;margin:0 0 6pt'>{n} IPs — paste directly into Cloudflare Firewall → Create custom rule → Edit expression.</p>
+<pre style='background:#2c3346;color:#e07b5e;padding:10pt 12pt;border-radius:4pt;font-size:8pt;overflow-x:auto;white-space:pre-wrap;word-break:break-all'>{expr}</pre>
+<table><tr><th>IP</th><th>Reason</th><th>Org</th><th>rDNS</th></tr>{detail_rows}</table>"#,
+                    n = block_ips.len(),
+                    expr = htmlesc(&expr),
+                    detail_rows = detail_rows,
+                )
+            }
+        };
+
         format!(
             r#"<!doctype html><html><head><meta charset=utf-8>
 <title>WHOBELOOKING — {label} — last {hours}h</title>
@@ -3444,6 +3505,7 @@ tr:nth-child(even) td {{ background:#1f2536; }}
 td.r {{ text-align:right; }}
 code {{ font-family:'SF Mono',Consolas,monospace; font-size:8pt;
        background:#2c3346; color:#c4d4e0; padding:1pt 3pt; border-radius:2pt; }}
+pre {{ font-family:'SF Mono',Consolas,monospace; }}
 .footer {{ margin-top:16pt; padding-top:6pt; border-top:1px solid #4a5670;
        font-size:7pt; color:#7d8497; text-align:center; }}
 </style></head><body>
@@ -3460,6 +3522,9 @@ Generated: <code>whobelooking intel</code></div>
 {top_rows}
 </table>
 
+<h2>CF Firewall Block List</h2>
+{fw_section}
+
 <h2>Cross-Site Actors</h2>
 <p style='font-size:8pt;color:#9ba2b3;margin:0 0 6pt'>IPs observed across 2 or more of your CF zones in this window.</p>
 {cross_section}
@@ -3473,6 +3538,7 @@ Generated: <code>whobelooking intel</code></div>
             label = label,
             hours = hours,
             top_rows = top_rows,
+            fw_section = fw_section,
             cross_section = cross_section,
             zone_section = zone_section,
         )
