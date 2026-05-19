@@ -122,6 +122,8 @@ Registers with approuter. Cloudflare tunnel routes traffic.
 | Triple Sims | 3 passes, all 269 produce identical results — determinism gate |
 | 14/14 standards gate | clippy, fmt, audit, deny, msrv, unsafe, docs, changelog, license, test\_binary, allow\_unused, error\_handling, secrets, cargo\_meta |
 | `cargo_meta` coverage | `description`, `license`, `repository`, `documentation` (`cochranblock.github.io/whobelooking/`) all present in `Cargo.toml` |
+| GitHub Pages | `cochranblock.github.io/whobelooking/` — 8-page mdbook (introduction, getting-started, CLI, log-formats, /try, CF integration, configuration, architecture); auto-deploys on push to `main` |
+| Default branch | `main` |
 | `#![forbid(unsafe_code)]` | `crates/wbl-detect/src/lib.rs` line 1 |
 
 ## Web Frontend / Routes
