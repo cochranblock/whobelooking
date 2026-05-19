@@ -125,6 +125,7 @@ Registers with approuter. Cloudflare tunnel routes traffic.
 | GitHub Pages | `cochranblock.github.io/whobelooking/` — 8-page mdbook (introduction, getting-started, CLI, log-formats, /try, CF integration, configuration, architecture); auto-deploys on push to `main` |
 | Default branch | `main` |
 | Actor persistence | `~/.local/share/whobelooking/actors.redb` — `actors` table; `ActorRecord {first_seen, last_seen, total_hits, total_reports, last_class}`; written/merged after every `render` run; `↩ returning` badge in HTML cards for IPs seen in prior reports |
+| Multi-site combined report | `intel::render_html` — Zones column in Top-25 IPs table; Cross-Site Actors section (IPs ≥2 zones, sorted by zone count); Per-Zone Summary section (top 5 IPs per zone with hits + org) |
 | `#![forbid(unsafe_code)]` | `crates/wbl-detect/src/lib.rs` line 1 |
 
 ## Web Frontend / Routes

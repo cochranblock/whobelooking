@@ -3275,6 +3275,8 @@ mod intel {
         };
         let mut ranked: Vec<(&String, &parse_logs::PerIp)> = base.iter().collect();
         ranked.sort_by(|a, b| b.1.hits.cmp(&a.1.hits));
+
+        // Top-25 rows with per-zone column.
         let mut top_rows = String::new();
         for (ip, p) in ranked.iter().take(25) {
             let display_ip = if redacted {
@@ -3301,8 +3303,18 @@ mod intel {
                 .unwrap_or_else(|| "-".to_string());
             let cf_hits = cf_enrich.get(*ip).map(|e| e.cf_hits).unwrap_or(0);
             let fw = cf_enrich.get(*ip).map(|e| e.firewall_blocks).unwrap_or(0);
+            let zones_cell = cf_enrich
+                .get(*ip)
+                .map(|e| {
+                    e.zones
+                        .iter()
+                        .map(|(z, n)| format!("{} ({})", z, n))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
             top_rows.push_str(&format!(
-                "<tr><td>{ip}</td><td>{cc}</td><td>{org}</td><td>{rd}</td><td class=r>{base}</td><td class=r>{cf}</td><td class=r>{fw}</td><td>{cls}</td><td>{path}</td></tr>",
+                "<tr><td>{ip}</td><td>{cc}</td><td>{org}</td><td>{rd}</td><td class=r>{base}</td><td class=r>{cf}</td><td class=r>{fw}</td><td>{cls}</td><td>{zones}</td><td>{path}</td></tr>",
                 ip = display_ip,
                 cc = cc,
                 org = htmlesc(&org),
@@ -3311,8 +3323,101 @@ mod intel {
                 cf = cf_hits,
                 fw = fw,
                 cls = p.class,
+                zones = htmlesc(&zones_cell),
                 path = htmlesc(&top_path),
             ));
+        }
+
+        // Cross-site actors: IPs that appeared in 2+ CF zones.
+        let mut cross_site: Vec<(&String, &cf::EnrichRecord)> = cf_enrich
+            .iter()
+            .filter(|(_, e)| e.zones.len() >= 2)
+            .collect();
+        cross_site.sort_by(|a, b| {
+            b.1.zones
+                .len()
+                .cmp(&a.1.zones.len())
+                .then(b.1.cf_hits.cmp(&a.1.cf_hits))
+        });
+        let mut cross_rows = String::new();
+        for (ip, e) in cross_site.iter().take(20) {
+            let display_ip = if redacted {
+                redact::redact(ip)
+            } else {
+                (*ip).clone()
+            };
+            let org = rdap_map
+                .get(*ip)
+                .and_then(|r| r.org.clone().or_else(|| r.name.clone()))
+                .unwrap_or_else(|| "-".to_string());
+            let zones_str = e
+                .zones
+                .iter()
+                .map(|(z, n)| format!("{} ({})", z, n))
+                .collect::<Vec<_>>()
+                .join(", ");
+            cross_rows.push_str(&format!(
+                "<tr><td>{ip}</td><td class=r>{n}</td><td class=r>{cf}</td><td>{org}</td><td>{zones}</td></tr>",
+                ip = display_ip,
+                n = e.zones.len(),
+                cf = e.cf_hits,
+                org = htmlesc(&org),
+                zones = htmlesc(&zones_str),
+            ));
+        }
+        let cross_section = if cross_rows.is_empty() {
+            "<p style='color:#7d8497;font-size:9pt'>No cross-site actors detected in this window.</p>".to_string()
+        } else {
+            format!(
+                "<table><tr><th>IP</th><th class=r>Zones</th><th class=r>CF hits</th><th>Org</th><th>Zones detail</th></tr>{}</table>",
+                cross_rows
+            )
+        };
+
+        // Per-zone summary: collect all zones and their top-3 IPs.
+        let mut zone_map: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
+        for (ip, e) in cf_enrich {
+            for (zone, hits) in &e.zones {
+                zone_map
+                    .entry(zone.clone())
+                    .or_default()
+                    .push((ip.clone(), *hits));
+            }
+        }
+        let mut zone_section = String::new();
+        for (zone, mut ips) in zone_map {
+            ips.sort_by(|a, b| b.1.cmp(&a.1));
+            let rows: String = ips
+                .iter()
+                .take(5)
+                .map(|(ip, hits)| {
+                    let display_ip = if redacted {
+                        redact::redact(ip)
+                    } else {
+                        ip.clone()
+                    };
+                    let org = rdap_map
+                        .get(ip.as_str())
+                        .and_then(|r| r.org.clone().or_else(|| r.name.clone()))
+                        .unwrap_or_else(|| "-".to_string());
+                    format!(
+                        "<tr><td>{ip}</td><td class=r>{hits}</td><td>{org}</td></tr>",
+                        ip = display_ip,
+                        hits = hits,
+                        org = htmlesc(&org)
+                    )
+                })
+                .collect();
+            let _ = std::fmt::write(
+                &mut zone_section,
+                format_args!(
+                    "<h3 style='font-size:10pt;color:#c4d4e0;margin:12pt 0 4pt'>{zone} — {n} IPs</h3>\
+                     <table><tr><th>IP</th><th class=r>CF hits</th><th>Org</th></tr>{rows}</table>",
+                    zone = htmlesc(&zone),
+                    n = ips.len(),
+                    rows = rows,
+                ),
+            );
         }
 
         format!(
@@ -3325,6 +3430,7 @@ body {{ font: 10pt/1.45 'Helvetica Neue',Arial,sans-serif; color: #d8d4cc; paddi
 h1 {{ font-size:18pt; color:#f1ede4; letter-spacing:.04em; margin:0 0 4pt; }}
 h2 {{ font-size:12pt; color:#f1ede4; text-transform:uppercase; letter-spacing:.05em;
       border-bottom:2px solid #4a5670; padding:14pt 0 4pt; margin:0; }}
+h3 {{ font-size:10pt; color:#c4d4e0; margin:12pt 0 4pt; }}
 .classification {{ font-size:7pt; letter-spacing:.3em; text-transform:uppercase; color:#e07b5e;
       text-align:center; padding:4pt 0; border:1px solid #6b4338;
       background:rgba(224,123,94,.06); margin-bottom:14pt; }}
@@ -3345,20 +3451,30 @@ code {{ font-family:'SF Mono',Consolas,monospace; font-size:8pt;
 <div class=header>
 <h1>WHOBELOOKING — FLEET INTEL ({hours}h)</h1>
 <div class=sub>Source: app base logs + CF GraphQL (24h chunks) · rDNS · RDAP whois<br>
-Generated: <code>whobelooking intel</code> — chromiumoxide PDF via <code>whobelooking pdf</code></div>
+Generated: <code>whobelooking intel</code></div>
 </div>
 
 <h2>Top 25 IPs</h2>
 <table>
-<tr><th>IP</th><th>CC</th><th>Org (RDAP)</th><th>rDNS</th><th class=r>Base</th><th class=r>CF</th><th class=r>FW</th><th>Class</th><th>Top path</th></tr>
+<tr><th>IP</th><th>CC</th><th>Org (RDAP)</th><th>rDNS</th><th class=r>Base</th><th class=r>CF</th><th class=r>FW</th><th>Class</th><th>Zones</th><th>Top path</th></tr>
 {top_rows}
 </table>
+
+<h2>Cross-Site Actors</h2>
+<p style='font-size:8pt;color:#9ba2b3;margin:0 0 6pt'>IPs observed across 2 or more of your CF zones in this window.</p>
+{cross_section}
+
+<h2>Per-Zone Summary</h2>
+<p style='font-size:8pt;color:#9ba2b3;margin:0 0 6pt'>Top 5 IPs per zone by CF hit count.</p>
+{zone_section}
 
 <div class=footer>Unlicense — public domain — The Cochran Block, LLC — operator IP filtered via ignore-list — {label}</div>
 </body></html>"#,
             label = label,
             hours = hours,
             top_rows = top_rows,
+            cross_section = cross_section,
+            zone_section = zone_section,
         )
     }
 
