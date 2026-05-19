@@ -42,6 +42,8 @@ pub struct t105 {
     pub first_unix: i64,
     pub last_unix: i64,
     pub class: Option<t104>,
+    /// 0–100 confidence that the assigned class is correct.
+    pub confidence: Option<u8>,
     pub rdns: Option<String>,
     pub org: Option<String>,
     pub org_country: Option<String>,
@@ -127,32 +129,119 @@ const BOT_HINTS: &[&str] = &[
 /// Real-browser substrings. Lowercased before match.
 const BROWSER_HINTS: &[&str] = &["mozilla", "safari", "chrome", "firefox", "edg/"];
 
-/// f404 = classify_ip
+/// f404 = classify_ip (class only; see f404c for class + confidence)
 pub fn f404(rec: &t105) -> t104 {
-    // 1. Threat: any attack-path probe seen
-    for p in rec.paths.keys() {
-        let pl = p.to_ascii_lowercase();
-        if ATTACK_PATHS.iter().any(|a| pl.contains(a)) {
-            return t104::Threat;
-        }
-    }
-    // 2. Bot: every UA looks botty (at least one UA known)
+    f404c(rec).0
+}
+
+/// f404c = classify_ip with confidence score.
+///
+/// Returns `(class, confidence)` where confidence is 0–100.
+/// Confidence reflects how many independent signals agree: attack-path
+/// variety, UA specificity, hit volume, rDNS resolution, org data presence.
+pub fn f404c(rec: &t105) -> (t104, u8) {
     let uas: Vec<String> = rec
         .user_agents
         .keys()
         .map(|u| u.to_ascii_lowercase())
         .collect();
-    if !uas.is_empty() && uas.iter().all(|u| BOT_HINTS.iter().any(|h| u.contains(h))) {
-        return t104::Bot;
-    }
-    // 3. Institutional: low-volume + has a real-browser UA
     let has_browser_ua = uas
         .iter()
         .any(|u| BROWSER_HINTS.iter().any(|h| u.contains(h)));
-    if rec.hits <= 30 && has_browser_ua {
-        return t104::Institutional;
+
+    // 1. Threat: any attack-path probe seen
+    let attack_paths: Vec<_> = rec
+        .paths
+        .keys()
+        .filter(|p| {
+            let pl = p.to_ascii_lowercase();
+            ATTACK_PATHS.iter().any(|a| pl.contains(a))
+        })
+        .collect();
+    if !attack_paths.is_empty() {
+        let mut conf: u8 = 55;
+        // More distinct attack paths → more deliberate
+        conf = conf.saturating_add(((attack_paths.len() - 1).min(6) as u8) * 5);
+        // Persistent hits strengthen the signal
+        if rec.hits > 5 {
+            conf = conf.saturating_add(5);
+        }
+        // Pure scanner: no browser UA
+        if !has_browser_ua {
+            conf = conf.saturating_add(5);
+        }
+        // Known rdns (corp scanner, not anon)
+        if rec.rdns.as_deref().is_some_and(|r| !r.is_empty()) {
+            conf = conf.saturating_add(5);
+        }
+        return (t104::Threat, conf.min(98));
     }
-    t104::Organic
+
+    // 2. Bot: every UA looks botty (at least one UA known)
+    if !uas.is_empty() && uas.iter().all(|u| BOT_HINTS.iter().any(|h| u.contains(h))) {
+        let mut conf: u8 = 60;
+        // Named/verified crawler rdns
+        if rec.rdns.as_deref().is_some_and(|r| {
+            let rl = r.to_ascii_lowercase();
+            ["googlebot", "bingbot", "crawl", "spider", "slurp", "curl"]
+                .iter()
+                .any(|h| rl.contains(h))
+        }) {
+            conf = conf.saturating_add(20);
+        }
+        // High-volume → consistent automation
+        if rec.hits > 100 {
+            conf = conf.saturating_add(10);
+        } else if rec.hits > 20 {
+            conf = conf.saturating_add(5);
+        }
+        // Only GET methods — typical crawler
+        let only_get = rec.methods.len() == 1 && rec.methods.contains_key("GET");
+        if only_get {
+            conf = conf.saturating_add(5);
+        }
+        return (t104::Bot, conf.min(98));
+    }
+
+    // 3. Institutional: low-volume + has a real-browser UA
+    if rec.hits <= 30 && has_browser_ua {
+        let mut conf: u8 = 45;
+        // Very low hit count → targeted human visit, not soak
+        if rec.hits <= 5 {
+            conf = conf.saturating_add(15);
+        } else if rec.hits <= 15 {
+            conf = conf.saturating_add(5);
+        }
+        // RDAP org data confirms it's a named org
+        if rec.org.as_deref().is_some_and(|o| !o.is_empty()) {
+            conf = conf.saturating_add(15);
+        }
+        // rDNS resolves → real host, not anonymous
+        if rec.rdns.as_deref().is_some_and(|r| !r.is_empty()) {
+            conf = conf.saturating_add(10);
+        }
+        // Browsed multiple pages → human behaviour
+        if rec.paths.len() > 3 {
+            conf = conf.saturating_add(5);
+        }
+        return (t104::Institutional, conf.min(95));
+    }
+
+    // 4. Organic: residual — lowest baseline confidence
+    let mut conf: u8 = 35;
+    if has_browser_ua {
+        conf = conf.saturating_add(15);
+    }
+    if rec.org.as_deref().is_some_and(|o| !o.is_empty()) {
+        conf = conf.saturating_add(10);
+    }
+    if rec.hits >= 5 && rec.hits <= 100 {
+        conf = conf.saturating_add(10);
+    }
+    if rec.paths.len() > 2 {
+        conf = conf.saturating_add(5);
+    }
+    (t104::Organic, conf.min(90))
 }
 
 /// f401 = aggregate
@@ -197,8 +286,9 @@ pub fn f401(events: &[t100]) -> t107 {
 
     // Classify after the full rollup is in hand.
     for (_ip, rec) in report.ips.iter_mut() {
-        let c = f404(rec);
+        let (c, conf) = f404c(rec);
         rec.class = Some(c);
+        rec.confidence = Some(conf);
         *report.class_counts.entry(c.name().to_string()).or_insert(0) += 1;
     }
 
@@ -259,11 +349,12 @@ pub fn f402(report: &mut t107, enrich: &BTreeMap<String, t108>) {
         }
     }
     // Re-classify + rebuild counts. The order matters: we must call
-    // `f404` against the post-enrichment record, then count.
+    // `f404c` against the post-enrichment record, then count.
     report.class_counts.clear();
     for rec in report.ips.values_mut() {
-        let c = f404(rec);
+        let (c, conf) = f404c(rec);
         rec.class = Some(c);
+        rec.confidence = Some(conf);
         *report.class_counts.entry(c.name().to_string()).or_insert(0) += 1;
     }
 }

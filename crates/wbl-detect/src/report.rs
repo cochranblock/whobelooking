@@ -300,12 +300,20 @@ fn f450(out: &mut String, report: &t107, show_limit: usize) {
             _ => String::new(),
         };
 
+        let conf_block = match rec.confidence {
+            Some(c) => format!(
+                r#" <span style="color:{color};font-size:9px;opacity:.6;">{c}%</span>"#,
+                color = f443(rec.class),
+                c = c,
+            ),
+            None => String::new(),
+        };
         let _ = write!(
             out,
             r#"<div class="event {class}">
   <div class="event-time">{when} · {hits} hit{plural}</div>
   <div class="event-title">
-    <span class="tag tag-{class}">{class_up}</span>
+    <span class="tag tag-{class}">{class_up}</span>{conf_block}
     {primary}
     {cc_block}
   </div>
@@ -317,6 +325,7 @@ fn f450(out: &mut String, report: &t107, show_limit: usize) {
 </div>"#,
             class = class,
             class_up = class.to_ascii_uppercase(),
+            conf_block = conf_block,
             when = f445(rec.last_unix),
             hits = rec.hits,
             plural = if rec.hits > 1 { "s" } else { "" },
