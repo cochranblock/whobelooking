@@ -1070,21 +1070,50 @@ WantedBy=default.target
             let ips = wbl_detect::f403(&report);
             if !ips.is_empty() {
                 eprintln!("resolving {} IP(s)...", ips.len());
-                let rdns = dns::rdns_batch(&ips).await;
-                let enrich: std::collections::BTreeMap<String, wbl_detect::t108> = rdns
-                    .into_iter()
-                    .filter_map(|(ip, name)| {
-                        name.map(|r| {
-                            (
-                                ip,
-                                wbl_detect::t108 {
-                                    rdns: Some(r),
-                                    ..Default::default()
-                                },
-                            )
+                // Seed enrichment map with rDNS results.
+                let mut enrich: std::collections::BTreeMap<String, wbl_detect::t108> =
+                    dns::rdns_batch(&ips)
+                        .await
+                        .into_iter()
+                        .filter_map(|(ip, name)| {
+                            name.map(|r| {
+                                (
+                                    ip,
+                                    wbl_detect::t108 {
+                                        rdns: Some(r),
+                                        ..Default::default()
+                                    },
+                                )
+                            })
                         })
-                    })
+                        .collect();
+                // RDAP org lookup — top-50 by hit count so render stays fast.
+                // Cache (rdap_cache.redb) makes repeat runs instant.
+                let mut rdap_ips: Vec<(&String, u32)> =
+                    report.ips.iter().map(|(ip, rec)| (ip, rec.hits)).collect();
+                rdap_ips.sort_by(|a, b| b.1.cmp(&a.1));
+                let rdap_ips: Vec<String> = rdap_ips
+                    .into_iter()
+                    .take(50)
+                    .map(|(ip, _)| ip.clone())
                     .collect();
+                eprintln!("whois top {} IP(s)...", rdap_ips.len());
+                for (ip, info) in rdap_ips
+                    .iter()
+                    .zip(rdap::lookup_batch(&rdap_ips).await.iter())
+                {
+                    let org = info.org.clone().or_else(|| info.name.clone());
+                    let country = info.country.clone();
+                    if org.is_some() || country.is_some() {
+                        let e = enrich.entry(ip.clone()).or_default();
+                        if org.is_some() {
+                            e.org = org;
+                        }
+                        if country.is_some() {
+                            e.org_country = country;
+                        }
+                    }
+                }
                 wbl_detect::f402(&mut report, &enrich);
             }
             // Inject cross-report actor history from the local redb store.
@@ -1120,9 +1149,11 @@ WantedBy=default.target
         } => {
             let dest = out.unwrap_or_else(|| format!("{}.html", file));
             let mut last_size: u64 = 0;
-            // Persistent rDNS cache: IP → hostname. Only resolved once per session.
+            // Persistent rDNS and org caches — only resolved once per session.
             let mut rdns_cache: std::collections::BTreeMap<String, String> =
                 std::collections::BTreeMap::new();
+            let mut org_cache: std::collections::BTreeMap<String, (String, String)> =
+                std::collections::BTreeMap::new(); // ip → (org, country)
             eprintln!(
                 "watching {} → {} (poll {}s, Ctrl-C to stop)",
                 file, dest, interval
@@ -1147,15 +1178,26 @@ WantedBy=default.target
                         .collect();
                     if !new_ips.is_empty() {
                         eprintln!("  resolving {} new IP(s)...", new_ips.len());
-                        let resolved = dns::rdns_batch(&new_ips).await;
-                        for (ip, name) in resolved {
+                        for (ip, name) in dns::rdns_batch(&new_ips).await {
                             if let Some(n) = name {
                                 rdns_cache.insert(ip, n);
                             }
                         }
+                        for (ip, info) in new_ips
+                            .iter()
+                            .zip(rdap::lookup_batch(&new_ips).await.iter())
+                        {
+                            let org = info.org.clone().or_else(|| info.name.clone());
+                            if let Some(o) = org {
+                                org_cache.insert(
+                                    ip.clone(),
+                                    (o, info.country.clone().unwrap_or_default()),
+                                );
+                            }
+                        }
                     }
-                    // Build enrichment from full cache.
-                    let enrich: std::collections::BTreeMap<String, wbl_detect::t108> = all_ips
+                    // Build enrichment from full caches.
+                    let mut enrich: std::collections::BTreeMap<String, wbl_detect::t108> = all_ips
                         .iter()
                         .filter_map(|ip| {
                             rdns_cache.get(ip.as_str()).map(|r: &String| {
@@ -1169,6 +1211,13 @@ WantedBy=default.target
                             })
                         })
                         .collect();
+                    for (ip, (org, cc)) in &org_cache {
+                        let e = enrich.entry(ip.clone()).or_default();
+                        e.org = Some(org.clone());
+                        if !cc.is_empty() {
+                            e.org_country = Some(cc.clone());
+                        }
+                    }
                     if !enrich.is_empty() {
                         wbl_detect::f402(&mut report, &enrich);
                     }
