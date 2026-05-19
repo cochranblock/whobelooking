@@ -71,6 +71,7 @@ whobelooking deliver {id}       # mark delivered
 whobelooking report ...         # run enrichment pipeline
 whobelooking render <file>      # log file → rDNS-enriched standalone HTML report
 whobelooking tail <file>        # watch log file, re-render HTML on each change (--interval, cached rDNS)
+whobelooking install            # write ~/.config/systemd/user/whobelooking.service + print enable steps
 whobelooking scout ...          # federal contract search
 ```
 

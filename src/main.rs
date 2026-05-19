@@ -144,6 +144,15 @@ enum Cmd {
         #[arg(short, long, default_value = "8082", env = "WBL_PORT")]
         port: u16,
     },
+    /// Write a systemd user-service unit and print enable/start instructions.
+    Install {
+        /// Port the server will listen on
+        #[arg(short, long, default_value = "8082")]
+        port: u16,
+        /// Write to this path instead of ~/.config/systemd/user/whobelooking.service
+        #[arg(long)]
+        unit_path: Option<String>,
+    },
     /// List all jobs in the queue
     Queue,
     /// Pop the next pending job
@@ -694,6 +703,49 @@ async fn main() -> anyhow::Result<()> {
             axum::serve(listener, app)
                 .with_graceful_shutdown(shutdown)
                 .await?;
+        }
+        Cmd::Install { port, unit_path } => {
+            let exe = std::env::current_exe()
+                .unwrap_or_else(|_| std::path::PathBuf::from("whobelooking"))
+                .display()
+                .to_string();
+            let unit = format!(
+                r#"[Unit]
+Description=whobelooking visitor intelligence server
+After=network.target
+
+[Service]
+ExecStart={exe} serve --port {port}
+Restart=on-failure
+RestartSec=5
+Environment=WBL_PORT={port}
+
+[Install]
+WantedBy=default.target
+"#,
+                exe = exe,
+                port = port
+            );
+            let dest = match unit_path {
+                Some(p) => std::path::PathBuf::from(p),
+                None => {
+                    let mut d = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                    d.push("systemd");
+                    d.push("user");
+                    std::fs::create_dir_all(&d)?;
+                    d.push("whobelooking.service");
+                    d
+                }
+            };
+            std::fs::write(&dest, &unit)?;
+            println!("wrote {}", dest.display());
+            println!();
+            println!("  systemctl --user daemon-reload");
+            println!("  systemctl --user enable --now whobelooking");
+            println!("  systemctl --user status whobelooking");
+            println!();
+            println!("Logs:  journalctl --user -u whobelooking -f");
+            println!("Stop:  systemctl --user stop whobelooking");
         }
         Cmd::Queue => {
             // Try IPC first (server running) → fall back to direct sled (server down).
