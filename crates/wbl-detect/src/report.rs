@@ -286,6 +286,20 @@ fn f450(out: &mut String, report: &t107, show_limit: usize) {
         let org_name = f444(rec, ip);
         let show_org = org_name.as_str() != ip.as_str();
 
+        let history_block = match (rec.history_total_reports, rec.history_first_unix) {
+            (Some(r), Some(f)) if r > 0 => {
+                let total_hits = rec.history_total_hits.unwrap_or(0) + rec.hits;
+                format!(
+                    r#"<br><span style="color:#00d9ff55;font-size:10px;">↩ returning · first seen {} · {} report{} · {} total hits</span>"#,
+                    f445(f),
+                    r,
+                    if r == 1 { "" } else { "s" },
+                    total_hits,
+                )
+            }
+            _ => String::new(),
+        };
+
         let _ = write!(
             out,
             r#"<div class="event {class}">
@@ -298,7 +312,7 @@ fn f450(out: &mut String, report: &t107, show_limit: usize) {
   <div class="event-body">
     {ip_block}
     Top path: <span class="page">{path}</span>{count_block}
-    <br><span style="color:#444;font-size:10px;">{ua}</span>
+    <br><span style="color:#444;font-size:10px;">{ua}</span>{history_block}
   </div>
 </div>"#,
             class = class,
@@ -334,6 +348,7 @@ fn f450(out: &mut String, report: &t107, show_limit: usize) {
                 String::new()
             },
             ua = f440(&f451(top_ua, 140)),
+            history_block = history_block,
         );
         rendered += 1;
     }

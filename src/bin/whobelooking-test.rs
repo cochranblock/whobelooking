@@ -4417,6 +4417,7 @@ fn t_enrich_org() -> Result<(), String> {
             rdns: Some("a.example".into()),
             org: Some("Example Inc".into()),
             org_country: Some("US".into()),
+            ..Default::default()
         },
     );
     wbl_apply_enrichment(&mut agg, &overlay);
@@ -4439,6 +4440,7 @@ fn t_enrich_skips() -> Result<(), String> {
             rdns: Some("nope".into()),
             org: None,
             org_country: None,
+            ..Default::default()
         },
     );
     wbl_apply_enrichment(&mut agg, &overlay);
@@ -4458,6 +4460,7 @@ fn t_enrich_empty() -> Result<(), String> {
             rdns: Some(String::new()),
             org: None,
             org_country: None,
+            ..Default::default()
         },
     );
     wbl_apply_enrichment(&mut agg, &overlay);
@@ -4516,6 +4519,7 @@ fn t_enrich_reclassifies() -> Result<(), String> {
             rdns: Some("a.example".into()),
             org: Some("Microsoft Corporation".into()),
             org_country: Some("US".into()),
+            ..Default::default()
         },
     );
     wbl_apply_enrichment(&mut agg, &overlay);
@@ -4543,6 +4547,7 @@ fn t_enrich_idempotent() -> Result<(), String> {
             rdns: Some("x.example".into()),
             org: Some("X Co".into()),
             org_country: Some("DE".into()),
+            ..Default::default()
         },
     );
     // Apply once to agg_a, twice to agg_b. Result must be identical.
@@ -4580,6 +4585,7 @@ fn t_enrich_counts_after() -> Result<(), String> {
             rdns: Some("a".into()),
             org: Some("X".into()),
             org_country: None,
+            ..Default::default()
         },
     );
     wbl_apply_enrichment(&mut agg, &overlay);
@@ -5089,6 +5095,7 @@ fn t_pipe_enrich_text() -> Result<(), String> {
             rdns: Some("router.example".into()),
             org: Some("ZIRCONIUM-CORP".into()),
             org_country: Some("US".into()),
+            ..Default::default()
         },
     );
     wbl_apply_enrichment(&mut agg, &overlay);

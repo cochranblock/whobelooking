@@ -124,6 +124,7 @@ Registers with approuter. Cloudflare tunnel routes traffic.
 | `cargo_meta` coverage | `description`, `license`, `repository`, `documentation` (`cochranblock.github.io/whobelooking/`) all present in `Cargo.toml` |
 | GitHub Pages | `cochranblock.github.io/whobelooking/` — 8-page mdbook (introduction, getting-started, CLI, log-formats, /try, CF integration, configuration, architecture); auto-deploys on push to `main` |
 | Default branch | `main` |
+| Actor persistence | `~/.local/share/whobelooking/actors.redb` — `actors` table; `ActorRecord {first_seen, last_seen, total_hits, total_reports, last_class}`; written/merged after every `render` run; `↩ returning` badge in HTML cards for IPs seen in prior reports |
 | `#![forbid(unsafe_code)]` | `crates/wbl-detect/src/lib.rs` line 1 |
 
 ## Web Frontend / Routes

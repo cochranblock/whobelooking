@@ -1016,8 +1016,7 @@ async fn main() -> anyhow::Result<()> {
                                 ip,
                                 wbl_detect::t108 {
                                     rdns: Some(r),
-                                    org: None,
-                                    org_country: None,
+                                    ..Default::default()
                                 },
                             )
                         })
@@ -1025,10 +1024,31 @@ async fn main() -> anyhow::Result<()> {
                     .collect();
                 wbl_detect::f402(&mut report, &enrich);
             }
+            // Inject cross-report actor history from the local redb store.
+            let history = actor_history::lookup(&ips);
+            if !history.is_empty() {
+                let hist_enrich: std::collections::BTreeMap<String, wbl_detect::t108> = history
+                    .iter()
+                    .map(|(ip, h)| {
+                        (
+                            ip.clone(),
+                            wbl_detect::t108 {
+                                history_first_unix: Some(h.first_seen),
+                                history_total_reports: Some(h.total_reports),
+                                history_total_hits: Some(h.total_hits),
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect();
+                wbl_detect::f402(&mut report, &hist_enrich);
+            }
             let html = wbl_detect::f405(&report, &file);
             let dest = out.unwrap_or_else(|| format!("{}.html", file));
             std::fs::write(&dest, &html)?;
             println!("{}", dest);
+            // Persist actor history so future reports can show the ↩ badge.
+            actor_history::update(&report.ips);
         }
         Cmd::Intel {
             baselogs_dir,
@@ -3347,6 +3367,123 @@ Generated: <code>whobelooking intel</code> — chromiumoxide PDF via <code>whobe
             .replace('<', "&lt;")
             .replace('>', "&gt;")
             .replace('"', "&quot;")
+    }
+}
+
+mod actor_history {
+    use redb::{Database, ReadableTable, TableDefinition};
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("actors");
+
+    #[derive(Serialize, Deserialize, Default, Clone)]
+    pub struct ActorRecord {
+        pub first_seen: i64,
+        pub last_seen: i64,
+        pub total_hits: u32,
+        pub total_reports: u32,
+        pub last_class: String,
+    }
+
+    fn db_path() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("whobelooking")
+            .join("actors.redb")
+    }
+
+    fn open_db() -> Option<Database> {
+        let p = db_path();
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        Database::create(&p).ok()
+    }
+
+    pub fn lookup(ips: &[String]) -> BTreeMap<String, ActorRecord> {
+        let db = match open_db() {
+            Some(db) => db,
+            None => return BTreeMap::new(),
+        };
+        let rtx = match db.begin_read() {
+            Ok(tx) => tx,
+            Err(_) => return BTreeMap::new(),
+        };
+        let table = match rtx.open_table(TABLE) {
+            Ok(t) => t,
+            Err(_) => return BTreeMap::new(),
+        };
+        let mut out = BTreeMap::new();
+        for ip in ips {
+            if let Ok(Some(v)) = table.get(ip.as_str()) {
+                if let Ok((rec, _)) = bincode::serde::decode_from_slice::<ActorRecord, _>(
+                    v.value(),
+                    bincode::config::standard(),
+                ) {
+                    out.insert(ip.clone(), rec);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn update(ips: &BTreeMap<String, wbl_detect::t105>) {
+        let db = match open_db() {
+            Some(db) => db,
+            None => return,
+        };
+        let wtx = match db.begin_write() {
+            Ok(tx) => tx,
+            Err(_) => return,
+        };
+        {
+            let mut table = match wtx.open_table(TABLE) {
+                Ok(t) => t,
+                Err(_) => return,
+            };
+            for (ip, rec) in ips {
+                let class = rec.class.map(|c| c.name().to_string()).unwrap_or_default();
+                let new_rec = if let Ok(Some(v)) = table.get(ip.as_str()) {
+                    let bytes: &[u8] = v.value();
+                    if let Ok((existing, _)) = bincode::serde::decode_from_slice::<ActorRecord, _>(
+                        bytes,
+                        bincode::config::standard(),
+                    ) {
+                        ActorRecord {
+                            first_seen: existing.first_seen.min(rec.first_unix),
+                            last_seen: existing.last_seen.max(rec.last_unix),
+                            total_hits: existing.total_hits.saturating_add(rec.hits),
+                            total_reports: existing.total_reports + 1,
+                            last_class: class,
+                        }
+                    } else {
+                        ActorRecord {
+                            first_seen: rec.first_unix,
+                            last_seen: rec.last_unix,
+                            total_hits: rec.hits,
+                            total_reports: 1,
+                            last_class: class,
+                        }
+                    }
+                } else {
+                    ActorRecord {
+                        first_seen: rec.first_unix,
+                        last_seen: rec.last_unix,
+                        total_hits: rec.hits,
+                        total_reports: 1,
+                        last_class: class,
+                    }
+                };
+                if let Ok(encoded) =
+                    bincode::serde::encode_to_vec(&new_rec, bincode::config::standard())
+                {
+                    let _ = table.insert(ip.as_str(), encoded.as_slice());
+                }
+            }
+        }
+        let _ = wtx.commit();
     }
 }
 

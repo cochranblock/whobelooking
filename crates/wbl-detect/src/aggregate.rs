@@ -45,6 +45,12 @@ pub struct t105 {
     pub rdns: Option<String>,
     pub org: Option<String>,
     pub org_country: Option<String>,
+    /// Earliest unix timestamp this IP has ever been seen across all reports.
+    pub history_first_unix: Option<i64>,
+    /// Total number of reports this IP has appeared in (before this one).
+    pub history_total_reports: Option<u32>,
+    /// Cumulative hit count across all prior reports.
+    pub history_total_hits: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -208,6 +214,9 @@ pub struct t108 {
     pub rdns: Option<String>,
     pub org: Option<String>,
     pub org_country: Option<String>,
+    pub history_first_unix: Option<i64>,
+    pub history_total_reports: Option<u32>,
+    pub history_total_hits: Option<u32>,
 }
 
 /// f402 = apply_enrichment.
@@ -241,6 +250,11 @@ pub fn f402(report: &mut t107, enrich: &BTreeMap<String, t108>) {
                 if !c.is_empty() {
                     rec.org_country = Some(c.clone());
                 }
+            }
+            if e.history_first_unix.is_some() {
+                rec.history_first_unix = e.history_first_unix;
+                rec.history_total_reports = e.history_total_reports;
+                rec.history_total_hits = e.history_total_hits;
             }
         }
     }
