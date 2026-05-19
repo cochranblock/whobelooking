@@ -1,33 +1,37 @@
 # whobelooking
 
-Visitor intelligence platform. Any IP source → rDNS → /24 scan → whois → company ID → enrichment flywheel → intelligence report.
+Visitor intelligence platform. Any IP source → rDNS → /24 scan → WHOIS → company ID → enrichment flywheel → intelligence report.
 
-One binary. Zero cloud. Unlicense.
+One binary. Zero cloud. [Unlicense](https://github.com/cochranblock/whobelooking/blob/master/LICENSE).
 
 ## What It Does
 
-whobelooking takes an IP address and builds an intelligence report: reverse DNS lookup, /24 subnet scan, WHOIS enrichment, company identification. The enrichment flywheel stores results and cross-references future lookups against the accumulated dataset.
+Drop any log file — Cloudflare NDJSON, nginx access log, AWS ALB, pcap, anything — and get back a standalone HTML report that tells you which companies visited, which pages they read, how long they stayed, and whether they look like a threat or an opportunity.
 
-Deployed at cochranblock.org — every visitor to the site runs through the pipeline.
+Real example: cochranblock.org caught Microsoft evaluating the site across 14 IPs and 4 network ranges over 8 consecutive days. They downloaded the resume 5 times. Initial discovery traced to a LinkedIn post — same hour, same page, zero lag. Total marketing spend: $0.
 
-## Architecture
+## How It Works
 
-| Component | Description |
-|-----------|-------------|
-| `rDNS` | Reverse DNS resolution per IP |
-| `/24 scanner` | Subnet sweep to find related hosts |
-| `WHOIS` | Ownership and registration data |
-| `enrichment store` | redb-backed persistent intelligence cache |
-| `web server` | Axum — `GET /probe`, `GET /scan`, `POST /report` |
-| `TUI` | Real-time intelligence dashboard |
-
-## Build
-
-```bash
-cargo build --features serve                         # with web server
-cargo build --profile diamond --features serve       # 6.6 MB production binary
-whobelooking serve --port 8082
 ```
+Any log source → parse → aggregate per-IP → rDNS → RDAP → classify → HTML report
+```
+
+Parsing, classification, and rendering all run in a single WASM module (`wbl-detect`, ~219 KB). The same binary runs in the browser on `/try` and on the server via `whobelooking render`.
+
+## Key Numbers
+
+| Metric | Value |
+|--------|-------|
+| Binary size | 7.3 MB (dev) |
+| WASM size | ~219 KB |
+| Log formats supported | 17 |
+| Unit tests | 269 |
+| Smoke tests | 8 |
+| Standards gate | 14/14 |
+
+## License
+
+Unlicense — public domain. Do what you want.
 <!-- COCHRANBLOCK-BRAND-FOOTER:START -->
 
 ---
