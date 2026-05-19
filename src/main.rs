@@ -61,11 +61,11 @@ fn write_pid() {
 /// Implemented over `fd-lock` so the syscall stays out of our `unsafe` budget.
 #[cfg(feature = "serve")]
 struct PidLock {
-    // Hold both the file and the guard so the lock outlives the function call.
-    // RwLockWriteGuard borrows from RwLock; `Box` lets us pin the lock heap-side
-    // and hand back a `'static`-bounded guard via field ordering on drop.
-    _file: Box<fd_lock::RwLock<std::fs::File>>,
+    // Guard must be declared first — Rust drops fields in forward declaration
+    // order, so _guard (which calls flock LOCK_UN) must run before _file closes
+    // the fd. If _file drops first the fd is invalid when the guard runs.
     _guard: Option<fd_lock::RwLockWriteGuard<'static, std::fs::File>>,
+    _file: Box<fd_lock::RwLock<std::fs::File>>,
 }
 
 #[cfg(feature = "serve")]
@@ -2428,6 +2428,7 @@ mod cf {
         #[derive(serde::Deserialize)]
         struct Resp {
             success: bool,
+            #[serde(default)]
             result: Vec<Zone>,
         }
         let client = reqwest::Client::new();

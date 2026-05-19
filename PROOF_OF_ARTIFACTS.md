@@ -117,9 +117,11 @@ Registers with approuter. Cloudflare tunnel routes traffic.
 | Artifact | Evidence |
 |----------|----------|
 | Test binary | `cargo run --bin whobelooking-test --features tests,serve` |
-| 265 unit tests | wbl-detect parsers (log formats, classification, enrichment, report rendering, pcap/hex-dump), scan API, web content, security, legal |
-| Triple Sims | 3 passes, all 255 produce identical results — determinism gate |
+| 269 unit tests | wbl-detect parsers (log formats, classification, enrichment, report rendering, pcap/hex-dump), scan API, web content, security, legal |
+| 8 smoke tests | Stage 5 end-to-end: `/health`, `/try` CF panel, `/api/cf/pull` validation — require live server at `WBL_SMOKE_URL` |
+| Triple Sims | 3 passes, all 269 produce identical results — determinism gate |
 | 14/14 standards gate | clippy, fmt, audit, deny, msrv, unsafe, docs, changelog, license, test\_binary, allow\_unused, error\_handling, secrets, cargo\_meta |
+| `cargo_meta` coverage | `description`, `license`, `repository`, `documentation` (`cochranblock.github.io/whobelooking/`) all present in `Cargo.toml` |
 | `#![forbid(unsafe_code)]` | `crates/wbl-detect/src/lib.rs` line 1 |
 
 ## Web Frontend / Routes
