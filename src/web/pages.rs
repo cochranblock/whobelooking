@@ -888,7 +888,7 @@ Constraints: public hosts only (RFC1918, loopback, link-local, doc-range rejecte
 ## Contact
 
 - mcochran@cochranblock.org
-- Cochran Block, LLC: CAGE 1CQ66, UEI W7X3HAQL9CF9, SDVOSB pending
+- Cochran Block, LLC: CAGE 1CQ66, UEI W7X3HAQL9CF9, SDVOSB Certified
 ";
 
 pub async fn not_found(uri: axum::http::Uri) -> (axum::http::StatusCode, Html<&'static str>) {
