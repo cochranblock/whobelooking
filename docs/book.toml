@@ -1,0 +1,20 @@
+[book]
+title = "whobelooking"
+description = "Visitor intelligence platform. rDNS, /24 scan, WHOIS, company ID, enrichment flywheel."
+authors = ["Michael Cochran"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/cochranblock/whobelooking"
+edit-url-template = "https://github.com/cochranblock/whobelooking/edit/main/docs/src/{path}"
+site-url = "/whobelooking/"
+additional-css = ["theme/custom.css"]
+additional-js = ["theme/force-theme.js"]
+default-theme = "coal"
+preferred-dark-theme = "coal"
+no-section-label = true
+
+[output.html.fold]
+enable = true
+level = 1

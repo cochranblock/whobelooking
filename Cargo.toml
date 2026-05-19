@@ -13,6 +13,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "Unlicense"
 repository = "https://github.com/cochranblock/whobelooking"
+documentation = "https://cochranblock.github.io/whobelooking/"
 authors = ["GotEmCoach", "KOVA", "Claude Opus 4.7"]
 
 # Shared deps — bump in one place, every crate inherits. Use `dep.workspace = true`
@@ -33,6 +34,7 @@ rust-version = "1.85"
 description = "Visitor intelligence platform. Any IP source → rDNS → /24 scan → whois → company ID → enrichment flywheel → intelligence report. One binary. Zero cloud."
 license = "Unlicense"
 repository = "https://github.com/cochranblock/whobelooking"
+documentation = "https://cochranblock.github.io/whobelooking/"
 keywords = ["analytics", "reverse-dns", "lead-generation", "visitor-intelligence", "threat-detection"]
 categories = ["command-line-utilities", "web-programming"]
 
