@@ -43,6 +43,9 @@ Every report caches rDNS, whois, and company ID results in sled. Customer #1's M
 ### Log Analyzer (`/try`)
 ![/try — WASM log analysis, zero upload](docs/screenshots/try-page.png)
 
+### HTML Intelligence Report (`whobelooking render`)
+![HTML report — 2949 events, 836 IPs, confidence scores, trend panel](docs/screenshots/report-page.png)
+
 ## Modules
 
 | Module | Purpose |
