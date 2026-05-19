@@ -70,6 +70,7 @@ whobelooking done {id}          # mark complete
 whobelooking deliver {id}       # mark delivered
 whobelooking report ...         # run enrichment pipeline
 whobelooking render <file>      # log file → rDNS-enriched standalone HTML report
+whobelooking tail <file>        # watch log file, re-render HTML on each change (--interval, cached rDNS)
 whobelooking scout ...          # federal contract search
 ```
 

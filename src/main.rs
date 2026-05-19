@@ -350,6 +350,17 @@ enum Cmd {
         #[arg(short, long)]
         out: Option<String>,
     },
+    /// Watch a log file and re-render the HTML report whenever new content arrives.
+    Tail {
+        /// Path to a log file to watch
+        file: String,
+        /// Output path (default: <file>.html)
+        #[arg(short, long)]
+        out: Option<String>,
+        /// Poll interval in seconds (default: 30)
+        #[arg(long, default_value = "30")]
+        interval: u64,
+    },
     /// Detect column types in a log/CSV file (uses the same WASM-shippable detector as `/detect`).
     Detect {
         /// Path to a log / CSV / TSV file
@@ -1049,6 +1060,108 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", dest);
             // Persist actor history so future reports can show the ↩ badge.
             actor_history::update(&report.ips);
+        }
+        Cmd::Tail {
+            file,
+            out,
+            interval,
+        } => {
+            let dest = out.unwrap_or_else(|| format!("{}.html", file));
+            let mut last_size: u64 = 0;
+            // Persistent rDNS cache: IP → hostname. Only resolved once per session.
+            let mut rdns_cache: std::collections::BTreeMap<String, String> =
+                std::collections::BTreeMap::new();
+            eprintln!(
+                "watching {} → {} (poll {}s, Ctrl-C to stop)",
+                file, dest, interval
+            );
+            loop {
+                let current_size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+                if current_size != last_size {
+                    last_size = current_size;
+                    // Full render — re-run the whole pipeline.
+                    let bytes = std::fs::read(&file)?;
+                    let parsed = match String::from_utf8(bytes.clone()) {
+                        Ok(text) => wbl_detect::f400(&text),
+                        Err(_) => wbl_detect::f454(&bytes),
+                    };
+                    let mut report = wbl_detect::f401(&parsed.events);
+                    let all_ips = wbl_detect::f403(&report);
+                    // Resolve only new IPs.
+                    let new_ips: Vec<String> = all_ips
+                        .iter()
+                        .filter(|ip| !rdns_cache.contains_key(ip.as_str()))
+                        .cloned()
+                        .collect();
+                    if !new_ips.is_empty() {
+                        eprintln!("  resolving {} new IP(s)...", new_ips.len());
+                        let resolved = dns::rdns_batch(&new_ips).await;
+                        for (ip, name) in resolved {
+                            if let Some(n) = name {
+                                rdns_cache.insert(ip, n);
+                            }
+                        }
+                    }
+                    // Build enrichment from full cache.
+                    let enrich: std::collections::BTreeMap<String, wbl_detect::t108> = all_ips
+                        .iter()
+                        .filter_map(|ip| {
+                            rdns_cache.get(ip.as_str()).map(|r: &String| {
+                                (
+                                    ip.clone(),
+                                    wbl_detect::t108 {
+                                        rdns: Some(r.clone()),
+                                        ..Default::default()
+                                    },
+                                )
+                            })
+                        })
+                        .collect();
+                    if !enrich.is_empty() {
+                        wbl_detect::f402(&mut report, &enrich);
+                    }
+                    // Actor history.
+                    let history = actor_history::lookup(&all_ips);
+                    if !history.is_empty() {
+                        let hist_enrich: std::collections::BTreeMap<String, wbl_detect::t108> =
+                            history
+                                .iter()
+                                .map(|(ip, h)| {
+                                    (
+                                        ip.clone(),
+                                        wbl_detect::t108 {
+                                            history_first_unix: Some(h.first_seen),
+                                            history_total_reports: Some(h.total_reports),
+                                            history_total_hits: Some(h.total_hits),
+                                            ..Default::default()
+                                        },
+                                    )
+                                })
+                                .collect();
+                        wbl_detect::f402(&mut report, &hist_enrich);
+                    }
+                    let html = wbl_detect::f405(&report, &file);
+                    std::fs::write(&dest, &html)?;
+                    let threats = report.class_counts.get("threat").copied().unwrap_or(0);
+                    let unix_now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let h = (unix_now / 3600) % 24;
+                    let m = (unix_now / 60) % 60;
+                    let s = unix_now % 60;
+                    let now = format!("{:02}:{:02}:{:02}", h, m, s);
+                    eprintln!(
+                        "[{}] refreshed → {} ({} IPs, {} threat{})",
+                        now,
+                        dest,
+                        report.ips.len(),
+                        threats,
+                        if threats == 1 { "" } else { "s" },
+                    );
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(interval)).await;
+            }
         }
         Cmd::Intel {
             baselogs_dir,
