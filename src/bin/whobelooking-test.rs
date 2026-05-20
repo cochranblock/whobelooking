@@ -29,7 +29,8 @@ use wbl_detect::{
 };
 use wbl_detect::{
     f401 as wbl_aggregate, f402 as wbl_apply_enrichment, f403 as wbl_ips_needing,
-    f405 as wbl_render_html, t104 as IpClass, t107 as AggregatedReport, t108 as IpEnrichment,
+    f404s as wbl_signals, f405 as wbl_render_html, t104 as IpClass, t105 as IpRecord,
+    t107 as AggregatedReport, t108 as IpEnrichment,
 };
 use whobelooking::ctos::{
     CtoMention, extract_cto_from_text, extract_first_email, norm, norm_company, slugify, truncate,
@@ -2075,6 +2076,58 @@ const TESTS: &[(&str, TestFn)] = &[
     ("pipeline_cf_jsonl_to_html", t_pipe_cf),
     ("pipeline_invariants_class_sum_equals_ips", t_pipe_class_sum),
     ("pipeline_enrich_changes_event_org_text", t_pipe_enrich_text),
+    // G4 signal breakdown (f404s) — each class exposes the right evidence strings
+    (
+        "signals_threat_shows_attack_path",
+        t_signals_threat_attack_path,
+    ),
+    (
+        "signals_threat_no_browser_ua_shows_scanner",
+        t_signals_threat_scanner,
+    ),
+    ("signals_threat_with_rdns_shows_rdns", t_signals_threat_rdns),
+    ("signals_bot_shows_bot_ua_fingerprint", t_signals_bot_ua),
+    (
+        "signals_institutional_shows_browser_ua",
+        t_signals_inst_browser,
+    ),
+    ("signals_organic_shows_residual", t_signals_organic_residual),
+    // G5 UA grouping (f408) — IPs sharing a primary UA get the same group ID
+    ("ua_group_two_ips_same_ua_share_id", t_ua_group_shared),
+    ("ua_group_singleton_stays_none", t_ua_group_singleton),
+    (
+        "ua_group_different_uas_get_different_ids",
+        t_ua_group_different,
+    ),
+    ("ua_group_three_ips_same_ua_all_match", t_ua_group_three),
+    (
+        "ua_group_singleton_amid_pairs_stays_none",
+        t_ua_group_solo_amid,
+    ),
+    // G5 render output — badges appear in HTML
+    (
+        "render_threat_has_details_signal_block",
+        t_render_signals_details,
+    ),
+    (
+        "render_grouped_ips_show_same_tool_badge",
+        t_render_ua_group_badge,
+    ),
+    // G1 JSON export — t107 round-trips through serde_json
+    (
+        "json_t107_serialize_deserialize_roundtrip",
+        t_json_roundtrip,
+    ),
+    (
+        "json_t107_confidence_field_in_output",
+        t_json_confidence_field,
+    ),
+    ("json_t107_ip_keys_present", t_json_ip_keys),
+    // G11 /try multi-file — static HTML carries the right attributes and function
+    ("try_html_file_input_has_multiple_attr", t_try_multiple_attr),
+    ("try_html_has_handle_files_function", t_try_handle_files_fn),
+    // G9 /reports — router wires the route
+    ("router_has_reports_route", t_router_reports_route),
 ];
 
 // ---- redaction + ignore-list tests ----
@@ -5105,6 +5158,324 @@ fn t_pipe_enrich_text() -> Result<(), String> {
     }
     if !html_after.contains("ZIRCONIUM-CORP") {
         return Err("org missing after enrichment".into());
+    }
+    Ok(())
+}
+
+// ── G4: signal breakdown (f404s) ─────────────────────────────────────────────
+
+fn mk_rec_from_events(events: &[wbl_detect::t100], ip: &str) -> IpRecord {
+    wbl_aggregate(events)
+        .ips
+        .remove(ip)
+        .expect("ip not in aggregated report")
+}
+
+fn t_signals_threat_attack_path() -> Result<(), String> {
+    let rec = mk_rec_from_events(&[mk_event_min("1.1.1.1", "/.env", "curl/8")], "1.1.1.1");
+    let sigs = wbl_signals(&rec);
+    if !sigs
+        .iter()
+        .any(|s| s.contains("attack path") && s.contains(".env"))
+    {
+        return Err(format!("expected 'attack path: /.env', got {:?}", sigs));
+    }
+    Ok(())
+}
+
+fn t_signals_threat_scanner() -> Result<(), String> {
+    // No browser UA → pure scanner signal
+    let rec = mk_rec_from_events(&[mk_event_min("1.1.1.1", "/.env", "curl/8")], "1.1.1.1");
+    let sigs = wbl_signals(&rec);
+    if !sigs
+        .iter()
+        .any(|s| s.contains("no browser UA") || s.contains("scanner"))
+    {
+        return Err(format!("expected scanner signal, got {:?}", sigs));
+    }
+    Ok(())
+}
+
+fn t_signals_threat_rdns() -> Result<(), String> {
+    let mut rec = mk_rec_from_events(&[mk_event_min("1.1.1.1", "/.env", "curl/8")], "1.1.1.1");
+    rec.rdns = Some("evil.attacker.net".into());
+    let sigs = wbl_signals(&rec);
+    if !sigs
+        .iter()
+        .any(|s| s.starts_with("rDNS:") && s.contains("evil.attacker.net"))
+    {
+        return Err(format!("expected rDNS signal, got {:?}", sigs));
+    }
+    Ok(())
+}
+
+fn t_signals_bot_ua() -> Result<(), String> {
+    let rec = mk_rec_from_events(
+        &[mk_event_min(
+            "1.1.1.1",
+            "/",
+            "Mozilla/5.0 (compatible; Googlebot/2.1)",
+        )],
+        "1.1.1.1",
+    );
+    let sigs = wbl_signals(&rec);
+    if !sigs.iter().any(|s| s.contains("bot UA")) {
+        return Err(format!("expected 'bot UA fingerprint', got {:?}", sigs));
+    }
+    Ok(())
+}
+
+fn t_signals_inst_browser() -> Result<(), String> {
+    let rec = mk_rec_from_events(
+        &[mk_event_min("1.1.1.1", "/about", "Mozilla/5.0 Chrome")],
+        "1.1.1.1",
+    );
+    let sigs = wbl_signals(&rec);
+    if !sigs.iter().any(|s| s.contains("browser UA")) {
+        return Err(format!("expected 'browser UA' signal, got {:?}", sigs));
+    }
+    Ok(())
+}
+
+fn t_signals_organic_residual() -> Result<(), String> {
+    // High-volume Mozilla → Organic → residual signal
+    let events: Vec<wbl_detect::t100> = (0..50)
+        .map(|_| mk_event_min("1.1.1.1", "/", "Mozilla/5.0 Chrome"))
+        .collect();
+    let rec = mk_rec_from_events(&events, "1.1.1.1");
+    let sigs = wbl_signals(&rec);
+    if !sigs.iter().any(|s| s.contains("residual")) {
+        return Err(format!(
+            "expected residual signal for organic, got {:?}",
+            sigs
+        ));
+    }
+    Ok(())
+}
+
+// ── G5: UA grouping (f408) ────────────────────────────────────────────────────
+
+fn t_ua_group_shared() -> Result<(), String> {
+    let events = vec![
+        mk_event_min("1.1.1.1", "/", "curl/8"),
+        mk_event_min("2.2.2.2", "/about", "curl/8"),
+    ];
+    let agg = wbl_aggregate(&events);
+    let id1 = agg.ips["1.1.1.1"].ua_group_id;
+    let id2 = agg.ips["2.2.2.2"].ua_group_id;
+    if id1.is_none() {
+        return Err("1.1.1.1 ua_group_id should be Some (same UA as 2.2.2.2)".into());
+    }
+    if id1 != id2 {
+        return Err(format!(
+            "same-UA IPs have different group ids: {:?} vs {:?}",
+            id1, id2
+        ));
+    }
+    Ok(())
+}
+
+fn t_ua_group_singleton() -> Result<(), String> {
+    let agg = wbl_aggregate(&[mk_event_min("1.1.1.1", "/", "curl/8")]);
+    if agg.ips["1.1.1.1"].ua_group_id.is_some() {
+        return Err("singleton IP must have ua_group_id = None".into());
+    }
+    Ok(())
+}
+
+fn t_ua_group_different() -> Result<(), String> {
+    // Two pairs with different UAs must get different group IDs.
+    let events = vec![
+        mk_event_min("1.1.1.1", "/", "curl/8"),
+        mk_event_min("2.2.2.2", "/", "curl/8"),
+        mk_event_min("3.3.3.3", "/", "Mozilla/5.0 Chrome"),
+        mk_event_min("4.4.4.4", "/", "Mozilla/5.0 Chrome"),
+    ];
+    let agg = wbl_aggregate(&events);
+    let curl_id = agg.ips["1.1.1.1"].ua_group_id;
+    let moz_id = agg.ips["3.3.3.3"].ua_group_id;
+    if curl_id.is_none() {
+        return Err("curl pair not grouped".into());
+    }
+    if moz_id.is_none() {
+        return Err("mozilla pair not grouped".into());
+    }
+    if curl_id == moz_id {
+        return Err(format!(
+            "different UAs must get different group ids, both got {:?}",
+            curl_id
+        ));
+    }
+    Ok(())
+}
+
+fn t_ua_group_three() -> Result<(), String> {
+    // Three IPs with the same UA → all share one group ID.
+    let events = vec![
+        mk_event_min("1.1.1.1", "/", "python-requests/2.28"),
+        mk_event_min("2.2.2.2", "/api", "python-requests/2.28"),
+        mk_event_min("3.3.3.3", "/data", "python-requests/2.28"),
+    ];
+    let agg = wbl_aggregate(&events);
+    let ids: Vec<_> = ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
+        .iter()
+        .map(|ip| agg.ips[*ip].ua_group_id)
+        .collect();
+    let first = ids[0];
+    if first.is_none() {
+        return Err("first IP in 3-way group has ua_group_id = None".into());
+    }
+    if ids[1] != first || ids[2] != first {
+        return Err(format!("three-way group IDs differ: {:?}", ids));
+    }
+    Ok(())
+}
+
+fn t_ua_group_solo_amid() -> Result<(), String> {
+    // IP with unique UA amid a pair must stay None.
+    let events = vec![
+        mk_event_min("1.1.1.1", "/", "curl/8"),
+        mk_event_min("2.2.2.2", "/", "curl/8"),
+        mk_event_min("9.9.9.9", "/", "some-unique-agent/1.0"),
+    ];
+    let agg = wbl_aggregate(&events);
+    if agg.ips["9.9.9.9"].ua_group_id.is_some() {
+        return Err("unique-UA IP must have ua_group_id = None even when a pair exists".into());
+    }
+    // The pair must still be grouped.
+    if agg.ips["1.1.1.1"].ua_group_id.is_none() {
+        return Err("curl pair should still be grouped".into());
+    }
+    Ok(())
+}
+
+// ── G5: render badges ─────────────────────────────────────────────────────────
+
+fn t_render_signals_details() -> Result<(), String> {
+    let agg = wbl_aggregate(&[mk_event_min("1.1.1.1", "/.env", "curl/8")]);
+    let html = wbl_render_html(&agg, "test");
+    if !html.contains("<details") {
+        return Err("render of threat IP must include <details> signal block".into());
+    }
+    if !html.contains("attack path") {
+        return Err("render of threat IP must mention 'attack path' inside signal block".into());
+    }
+    Ok(())
+}
+
+fn t_render_ua_group_badge() -> Result<(), String> {
+    let events = vec![
+        mk_event_min("1.1.1.1", "/", "curl/8"),
+        mk_event_min("2.2.2.2", "/about", "curl/8"),
+    ];
+    let agg = wbl_aggregate(&events);
+    let html = wbl_render_html(&agg, "test");
+    if !html.contains("same tool") {
+        return Err("render of grouped IPs must show 'same tool' badge".into());
+    }
+    Ok(())
+}
+
+// ── G1: JSON export (t107 serde roundtrip) ────────────────────────────────────
+
+fn t_json_roundtrip() -> Result<(), String> {
+    let agg = wbl_aggregate(&wbl_parse_log(WBL_FIX).events);
+    let json =
+        serde_json::to_string_pretty(&agg).map_err(|e| format!("serialize failed: {}", e))?;
+    let back: AggregatedReport =
+        serde_json::from_str(&json).map_err(|e| format!("deserialize failed: {}", e))?;
+    if back.ips.len() != agg.ips.len() {
+        return Err(format!(
+            "ips after roundtrip {} != original {}",
+            back.ips.len(),
+            agg.ips.len()
+        ));
+    }
+    if back.total_events != agg.total_events {
+        return Err(format!(
+            "total_events {} != {} after roundtrip",
+            back.total_events, agg.total_events
+        ));
+    }
+    Ok(())
+}
+
+fn t_json_confidence_field() -> Result<(), String> {
+    // confidence is Option<u8> on t105 — must appear in JSON output for a classified IP.
+    let agg = wbl_aggregate(&[mk_event_min("1.1.1.1", "/.env", "curl/8")]);
+    let json =
+        serde_json::to_string_pretty(&agg).map_err(|e| format!("serialize failed: {}", e))?;
+    if !json.contains("\"confidence\"") {
+        return Err(format!(
+            "'confidence' field missing from JSON output:\n{}",
+            &json[..json.len().min(400)]
+        ));
+    }
+    Ok(())
+}
+
+fn t_json_ip_keys() -> Result<(), String> {
+    // WBL_FIX has IPs 74.179.10.20, 88.151.10.5, 66.249.66.1 — all must appear as JSON keys.
+    let agg = wbl_aggregate(&wbl_parse_log(WBL_FIX).events);
+    let json =
+        serde_json::to_string_pretty(&agg).map_err(|e| format!("serialize failed: {}", e))?;
+    for ip in ["74.179.10.20", "88.151.10.5", "66.249.66.1"] {
+        if !json.contains(ip) {
+            return Err(format!("IP {} missing from JSON output", ip));
+        }
+    }
+    Ok(())
+}
+
+// ── G11: /try multi-file ─────────────────────────────────────────────────────
+
+fn t_try_multiple_attr() -> Result<(), String> {
+    let html = include_str!("../../static/try/index.html");
+    // The file-input element must carry the `multiple` attribute so the browser
+    // accepts more than one file in the picker.
+    if !html.contains("id=\"file-input\"") {
+        return Err("file-input element not found in /try/index.html".into());
+    }
+    // Find the file-input line and check it has `multiple`.
+    let has_multiple = html
+        .lines()
+        .any(|l| l.contains("id=\"file-input\"") && l.contains("multiple"));
+    if !has_multiple {
+        return Err(
+            "file-input element missing 'multiple' attribute — G11 multi-file not shipped".into(),
+        );
+    }
+    Ok(())
+}
+
+fn t_try_handle_files_fn() -> Result<(), String> {
+    let html = include_str!("../../static/try/index.html");
+    if !html.contains("handleFiles") {
+        return Err(
+            "handleFiles function missing from /try/index.html — G11 multi-file not shipped".into(),
+        );
+    }
+    // The function must accept a `files` argument (plural) — not the old single-file API.
+    let has_fn_def = html
+        .lines()
+        .any(|l| l.contains("function handleFiles") || l.contains("handleFiles(files)"));
+    if !has_fn_def {
+        return Err("handleFiles function definition not found in /try/index.html".into());
+    }
+    Ok(())
+}
+
+// ── G9: /reports route ───────────────────────────────────────────────────────
+
+fn t_router_reports_route() -> Result<(), String> {
+    // The router source must wire the /reports route. Reading at compile time
+    // via include_str! catches any rename that forgets to update the route.
+    let router_src = include_str!("../web/router.rs");
+    if !router_src.contains("\"/reports\"") {
+        return Err("/reports route not found in src/web/router.rs — G9 not wired".into());
+    }
+    if !router_src.contains("reports::index") {
+        return Err("reports::index handler not found in router — G9 not wired".into());
     }
     Ok(())
 }
