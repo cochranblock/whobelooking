@@ -135,6 +135,16 @@ Registers with approuter. Cloudflare tunnel routes traffic.
 | CF Firewall Block List | `intel::render_html` — `(ip.src in {...})` expression from THREAT IPs + FW-blocked IPs; per-IP reason/org/rDNS table; redacted report shows count only |
 | Trend/delta view | `f452` sidebar panel — "N new IPs · M threats / N returning · M threats" when history present; hidden on zero-history; uses `history_total_reports` from `t105` |
 | `#![forbid(unsafe_code)]` | `crates/wbl-detect/src/lib.rs` line 1 |
+| `render --json` | `Cmd::Render { json: true }` — serializes enriched `t107` to `serde_json::to_string_pretty` JSON; prerequisite for `compare` and SIEM export |
+| `render --cross-scout` | `scout::cross_reference_html` — scans `scout.redb` for cached bids/awards matching identified visitor orgs; injects a "Federal Pipeline" HTML section before `</body>` |
+| `compare` command | `Cmd::Compare { a, b }` — diffs two JSON reports from `render --json`; reports new actors, dropped, escalated (class worsened), de-escalated |
+| `install --auto-report` | Writes `whobelooking-report.service` + `whobelooking-report.timer` systemd units; `--schedule` controls `OnCalendar` (default `*-*-* 06:00:00`) |
+| `tail` threat alert | `prev_threats` tracker in tail loop — when threat count increases, prints `\x07` (terminal bell) + ANSI yellow `⚠ N NEW THREATS` line to stderr |
+| Signal breakdown | `f404s(rec: &t105) -> Vec<String>` in `aggregate.rs`; `f450` in `report.rs` renders as `<details>` on each card — attack paths, bot hints, org/rDNS signals driving the confidence score |
+| UA grouping | `f408(report: &mut t107)` in `aggregate.rs` — groups IPs sharing primary UA; `t105.ua_group_id: Option<u32>`; `f450` shows `⇄ same tool` badge on grouped cards |
+| GeoIP fallback | `ipapi::batch_country` — queries `http://ip-api.com/batch` for country codes when RDAP returns no country; called in `Cmd::Render` after RDAP pass |
+| `/try` multi-file | `handleFiles(files)` in `static/try/index.html` — reads all dropped files, concatenates text, feeds merged log to a single `ReportSession`; `file-input` gains `multiple` attribute |
+| `/reports` history | `report_history` mod — `reports.redb` with `report_index: TableDefinition<u64, &[u8]>` (keyed by unix timestamp); `record()` called after every `render` write; `list()` serves `/reports` (50 most recent, filtered to extant files) |
 
 ## Web Frontend / Routes
 
@@ -155,6 +165,7 @@ Registers with approuter. Cloudflare tunnel routes traffic.
 | `/metrics` | `metrics::endpoint` | Prometheus (token-gated, `otel` feature) |
 | `/admin` | `admin::dashboard` | Order queue dashboard (token-gated) |
 | `/order*` | redirect | → GitHub (order model deprecated; links preserved) |
+| `/reports` | `reports::index` | Report history browser — lists all locally rendered HTML reports |
 
 ## Probe Unification (v0.3.1)
 
