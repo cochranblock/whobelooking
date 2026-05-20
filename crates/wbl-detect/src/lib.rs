@@ -82,7 +82,7 @@ mod json_lite;
 #[cfg(target_arch = "wasm32")]
 mod wasm_api;
 
-pub use aggregate::{f401, f402, f403, f404, t104, t105, t106, t107, t108};
+pub use aggregate::{f401, f402, f403, f404, f404s, f408, t104, t105, t106, t107, t108};
 pub use classify::{RowSignal, classify};
 pub use parse::{f400, f454, t100, t101, t102, t103};
 pub use report::f405;

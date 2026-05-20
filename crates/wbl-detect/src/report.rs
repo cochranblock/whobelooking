@@ -10,7 +10,7 @@
 //! / right-panel stats. Aesthetics deliberately match so a customer who
 //! liked the marketing demo gets the same layout on their own data.
 
-use crate::aggregate::{t104, t105, t107};
+use crate::aggregate::{f404s, t104, t105, t107};
 use std::fmt::Write as _;
 
 const CSS: &str = r#"
@@ -308,12 +308,40 @@ fn f450(out: &mut String, report: &t107, show_limit: usize) {
             ),
             None => String::new(),
         };
+
+        let ua_group_block = match rec.ua_group_id {
+            Some(gid) => format!(
+                r#" <span style="color:#666;font-size:9px;" title="UA group {gid}">⇄ same tool</span>"#,
+                gid = gid,
+            ),
+            None => String::new(),
+        };
+
+        let signals = f404s(rec);
+        let signals_block = if signals.is_empty() {
+            String::new()
+        } else {
+            let items: String = signals
+                .iter()
+                .map(|s| {
+                    format!(
+                        r#"<div style="padding:1px 0;color:#9ca3af;">· {}</div>"#,
+                        f440(s)
+                    )
+                })
+                .collect();
+            format!(
+                r#"<details style="margin-top:6px;font-size:10px;"><summary style="cursor:pointer;color:#555;letter-spacing:.05em;">signals</summary><div style="padding:4px 0 0 8px;line-height:1.6;">{items}</div></details>"#,
+                items = items,
+            )
+        };
+
         let _ = write!(
             out,
             r#"<div class="event {class}">
   <div class="event-time">{when} · {hits} hit{plural}</div>
   <div class="event-title">
-    <span class="tag tag-{class}">{class_up}</span>{conf_block}
+    <span class="tag tag-{class}">{class_up}</span>{conf_block}{ua_group_block}
     {primary}
     {cc_block}
   </div>
@@ -321,6 +349,7 @@ fn f450(out: &mut String, report: &t107, show_limit: usize) {
     {ip_block}
     Top path: <span class="page">{path}</span>{count_block}
     <br><span style="color:#444;font-size:10px;">{ua}</span>{history_block}
+    {signals_block}
   </div>
 </div>"#,
             class = class,
@@ -358,6 +387,8 @@ fn f450(out: &mut String, report: &t107, show_limit: usize) {
             },
             ua = f440(&f451(top_ua, 140)),
             history_block = history_block,
+            ua_group_block = ua_group_block,
+            signals_block = signals_block,
         );
         rendered += 1;
     }

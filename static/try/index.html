@@ -158,13 +158,13 @@ iframe.report-frame { flex:1; width:100%; border:0; background:var(--bg); }
 
   <label class="drop-zone" id="drop-zone" for="file-input">
     <div class="drop-zone-icon">⬆</div>
-    <div class="drop-zone-title">Drop log file here</div>
-    <div class="drop-zone-sub">or <span class="drop-zone-browse">browse files</span></div>
+    <div class="drop-zone-title">Drop log file(s) here</div>
+    <div class="drop-zone-sub">or <span class="drop-zone-browse">browse files</span> · multiple files merged</div>
     <div class="drop-zone-formats">
       <span>whobelooking</span> · <span>nginx</span> · <span>apache</span> · <span>cloudflare jsonl/csv</span>
     </div>
   </label>
-  <input type="file" id="file-input" accept=".log,.txt,.csv,.gz,.jsonl,.json,.pcap,.pcapng,.cap">
+  <input type="file" id="file-input" accept=".log,.txt,.csv,.gz,.jsonl,.json,.pcap,.pcapng,.cap" multiple>
 
   <!-- CF pull panel — visible only when whobelooking runs locally -->
   <div class="cf-panel" id="cf-panel">
@@ -445,6 +445,43 @@ function showFatal(msg) {
   lastHtml = "";
 }
 
+async function handleFiles(files) {
+  if (!files || files.length === 0) return;
+  if (files.length === 1) return handleFile(files[0]);
+
+  await wasmReady;
+  document.getElementById("drop-shell").style.display = "none";
+  document.getElementById("report-shell").classList.add("active");
+  const totalMb = Array.from(files).reduce((s, f) => s + f.size, 0) / 1024 / 1024;
+  const names = Array.from(files).map(f => f.name).join(", ");
+  document.getElementById("r-source").textContent = `${files.length} files · ${totalMb.toFixed(2)} MB`;
+  document.getElementById("r-status").textContent = "reading…";
+
+  let merged = "";
+  try {
+    for (const f of files) {
+      const t = await f.text();
+      merged += (merged && !merged.endsWith("\n") ? "\n" : "") + t;
+    }
+  } catch (e) {
+    showFatal(`Couldn't read files: ${e?.message ?? e}`);
+    return;
+  }
+
+  let session;
+  try {
+    session = new ReportSession(merged, names);
+  } catch (e) {
+    showFatal(`Couldn't process logs — ${e?.message ?? String(e)}`);
+    return;
+  }
+  const stats = session.stats();
+  document.getElementById("r-source").textContent =
+    `${files.length} files · ${stats.parsed.toLocaleString()} events · ${stats.unique_ips} IPs`;
+  lastHtml = session.renderHtml();
+  await enrichAndRender(session, names);
+}
+
 async function handleFile(file) {
   await wasmReady;
 
@@ -508,12 +545,12 @@ const fileInput = document.getElementById("file-input");
 );
 dropZone.addEventListener("drop", e => {
   e.preventDefault();
-  const f = e.dataTransfer.files[0];
-  if (f) handleFile(f);
+  const files = e.dataTransfer.files;
+  if (files && files.length > 0) handleFiles(files);
 });
 fileInput.addEventListener("change", e => {
-  const f = e.target.files[0];
-  if (f) handleFile(f);
+  const files = e.target.files;
+  if (files && files.length > 0) handleFiles(files);
 });
 
 document.getElementById("btn-download").addEventListener("click", downloadReport);

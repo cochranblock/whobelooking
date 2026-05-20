@@ -152,6 +152,12 @@ enum Cmd {
         /// Write to this path instead of ~/.config/systemd/user/whobelooking.service
         #[arg(long)]
         unit_path: Option<String>,
+        /// Log file to render on a daily schedule (writes a .timer + .service unit)
+        #[arg(long)]
+        auto_report: Option<String>,
+        /// Systemd calendar expression for the auto-report timer (default: daily at 06:00)
+        #[arg(long, default_value = "*-*-* 06:00:00")]
+        schedule: String,
     },
     /// List all jobs in the queue
     Queue,
@@ -355,9 +361,22 @@ enum Cmd {
     Render {
         /// Path to a log file (any supported format: nginx, CF JSONL/CSV, W3C, HAProxy, syslog, …)
         file: String,
-        /// Output path (default: <file>.html)
+        /// Output path (default: <file>.html or <file>.json when --json is set)
         #[arg(short, long)]
         out: Option<String>,
+        /// Emit enriched report as JSON instead of HTML (useful for piping into compare / SIEM)
+        #[arg(long)]
+        json: bool,
+        /// Cross-reference identified orgs against cached federal opportunities (scout.redb)
+        #[arg(long)]
+        cross_scout: bool,
+    },
+    /// Compare two JSON reports (from render --json) and show what changed between periods.
+    Compare {
+        /// Path to the earlier period's JSON report (e.g. last-week.json)
+        a: String,
+        /// Path to the later period's JSON report (e.g. this-week.json)
+        b: String,
     },
     /// Watch a log file and re-render the HTML report whenever new content arrives.
     Tail {
@@ -704,7 +723,12 @@ async fn main() -> anyhow::Result<()> {
                 .with_graceful_shutdown(shutdown)
                 .await?;
         }
-        Cmd::Install { port, unit_path } => {
+        Cmd::Install {
+            port,
+            unit_path,
+            auto_report,
+            schedule,
+        } => {
             let exe = std::env::current_exe()
                 .unwrap_or_else(|_| std::path::PathBuf::from("whobelooking"))
                 .display()
@@ -746,6 +770,47 @@ WantedBy=default.target
             println!();
             println!("Logs:  journalctl --user -u whobelooking -f");
             println!("Stop:  systemctl --user stop whobelooking");
+
+            // G7: auto-report timer units.
+            if let Some(log_file) = auto_report {
+                let unit_dir = dest.parent().unwrap_or_else(|| std::path::Path::new("."));
+                let report_svc = format!(
+                    r#"[Unit]
+Description=whobelooking daily report — {log}
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart={exe} render {log}
+"#,
+                    exe = exe,
+                    log = log_file,
+                );
+                let report_timer = format!(
+                    r#"[Unit]
+Description=whobelooking daily report timer — {log}
+
+[Timer]
+OnCalendar={schedule}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"#,
+                    log = log_file,
+                    schedule = schedule,
+                );
+                let svc_path = unit_dir.join("whobelooking-report.service");
+                let timer_path = unit_dir.join("whobelooking-report.timer");
+                std::fs::write(&svc_path, &report_svc)?;
+                std::fs::write(&timer_path, &report_timer)?;
+                println!("wrote {}", svc_path.display());
+                println!("wrote {}", timer_path.display());
+                println!();
+                println!("  systemctl --user daemon-reload");
+                println!("  systemctl --user enable --now whobelooking-report.timer");
+                println!("  systemctl --user list-timers whobelooking-report.timer");
+            }
         }
         Cmd::Queue => {
             // Try IPC first (server running) → fall back to direct sled (server down).
@@ -1060,7 +1125,12 @@ WantedBy=default.target
                 }
             }
         }
-        Cmd::Render { file, out } => {
+        Cmd::Render {
+            file,
+            out,
+            json,
+            cross_scout,
+        } => {
             let bytes = std::fs::read(&file)?;
             let parsed = match String::from_utf8(bytes.clone()) {
                 Ok(text) => wbl_detect::f400(&text),
@@ -1114,6 +1184,29 @@ WantedBy=default.target
                         }
                     }
                 }
+                // G10: GeoIP fallback — for IPs still missing country after RDAP,
+                // query ip-api.com batch (free, no auth required, non-PII: country only).
+                let no_country: Vec<String> = ips
+                    .iter()
+                    .filter(|ip| {
+                        enrich
+                            .get(ip.as_str())
+                            .and_then(|e| e.org_country.as_deref())
+                            .map(|c| c.is_empty())
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect();
+                if !no_country.is_empty() {
+                    if let Ok(geo) = ipapi::batch_country(&no_country).await {
+                        for (ip, cc) in geo {
+                            if !cc.is_empty() {
+                                enrich.entry(ip).or_default().org_country = Some(cc);
+                            }
+                        }
+                    }
+                }
+
                 wbl_detect::f402(&mut report, &enrich);
             }
             // Inject cross-report actor history from the local redb store.
@@ -1135,12 +1228,105 @@ WantedBy=default.target
                     .collect();
                 wbl_detect::f402(&mut report, &hist_enrich);
             }
-            let html = wbl_detect::f405(&report, &file);
-            let dest = out.unwrap_or_else(|| format!("{}.html", file));
-            std::fs::write(&dest, &html)?;
-            println!("{}", dest);
+            // G1: JSON export — serialize the enriched t107 as JSON.
+            if json {
+                let dest = out.unwrap_or_else(|| format!("{}.json", file));
+                let j = serde_json::to_string_pretty(&report)?;
+                std::fs::write(&dest, &j)?;
+                println!("{}", dest);
+            } else {
+                let html = wbl_detect::f405(&report, &file);
+                let dest = out.unwrap_or_else(|| format!("{}.html", file));
+                // G3: Scout cross-reference — append federal pipeline section.
+                let final_html = if cross_scout {
+                    scout::cross_reference_html(&report, &html)
+                } else {
+                    html
+                };
+                std::fs::write(&dest, &final_html)?;
+                println!("{}", dest);
+                // G9: Register in report history so `/reports` can list it.
+                report_history::record(&dest, &file, &report);
+            }
             // Persist actor history so future reports can show the ↩ badge.
             actor_history::update(&report.ips);
+        }
+        // G6: Period-over-period diff of two JSON reports from `render --json`.
+        Cmd::Compare { a, b } => {
+            let ra: wbl_detect::t107 = serde_json::from_str(&std::fs::read_to_string(&a)?)?;
+            let rb: wbl_detect::t107 = serde_json::from_str(&std::fs::read_to_string(&b)?)?;
+            let ips_a: std::collections::BTreeSet<&String> = ra.ips.keys().collect();
+            let ips_b: std::collections::BTreeSet<&String> = rb.ips.keys().collect();
+            let new_ips: Vec<&&String> = ips_b.difference(&ips_a).collect();
+            let dropped_ips: Vec<&&String> = ips_a.difference(&ips_b).collect();
+            let mut escalated: Vec<(&String, &wbl_detect::t104, &wbl_detect::t104)> = Vec::new();
+            let mut de_escalated: Vec<(&String, &wbl_detect::t104, &wbl_detect::t104)> = Vec::new();
+            for ip in ips_a.intersection(&ips_b) {
+                if let (Some(ca), Some(cb)) =
+                    (ra.ips[*ip].class.as_ref(), rb.ips[*ip].class.as_ref())
+                {
+                    use wbl_detect::t104;
+                    let rank = |c: &t104| match c {
+                        t104::Threat => 0u8,
+                        t104::Bot => 1,
+                        t104::Institutional => 2,
+                        t104::Organic => 3,
+                    };
+                    if rank(cb) < rank(ca) {
+                        escalated.push((ip, ca, cb));
+                    } else if rank(cb) > rank(ca) {
+                        de_escalated.push((ip, ca, cb));
+                    }
+                }
+            }
+            println!("=== compare: {} → {} ===", a, b);
+            let threats_a = ra.class_counts.get("threat").copied().unwrap_or(0);
+            let threats_b = rb.class_counts.get("threat").copied().unwrap_or(0);
+            println!(
+                "threats: {} → {} ({}{})",
+                threats_a,
+                threats_b,
+                if threats_b >= threats_a { "+" } else { "" },
+                threats_b as i64 - threats_a as i64,
+            );
+            println!(
+                "IPs: {} → {} (+{} new, -{} dropped)",
+                ra.ips.len(),
+                rb.ips.len(),
+                new_ips.len(),
+                dropped_ips.len()
+            );
+            if !new_ips.is_empty() {
+                println!("\n--- new actors ({}) ---", new_ips.len());
+                for ip in new_ips.iter().take(20) {
+                    let rec = &rb.ips[**ip];
+                    println!(
+                        "  {} {:?} {}% {}",
+                        ip,
+                        rec.class.map(|c| c.name()).unwrap_or("?"),
+                        rec.confidence.unwrap_or(0),
+                        rec.org.as_deref().unwrap_or(""),
+                    );
+                }
+            }
+            if !escalated.is_empty() {
+                println!("\n--- escalated ({}) ---", escalated.len());
+                for (ip, from, to) in &escalated {
+                    println!("  {} {} → {}", ip, from.name(), to.name());
+                }
+            }
+            if !de_escalated.is_empty() {
+                println!("\n--- de-escalated ({}) ---", de_escalated.len());
+                for (ip, from, to) in &de_escalated {
+                    println!("  {} {} → {}", ip, from.name(), to.name());
+                }
+            }
+            if !dropped_ips.is_empty() {
+                println!("\n--- dropped ({}) ---", dropped_ips.len());
+                for ip in dropped_ips.iter().take(10) {
+                    println!("  {}", ip);
+                }
+            }
         }
         Cmd::Tail {
             file,
@@ -1149,6 +1335,7 @@ WantedBy=default.target
         } => {
             let dest = out.unwrap_or_else(|| format!("{}.html", file));
             let mut last_size: u64 = 0;
+            let mut prev_threats: u32 = 0;
             // Persistent rDNS and org caches — only resolved once per session.
             let mut rdns_cache: std::collections::BTreeMap<String, String> =
                 std::collections::BTreeMap::new();
@@ -1252,14 +1439,28 @@ WantedBy=default.target
                     let m = (unix_now / 60) % 60;
                     let s = unix_now % 60;
                     let now = format!("{:02}:{:02}:{:02}", h, m, s);
-                    eprintln!(
-                        "[{}] refreshed → {} ({} IPs, {} threat{})",
-                        now,
-                        dest,
-                        report.ips.len(),
-                        threats,
-                        if threats == 1 { "" } else { "s" },
-                    );
+                    // G2: Alert when new threats appear — terminal bell + highlighted line.
+                    if threats > prev_threats {
+                        let new_count = threats - prev_threats;
+                        eprint!("\x07"); // terminal bell
+                        eprintln!(
+                            "\x1b[1;33m[{}] ⚠ {} NEW THREAT{} detected → {}\x1b[0m",
+                            now,
+                            new_count,
+                            if new_count == 1 { "" } else { "S" },
+                            dest,
+                        );
+                    } else {
+                        eprintln!(
+                            "[{}] refreshed → {} ({} IPs, {} threat{})",
+                            now,
+                            dest,
+                            report.ips.len(),
+                            threats,
+                            if threats == 1 { "" } else { "s" },
+                        );
+                    }
+                    prev_threats = threats;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(interval)).await;
             }
@@ -1311,7 +1512,7 @@ WantedBy=default.target
 }
 
 mod scout {
-    use redb::{Database, TableDefinition};
+    use redb::{Database, ReadableTable, TableDefinition};
     use serde::{Deserialize, Serialize};
 
     const SCOUT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("scout");
@@ -2443,6 +2644,161 @@ mod scout {
                 .unwrap_or_default();
 
             Ok(results)
+        }
+    }
+
+    /// G3: Cross-reference identified visitor orgs against cached federal opportunities.
+    ///
+    /// Scans scout.redb for bids and awards whose agency/winner overlaps with org names
+    /// in the report. Appends a styled "Federal Pipeline" section before </body></html>.
+    pub fn cross_reference_html(report: &wbl_detect::t107, html: &str) -> String {
+        let Ok(db) = std::panic::catch_unwind(open_db) else {
+            return html.to_string();
+        };
+
+        // Collect unique, non-empty org names from the report.
+        let orgs: Vec<String> = {
+            let mut seen = std::collections::BTreeSet::new();
+            for rec in report.ips.values() {
+                if let Some(o) = &rec.org {
+                    if !o.is_empty() {
+                        seen.insert(o.to_ascii_lowercase());
+                    }
+                }
+            }
+            seen.into_iter().collect()
+        };
+        if orgs.is_empty() {
+            return html.to_string();
+        }
+
+        let normalize = |s: &str| -> String {
+            s.to_ascii_lowercase()
+                .replace([',', '.', '-', '_'], " ")
+                .split_whitespace()
+                .filter(|w| !["inc", "llc", "ltd", "corp", "co", "the"].contains(w))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+
+        let org_tokens: Vec<Vec<String>> = orgs
+            .iter()
+            .map(|o| {
+                normalize(o)
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .collect();
+
+        let matches_org = |candidate: &str| -> bool {
+            let c = normalize(candidate);
+            org_tokens.iter().any(|tokens| {
+                !tokens.is_empty() && tokens.iter().all(|tok| c.contains(tok.as_str()))
+            })
+        };
+
+        // Scan all bids.
+        let mut matching_bids: Vec<Bid> = Vec::new();
+        let mut matching_awards: Vec<Award> = Vec::new();
+        if let Ok(rtx) = db.begin_read() {
+            if let Ok(tbl) = rtx.open_table(SCOUT_TABLE) {
+                if let Ok(iter) = tbl.iter() {
+                    for item in iter.flatten() {
+                        let key = String::from_utf8_lossy(item.0.value()).to_string();
+                        let raw = decompress(item.1.value());
+                        if key.starts_with("bid:") {
+                            if let Ok(b) = serde_json::from_slice::<Bid>(&raw) {
+                                if matches_org(&b.agency) {
+                                    matching_bids.push(b);
+                                }
+                            }
+                        } else if key.starts_with("award:") {
+                            if let Ok(a) = serde_json::from_slice::<Award>(&raw) {
+                                if matches_org(&a.winner) || matches_org(&a.agency) {
+                                    matching_awards.push(a);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if matching_bids.is_empty() && matching_awards.is_empty() {
+            return html.to_string();
+        }
+
+        let esc = |s: &str| -> String {
+            s.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+        };
+
+        let mut section = String::from(
+            r#"<div style="background:#0d0d14;border-top:1px solid rgba(0,217,255,.15);padding:24px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;">
+<div style="font-size:9px;letter-spacing:.2em;text-transform:uppercase;color:#9ca3af;margin-bottom:16px;">Federal Pipeline · cross-referenced from scout cache</div>"#,
+        );
+
+        if !matching_bids.is_empty() {
+            section.push_str(r#"<div style="font-size:9px;color:#00d9ff;letter-spacing:.15em;text-transform:uppercase;margin-bottom:8px;">Open Opportunities</div>"#);
+            for b in matching_bids.iter().take(10) {
+                let _ = std::fmt::write(
+                    &mut section,
+                    format_args!(
+                        r#"<div style="padding:8px 10px;border:1px solid rgba(0,217,255,.1);border-radius:4px;margin-bottom:6px;">
+  <div style="color:#e8e8e8;font-weight:600;">{title}</div>
+  <div style="color:#9ca3af;margin-top:2px;">{agency} · {source} · posted {posted}</div>
+  {deadline}
+  <a href="{url}" style="color:#00d9ff;font-size:10px;" target="_blank" rel="noopener">view opportunity →</a>
+</div>"#,
+                        title = esc(&b.title),
+                        agency = esc(&b.agency),
+                        source = esc(&b.source),
+                        posted = esc(&b.posted),
+                        deadline = if b.deadline.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                r#"<div style="color:#ff6b35;font-size:10px;">deadline: {}</div>"#,
+                                esc(&b.deadline)
+                            )
+                        },
+                        url = esc(&b.url),
+                    ),
+                );
+            }
+        }
+
+        if !matching_awards.is_empty() {
+            section.push_str(r#"<div style="font-size:9px;color:#00ffcc;letter-spacing:.15em;text-transform:uppercase;margin:16px 0 8px;">Past Awards (competitive intel)</div>"#);
+            for a in matching_awards.iter().take(8) {
+                let _ = std::fmt::write(
+                    &mut section,
+                    format_args!(
+                        r#"<div style="padding:8px 10px;border:1px solid rgba(0,255,204,.1);border-radius:4px;margin-bottom:6px;">
+  <div style="color:#e8e8e8;font-weight:600;">{winner}</div>
+  <div style="color:#9ca3af;margin-top:2px;">{agency} · ${amount:.0}K · {date}</div>
+  <a href="{url}" style="color:#00ffcc;font-size:10px;" target="_blank" rel="noopener">view award →</a>
+</div>"#,
+                        winner = esc(&a.winner),
+                        agency = esc(&a.agency),
+                        amount = a.amount / 1000.0,
+                        date = esc(&a.date),
+                        url = esc(&a.url),
+                    ),
+                );
+            }
+        }
+
+        section.push_str("</div>");
+
+        // Inject before </body></html>.
+        if let Some(pos) = html.rfind("</body></html>") {
+            format!("{}{}{}", &html[..pos], section, &html[pos..])
+        } else {
+            format!("{}{}", html, section)
         }
     }
 }
@@ -3883,6 +4239,112 @@ mod actor_history {
     }
 }
 
+/// G9: Report history registry — records rendered HTML report paths so `/reports` can list them.
+mod report_history {
+    #[cfg(feature = "serve")]
+    use redb::ReadableTable;
+    use redb::{Database, TableDefinition};
+    use serde::{Deserialize, Serialize};
+    use std::path::PathBuf;
+
+    const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("report_index");
+
+    #[derive(Serialize, Deserialize, Clone)]
+    pub struct ReportEntry {
+        pub path: String,
+        pub source_label: String,
+        pub total_ips: usize,
+        pub threat_count: u32,
+        pub generated_at: u64,
+    }
+
+    fn db_path() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("whobelooking")
+            .join("reports.redb")
+    }
+
+    fn open_db() -> Option<Database> {
+        let p = db_path();
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        Database::create(&p).ok()
+    }
+
+    pub fn record(path: &str, source_label: &str, report: &wbl_detect::t107) {
+        let db = match open_db() {
+            Some(db) => db,
+            None => return,
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let entry = ReportEntry {
+            path: path.to_string(),
+            source_label: source_label.to_string(),
+            total_ips: report.ips.len(),
+            threat_count: report.class_counts.get("threat").copied().unwrap_or(0),
+            generated_at: now,
+        };
+        let wtx = match db.begin_write() {
+            Ok(tx) => tx,
+            Err(_) => return,
+        };
+        {
+            let mut table = match wtx.open_table(TABLE) {
+                Ok(t) => t,
+                Err(_) => return,
+            };
+            if let Ok(encoded) = bincode::serde::encode_to_vec(&entry, bincode::config::standard())
+            {
+                let _ = table.insert(now, encoded.as_slice());
+            }
+        }
+        let _ = wtx.commit();
+    }
+
+    #[cfg(feature = "serve")]
+    pub fn list(limit: usize) -> Vec<ReportEntry> {
+        let db = match open_db() {
+            Some(db) => db,
+            None => return Vec::new(),
+        };
+        let rtx = match db.begin_read() {
+            Ok(tx) => tx,
+            Err(_) => return Vec::new(),
+        };
+        let table = match rtx.open_table(TABLE) {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
+        };
+        let mut entries: Vec<ReportEntry> = table
+            .iter()
+            .ok()
+            .map(|iter| {
+                iter.rev()
+                    .take(limit)
+                    .filter_map(|r| {
+                        r.ok().and_then(|(_, v)| {
+                            bincode::serde::decode_from_slice::<ReportEntry, _>(
+                                v.value(),
+                                bincode::config::standard(),
+                            )
+                            .ok()
+                            .map(|(e, _)| e)
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Filter to entries whose file still exists on disk.
+        entries.retain(|e| std::path::Path::new(&e.path).exists());
+        entries
+    }
+}
+
 mod dns {
     use hickory_resolver::TokioResolver;
     use hickory_resolver::lookup::Lookup;
@@ -4001,6 +4463,52 @@ mod dns {
             }
         }
         Ok(results)
+    }
+}
+
+/// G10: GeoIP via ip-api.com batch endpoint.
+///
+/// Returns ISO-3166-1 alpha-2 country codes for up to 100 IPs per call.
+/// Uses the free unauthenticated batch endpoint — country only, no personal data.
+mod ipapi {
+    use std::collections::BTreeMap;
+
+    #[derive(serde::Deserialize)]
+    struct IpApiEntry {
+        query: String,
+        #[serde(rename = "countryCode")]
+        country_code: Option<String>,
+        status: String,
+    }
+
+    pub async fn batch_country(ips: &[String]) -> anyhow::Result<BTreeMap<String, String>> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .build()?;
+        let mut out = BTreeMap::new();
+        for chunk in ips.chunks(100) {
+            let body: Vec<serde_json::Value> = chunk
+                .iter()
+                .map(|ip| serde_json::json!({"query": ip, "fields": "query,status,countryCode"}))
+                .collect();
+            let resp = client
+                .post("http://ip-api.com/batch?fields=query,status,countryCode")
+                .json(&body)
+                .send()
+                .await;
+            if let Ok(r) = resp {
+                if let Ok(entries) = r.json::<Vec<IpApiEntry>>().await {
+                    for e in entries {
+                        if e.status == "success" {
+                            if let Some(cc) = e.country_code {
+                                out.insert(e.query, cc);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 }
 

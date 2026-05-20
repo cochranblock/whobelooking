@@ -9,6 +9,7 @@ pub mod feedback;
 pub mod metrics;
 pub mod openapi;
 pub mod pages;
+pub mod reports;
 pub mod router;
 pub mod scan;
 pub mod try_page;

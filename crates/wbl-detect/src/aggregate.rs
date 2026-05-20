@@ -53,6 +53,9 @@ pub struct t105 {
     pub history_total_reports: Option<u32>,
     /// Cumulative hit count across all prior reports.
     pub history_total_hits: Option<u32>,
+    /// IPs sharing the same primary UA get the same group ID (≥ 2 members).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ua_group_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -292,8 +295,146 @@ pub fn f401(events: &[t100]) -> t107 {
         *report.class_counts.entry(c.name().to_string()).or_insert(0) += 1;
     }
 
+    // UA grouping: IPs sharing the same primary UA get the same group_id.
+    f408(&mut report);
+
     report.distinct_paths = distinct_paths.len();
     report
+}
+
+/// f408 = assign_ua_groups.
+///
+/// Groups IPs that share the same top user-agent string. Singletons are left
+/// with `ua_group_id = None`. Groups with 2+ members get a shared numeric ID
+/// (1-based). Called once at the end of `f401` and after `f402` enrichment.
+pub fn f408(report: &mut t107) {
+    // primary UA per IP (max-count UA string)
+    let mut ua_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (ip, rec) in &report.ips {
+        let primary = rec
+            .user_agents
+            .iter()
+            .max_by_key(|(_, n)| *n)
+            .map(|(u, _)| u.clone())
+            .unwrap_or_default();
+        if !primary.is_empty() {
+            ua_map.entry(primary).or_default().push(ip.clone());
+        }
+    }
+    let mut next_id: u32 = 1;
+    for ips in ua_map.values() {
+        if ips.len() < 2 {
+            continue;
+        }
+        let gid = next_id;
+        next_id += 1;
+        for ip in ips {
+            if let Some(rec) = report.ips.get_mut(ip) {
+                rec.ua_group_id = Some(gid);
+            }
+        }
+    }
+}
+
+/// f404s = classify_signals.
+///
+/// Returns a human-readable list of the evidence that drove the classification
+/// for this record. Mirrors the logic in `f404c` so signals stay in sync with
+/// the assigned class and confidence.
+pub fn f404s(rec: &t105) -> Vec<String> {
+    let uas: Vec<String> = rec
+        .user_agents
+        .keys()
+        .map(|u| u.to_ascii_lowercase())
+        .collect();
+    let has_browser_ua = uas
+        .iter()
+        .any(|u| BROWSER_HINTS.iter().any(|h| u.contains(h)));
+
+    let attack_paths: Vec<_> = rec
+        .paths
+        .keys()
+        .filter(|p| {
+            let pl = p.to_ascii_lowercase();
+            ATTACK_PATHS.iter().any(|a| pl.contains(a))
+        })
+        .collect();
+
+    let mut sigs: Vec<String> = Vec::new();
+
+    if !attack_paths.is_empty() {
+        for p in attack_paths.iter().take(5) {
+            sigs.push(format!("attack path: {}", p));
+        }
+        if rec.hits > 5 {
+            sigs.push(format!("{} hits (persistent)", rec.hits));
+        }
+        if !has_browser_ua {
+            sigs.push("no browser UA (pure scanner)".into());
+        }
+        if rec.rdns.as_deref().is_some_and(|r| !r.is_empty()) {
+            sigs.push(format!("rDNS: {}", rec.rdns.as_deref().unwrap_or("")));
+        }
+        return sigs;
+    }
+
+    if !uas.is_empty() && uas.iter().all(|u| BOT_HINTS.iter().any(|h| u.contains(h))) {
+        sigs.push("bot UA fingerprint".into());
+        if rec.rdns.as_deref().is_some_and(|r| {
+            let rl = r.to_ascii_lowercase();
+            ["googlebot", "bingbot", "crawl", "spider", "slurp", "curl"]
+                .iter()
+                .any(|h| rl.contains(h))
+        }) {
+            sigs.push(format!(
+                "verified crawler rDNS: {}",
+                rec.rdns.as_deref().unwrap_or("")
+            ));
+        }
+        if rec.hits > 100 {
+            sigs.push(format!("{} hits (high-volume automation)", rec.hits));
+        }
+        let only_get = rec.methods.len() == 1 && rec.methods.contains_key("GET");
+        if only_get {
+            sigs.push("GET-only (typical crawler)".into());
+        }
+        return sigs;
+    }
+
+    if rec.hits <= 30 && has_browser_ua {
+        sigs.push("browser UA".into());
+        if rec.hits <= 5 {
+            sigs.push(format!("{} hits (targeted human visit)", rec.hits));
+        }
+        if rec.org.as_deref().is_some_and(|o| !o.is_empty()) {
+            sigs.push(format!("named org: {}", rec.org.as_deref().unwrap_or("")));
+        }
+        if rec.rdns.as_deref().is_some_and(|r| !r.is_empty()) {
+            sigs.push(format!(
+                "rDNS resolves: {}",
+                rec.rdns.as_deref().unwrap_or("")
+            ));
+        }
+        if rec.paths.len() > 3 {
+            sigs.push(format!(
+                "{} distinct paths (multi-page browse)",
+                rec.paths.len()
+            ));
+        }
+        return sigs;
+    }
+
+    sigs.push("residual (no strong signal)".into());
+    if has_browser_ua {
+        sigs.push("browser UA present".into());
+    }
+    if rec.org.as_deref().is_some_and(|o| !o.is_empty()) {
+        sigs.push(format!("org: {}", rec.org.as_deref().unwrap_or("")));
+    }
+    if rec.hits >= 5 && rec.hits <= 100 {
+        sigs.push(format!("{} hits", rec.hits));
+    }
+    sigs
 }
 
 /// Enrichment overlay passed in from the caller (JS does the actual DoH +
@@ -357,6 +498,9 @@ pub fn f402(report: &mut t107, enrich: &BTreeMap<String, t108>) {
         rec.confidence = Some(conf);
         *report.class_counts.entry(c.name().to_string()).or_insert(0) += 1;
     }
+    // Re-run UA grouping — enrichment may have changed org/rDNS but UAs are
+    // stable, so this is cheap and keeps group IDs consistent.
+    f408(report);
 }
 
 /// f403 = ips_needing_enrichment.

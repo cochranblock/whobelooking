@@ -8,7 +8,7 @@ use axum::{
 };
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
-use super::{admin, cf_pull, detect, enrichment, metrics, openapi, pages, scan, try_page};
+use super::{admin, cf_pull, detect, enrichment, metrics, openapi, pages, reports, scan, try_page};
 
 pub fn build() -> Router {
     Router::new()
@@ -79,6 +79,8 @@ pub fn build() -> Router {
         .route("/skill", get(openapi::skill_md))
         .route("/skill.md", get(openapi::skill_md))
         .route("/install-skill.sh", get(openapi::install_skill_sh))
+        // G9: Report history — lists locally generated HTML reports.
+        .route("/reports", get(reports::index))
         // Admin (token-gated)
         .route("/admin", get(admin::dashboard))
         .route("/metrics", get(metrics::endpoint))

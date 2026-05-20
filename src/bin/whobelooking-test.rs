@@ -950,8 +950,8 @@ fn test_try_html_has_drop_zone() -> Result<(), String> {
         return Err("/try must have id=\"report-shell\" report-mode element".into());
     }
     // Source has Title Case; the CSS uppercases on render via text-transform.
-    if !TRY_HTML.contains("Drop log file here") {
-        return Err("/try drop zone must say Drop log file here".into());
+    if !TRY_HTML.contains("Drop log file") {
+        return Err("/try drop zone must say Drop log file".into());
     }
     Ok(())
 }
